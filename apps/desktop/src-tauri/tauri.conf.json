@@ -39,11 +39,21 @@
     ],
     "macOS": {
       "minimumSystemVersion": "10.15"
-    }
+    },
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "shell": {
       "open": true
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM5NEUyMDE0OTEwQjgyOTAKUldTUWdndVJGQ0JPeWRmOFh2SWJEZmZiSVNTSXpuNVQzUWZtSy84MnA4WXd1aTlaTlprUXo3VmoK",
+      "endpoints": [
+        "https://github.com/nicepkg/postgate/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

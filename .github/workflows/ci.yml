@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-action@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './apps/desktop/src-tauri -> target'
+
+      - name: Install dependencies (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Lint frontend
+        run: pnpm --filter @postgate/desktop lint
+
+      - name: Typecheck frontend
+        run: pnpm --filter @postgate/desktop typecheck
+
+      - name: Build frontend
+        run: pnpm --filter @postgate/desktop build
+
+      - name: Check Rust
+        working-directory: apps/desktop/src-tauri
+        run: cargo check
+
+      - name: Clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy -- -D warnings
+
+      - name: Test Rust
+        working-directory: apps/desktop/src-tauri
+        run: cargo test

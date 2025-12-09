@@ -48,3 +48,6 @@ Thumbs.db
 *.AppImage
 *.msi
 *.exe
+
+# VSCode Plugins
+.history

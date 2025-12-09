@@ -17,28 +17,30 @@ tauri-build = { version = "2", features = [] }
 # Tauri
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Async Runtime
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 
 # HTTP/Networking
-hyper = { version = "1.5", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
-bytes = "1.9"
+bytes = "1"
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
-webpki-roots = "0.26"
+webpki-roots = "1"
 hyper-rustls = { version = "0.27", features = ["http1", "http2", "webpki-tokio"] }
 
 # Certificate Generation
 rcgen = "0.13"
-x509-parser = "0.16"
+x509-parser = "0.18"
 time = "0.3"
 
 # HTTP/2
@@ -48,7 +50,7 @@ h2 = "0.4"
 quinn = { version = "0.11", optional = true }
 
 # Concurrent Data Structures
-dashmap = "6.1"
+dashmap = "6"
 parking_lot = "0.12"
 
 # Error Handling
@@ -60,21 +62,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utils
-uuid = { version = "1.11", features = ["v4", "serde"] }
-regex = "1.11"
+uuid = { version = "1", features = ["v4", "serde"] }
+regex = "1"
 glob = "0.3"
 url = "2"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2"
 urlencoding = "2"
-which = "7"
+which = "8"
 
 # Storage
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
 # WebSocket
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.26"
 futures-util = "0.3"
 
 [features]

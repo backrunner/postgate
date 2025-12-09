@@ -12,7 +12,12 @@
     "api"
   ],
   "license": "MIT",
-  "peerDependencies": {
-    "@postgate/plugin-sdk": "^0.1.0"
+  "engines": {
+    "postgate": ">=0.1.0"
+  },
+  "postgate": {
+    "name": "Mock API",
+    "description": "Provides mock API responses for testing",
+    "icon": "Database"
   }
 }

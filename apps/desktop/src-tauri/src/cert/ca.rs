@@ -79,11 +79,35 @@ impl CertificateAuthority {
         let key_pair = KeyPair::from_pem(&key_pem)
             .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA key: {}", e)))?;
 
-        // Parse the certificate from PEM
-        let params = CertificateParams::from_ca_cert_pem(&cert_pem)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA cert params: {}", e)))?;
+        // Parse certificate to extract information
+        let pem_parsed = pem::parse(&cert_pem)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA cert PEM: {}", e)))?;
+        
+        let cert = x509_parser::parse_x509_certificate(&pem_parsed.contents())
+            .map_err(|e| PostGateError::Certificate(format!("Failed to parse X509 certificate: {}", e)))?
+            .1;
 
-        // Recreate the certificate
+        // Create minimal params for CA loading - we just need to recreate the cert
+        let mut params = CertificateParams::default();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        
+        // Extract subject from original cert
+        let subject_cn = cert.subject()
+            .iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok())
+            .unwrap_or("PostGate CA");
+        
+        params.distinguished_name.push(
+            rcgen::DnType::CommonName,
+            subject_cn,
+        );
+
+        // Recreate the certificate with the loaded key
         let ca_cert = params
             .self_signed(&key_pair)
             .map_err(|e| PostGateError::Certificate(format!("Failed to recreate CA cert: {}", e)))?;

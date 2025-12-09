@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 
 // Plugin types matching Rust backend
 export interface PluginInfo {
@@ -22,12 +23,18 @@ export interface PluginPanel {
   content: { type: 'html'; html: string } | { type: 'iframe'; url: string };
 }
 
+export interface PluginToast {
+  message: string;
+  toast_type: 'info' | 'success' | 'warning' | 'error' | null;
+}
+
 interface PluginsState {
   plugins: PluginInfo[];
   panels: PluginPanel[];
   pluginsDir: string | null;
   isLoading: boolean;
   error: string | null;
+  toasts: PluginToast[];
   
   // Actions
   fetchPlugins: () => Promise<void>;
@@ -38,6 +45,13 @@ interface PluginsState {
   uninstallPlugin: (pluginId: string) => Promise<void>;
   fetchPanels: () => Promise<void>;
   fetchPluginsDir: () => Promise<void>;
+  
+  // Event handling
+  addPanel: (panel: PluginPanel) => void;
+  removePanel: (panelId: string) => void;
+  addToast: (toast: PluginToast) => void;
+  clearToast: (index: number) => void;
+  setupEventListeners: () => Promise<UnlistenFn[]>;
 }
 
 export const usePluginsStore = create<PluginsState>((set, get) => ({
@@ -46,6 +60,7 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
   pluginsDir: null,
   isLoading: false,
   error: null,
+  toasts: [],
 
   fetchPlugins: async () => {
     set({ isLoading: true, error: null });
@@ -133,5 +148,68 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
     } catch (error) {
       console.error('Failed to fetch plugins directory:', error);
     }
+  },
+
+  // Event handling for real-time updates from plugins
+  addPanel: (panel: PluginPanel) => {
+    set((state) => {
+      // Avoid duplicates
+      const exists = state.panels.some((p) => p.id === panel.id);
+      if (exists) {
+        return { panels: state.panels.map((p) => (p.id === panel.id ? panel : p)) };
+      }
+      return { panels: [...state.panels, panel] };
+    });
+  },
+
+  removePanel: (panelId: string) => {
+    set((state) => ({
+      panels: state.panels.filter((p) => p.id !== panelId),
+    }));
+  },
+
+  addToast: (toast: PluginToast) => {
+    set((state) => ({
+      toasts: [...state.toasts, toast],
+    }));
+    // Auto-clear toast after 5 seconds
+    setTimeout(() => {
+      set((state) => ({
+        toasts: state.toasts.slice(1),
+      }));
+    }, 5000);
+  },
+
+  clearToast: (index: number) => {
+    set((state) => ({
+      toasts: state.toasts.filter((_, i) => i !== index),
+    }));
+  },
+
+  setupEventListeners: async () => {
+    const unlisteners: UnlistenFn[] = [];
+
+    // Listen for panel registration events
+    const unlistenPanelRegistered = await listen<PluginPanel>('plugin:panel-registered', (event) => {
+      console.log('Panel registered:', event.payload);
+      get().addPanel(event.payload);
+    });
+    unlisteners.push(unlistenPanelRegistered);
+
+    // Listen for panel unregistration events
+    const unlistenPanelUnregistered = await listen<string>('plugin:panel-unregistered', (event) => {
+      console.log('Panel unregistered:', event.payload);
+      get().removePanel(event.payload);
+    });
+    unlisteners.push(unlistenPanelUnregistered);
+
+    // Listen for toast events
+    const unlistenToast = await listen<PluginToast>('plugin:toast', (event) => {
+      console.log('Plugin toast:', event.payload);
+      get().addToast(event.payload);
+    });
+    unlisteners.push(unlistenToast);
+
+    return unlisteners;
   },
 }));

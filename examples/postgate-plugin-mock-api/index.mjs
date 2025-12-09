@@ -2,6 +2,7 @@
  * PostGate Mock API Plugin
  * 
  * A sample plugin that demonstrates how to create mock API responses.
+ * This plugin uses the built-in PostGate runtime APIs (no external dependencies needed).
  * 
  * Usage in rules:
  *   api.example.com/users plugin://mock-api?status=200&delay=100
@@ -50,7 +51,16 @@ const defaultMocks = {
   },
 };
 
-/** @type {import('@postgate/plugin-sdk').PostGatePlugin} */
+/**
+ * PostGate Plugin Definition
+ * 
+ * The plugin object is automatically detected by the runtime.
+ * Available context APIs:
+ *   - ctx.logger: { debug, info, warn, error }
+ *   - ctx.storage: { get, set, delete, has, keys, clear }
+ *   - ctx.ui: { registerPanel, unregisterPanel, toast }
+ *   - ctx.config: Configuration object from the matched rule
+ */
 export default {
   name: 'mock-api',
   version: '1.0.0',
@@ -62,6 +72,7 @@ export default {
     // Register a UI panel
     ctx.ui.registerPanel({
       id: 'mock-api-panel',
+      plugin_id: 'mock-api',
       title: 'Mock API',
       icon: 'Database',
       content: {
@@ -89,18 +100,24 @@ export default {
     });
 
     // Initialize mock data from storage if available
-    const storedMocks = await ctx.storage.get('customMocks');
-    if (storedMocks) {
-      for (const [key, value] of Object.entries(storedMocks)) {
-        mockData.set(key, value);
+    try {
+      const storedMocks = await ctx.storage.get('customMocks');
+      if (storedMocks) {
+        for (const [key, value] of Object.entries(storedMocks)) {
+          mockData.set(key, value);
+        }
+        ctx.logger.info(`Loaded ${mockData.size} custom mocks from storage`);
       }
+    } catch (e) {
+      ctx.logger.warn('Failed to load custom mocks from storage: ' + e.message);
     }
 
     ctx.ui.toast('Mock API plugin ready', 'success');
   },
 
-  async onUnload() {
-    console.log('Mock API plugin unloading...');
+  async onUnload(ctx) {
+    ctx.logger.info('Mock API plugin unloading...');
+    ctx.ui.unregisterPanel('mock-api-panel');
   },
 
   async handleRequest(request, ctx) {
@@ -139,20 +156,25 @@ export default {
 
     // Create response
     const responseBody = JSON.stringify(mockResponse.data, null, 2);
+    const bodyBytes = new TextEncoder().encode(responseBody);
     
+    // Return response in the format expected by PostGate
+    // body should be base64 encoded
     return {
       status: mockResponse.status,
       headers: {
         'content-type': contentType,
+        'content-length': String(bodyBytes.length),
         'x-mock-api': 'true',
         'x-mock-delay': String(delay),
       },
-      body: new TextEncoder().encode(responseBody),
+      body: btoa(String.fromCharCode(...bodyBytes)),
+      body_base64: true,
     };
   },
 
   async handleResponse(request, response, ctx) {
-    // Pass through - we don't modify responses
+    // Pass through - we don't modify responses in this plugin
     return response;
   },
 };
@@ -208,4 +230,22 @@ function matchPath(pattern, path) {
   }
 
   return true;
+}
+
+// Helper: Base64 encode (if btoa is not available)
+if (typeof btoa === 'undefined') {
+  globalThis.btoa = function(str) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+    let output = '';
+    for (let i = 0; i < str.length; i += 3) {
+      const a = str.charCodeAt(i);
+      const b = str.charCodeAt(i + 1);
+      const c = str.charCodeAt(i + 2);
+      output += chars[a >> 2];
+      output += chars[((a & 3) << 4) | (b >> 4)];
+      output += chars[isNaN(b) ? 64 : ((b & 15) << 2) | (c >> 6)];
+      output += chars[isNaN(c) ? 64 : (c & 63)];
+    }
+    return output;
+  };
 }

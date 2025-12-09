@@ -1,6 +1,7 @@
 use crate::cert::CertificateAuthority;
 use crate::debug::ScriptInjector;
 use crate::error::Result;
+use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::pool::ConnectionPool;
 use crate::proxy::BodyStorage;
@@ -243,14 +244,84 @@ async fn handle_request(
                 response_content_type.as_deref(),
             );
 
+            // Apply plugin handleResponse if a plugin was matched
+            let (plugin_modified_body, plugin_modified_headers) = if let Some(ref plugin_info) = request_modification.plugin {
+                // Build PluginRequest from request data
+                let plugin_request = PluginRequest {
+                    id: request_id.clone(),
+                    method: method.clone(),
+                    url: uri.clone(),
+                    host: host.clone(),
+                    path: path.clone(),
+                    query: extract_query_params(&uri),
+                    headers: request_headers.clone(),
+                    body: Some(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &request_body.data,
+                    )),
+                    body_base64: true,
+                    timestamp,
+                };
+
+                // Build PluginResponse from response data
+                let plugin_response = PluginResponse {
+                    status,
+                    headers: response_headers.clone(),
+                    body: Some(base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &response_body.data,
+                    )),
+                    body_base64: true,
+                };
+
+                // Build context from rule config
+                let plugin_context = PluginRequestContext {
+                    rule_config: match &plugin_info.config {
+                        serde_json::Value::Object(map) => map.iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect(),
+                        _ => std::collections::HashMap::new(),
+                    },
+                    matched_pattern: uri.clone(),
+                };
+
+                // Call plugin handleResponse
+                let plugin_manager = ctx.app_state.plugin_manager.read().await;
+                match plugin_manager.handle_response(&plugin_info.name, plugin_request, plugin_response, plugin_context).await {
+                    Ok(modified) => {
+                        // Decode the modified body if base64 encoded
+                        let decoded_body = if modified.body_base64 {
+                            modified.body.as_ref()
+                                .and_then(|b| base64::Engine::decode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    b,
+                                ).ok())
+                                .map(Bytes::from)
+                        } else {
+                            modified.body.as_ref().map(|b| Bytes::from(b.clone()))
+                        };
+                        (decoded_body, Some(modified.headers))
+                    }
+                    Err(e) => {
+                        tracing::warn!("Plugin handleResponse failed for {}: {}", plugin_info.name, e);
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
             // Apply response delay if specified
             if let Some(delay_ms) = response_modification.delay_ms {
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
             }
 
-            // Use modified body and headers
-            let mut final_body = response_modification.body.unwrap_or(response_body.data.clone());
-            let mut final_headers = response_modification.headers;
+            // Use modified body and headers (plugin modifications take precedence)
+            let mut final_body = plugin_modified_body
+                .or(response_modification.body)
+                .unwrap_or(response_body.data.clone());
+            let mut final_headers = plugin_modified_headers
+                .unwrap_or(response_modification.headers);
 
             // Inject debug script if enabled
             if response_modification.inject_debug {
@@ -417,6 +488,17 @@ async fn forward_http_request(
     let resp_without_body = Response::from_parts(parts, ());
     
     Ok((resp_without_body, captured_body))
+}
+
+/// Extract query parameters from URL
+fn extract_query_params(uri: &str) -> HashMap<String, String> {
+    url::Url::parse(uri)
+        .map(|u| {
+            u.query_pairs()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Extract host from request

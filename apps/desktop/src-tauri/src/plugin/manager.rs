@@ -5,6 +5,7 @@ use crate::plugin::runtime::PluginRuntime;
 use crate::plugin::types::*;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,6 +21,10 @@ pub struct PluginManager {
     runtimes: Arc<RwLock<HashMap<String, PluginRuntime>>>,
     /// Registered panels from plugins
     panels: DashMap<String, PluginPanel>,
+    /// Database connection pool for plugin storage
+    db_pool: Option<SqlitePool>,
+    /// Tauri app handle for emitting events
+    app_handle: Option<tauri::AppHandle>,
 }
 
 impl PluginManager {
@@ -30,7 +35,19 @@ impl PluginManager {
             plugins: DashMap::new(),
             runtimes: Arc::new(RwLock::new(HashMap::new())),
             panels: DashMap::new(),
+            db_pool: None,
+            app_handle: None,
         }
+    }
+
+    /// Set the database pool for plugin storage
+    pub fn set_db_pool(&mut self, pool: SqlitePool) {
+        self.db_pool = Some(pool);
+    }
+
+    /// Set the Tauri app handle for emitting events
+    pub fn set_app_handle(&mut self, handle: tauri::AppHandle) {
+        self.app_handle = Some(handle);
     }
 
     /// Initialize the plugin manager and discover plugins
@@ -147,10 +164,14 @@ impl PluginManager {
             return Ok(());
         }
 
+        // Ensure we have a database pool
+        let db_pool = self.db_pool.clone()
+            .ok_or_else(|| PostGateError::Plugin("Database pool not initialized".into()))?;
+
         let plugin_path = PathBuf::from(&info.path).join(&info.entry);
         
         let mut runtime = PluginRuntime::new(id.to_string(), plugin_path);
-        runtime.start(config).await?;
+        runtime.start(config, db_pool, self.app_handle.clone()).await?;
 
         // Update plugin state
         if let Some(mut entry) = self.plugins.get_mut(id) {

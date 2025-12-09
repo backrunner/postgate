@@ -146,6 +146,32 @@ impl Database {
         .await
         .ok(); // Index creation failure should not block startup
 
+        // Plugin storage table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS plugin_storage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plugin_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now') * 1000),
+                UNIQUE(plugin_id, key)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Migration failed (plugin_storage): {}", e)))?;
+
+        // Index for plugin storage lookups
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_plugin_storage_plugin_key ON plugin_storage(plugin_id, key)"
+        )
+        .execute(&self.pool)
+        .await
+        .ok();
+
         Ok(())
     }
 

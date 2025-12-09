@@ -41,7 +41,16 @@ pub fn run() {
             let app_handle = app.handle().clone();
             
             // Initialize app state
-            let state = Arc::new(AppState::new(app_handle));
+            let state = Arc::new(AppState::new(app_handle.clone()));
+            
+            // Initialize plugin system asynchronously
+            let state_clone = state.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = initialize_plugin_system(state_clone, app_handle).await {
+                    tracing::error!("Failed to initialize plugin system: {}", e);
+                }
+            });
+            
             app.manage(state);
 
             tracing::info!("PostGate initialized successfully");
@@ -109,4 +118,33 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Initialize the plugin system
+async fn initialize_plugin_system(
+    state: Arc<AppState>,
+    app_handle: tauri::AppHandle,
+) -> error::Result<()> {
+    // Get database pool
+    let db = state.get_database().await?;
+    let pool = db.pool().clone();
+
+    // Initialize plugin storage table
+    plugin::PluginStorage::init_table(&pool).await?;
+
+    // Configure plugin manager with db and app handle
+    {
+        let mut manager = state.plugin_manager.write().await;
+        manager.set_db_pool(pool);
+        manager.set_app_handle(app_handle);
+    }
+
+    // Initialize and discover plugins
+    {
+        let manager = state.plugin_manager.read().await;
+        manager.init().await?;
+    }
+
+    tracing::info!("Plugin system initialized");
+    Ok(())
 }

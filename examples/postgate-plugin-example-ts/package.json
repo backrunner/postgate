@@ -1,0 +1,28 @@
+{
+  "name": "postgate-plugin-example-ts",
+  "version": "1.0.0",
+  "description": "Example PostGate plugin using TypeScript and the SDK",
+  "author": "PostGate Team",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "postgate",
+    "plugin",
+    "example",
+    "typescript"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@postgate/plugin-sdk": "workspace:*",
+    "typescript": "^5.0.0"
+  },
+  "postgate": {
+    "name": "Example TS Plugin",
+    "description": "Demonstrates TypeScript plugin development",
+    "icon": "Code"
+  }
+}

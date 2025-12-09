@@ -1,15 +1,56 @@
 /**
  * PostGate Plugin SDK
  *
- * This SDK provides the types and utilities needed to create PostGate plugins.
+ * This SDK provides TypeScript types and utilities for creating PostGate plugins.
+ *
+ * **Important**: Plugins run in an embedded V8 runtime (Deno Core), not Node.js.
+ * The runtime provides global APIs via the `PostGate` namespace:
+ * - `PostGate.storage` - Persistent key-value storage
+ * - `PostGate.ui` - UI registration (panels, toasts)
+ * - `PostGate.createLogger()` - Logging utilities
+ *
+ * This SDK is optional - you can use it for TypeScript type checking,
+ * or write plugins in plain JavaScript using the global APIs directly.
  *
  * Plugins should be published to npm with the naming convention `postgate-plugin-*`.
  *
  * @example
  * ```typescript
- * import { definePlugin, PluginContext, PluginRequest, PluginResponse } from '@postgate/plugin-sdk';
+ * // TypeScript with SDK types
+ * import type { PostGatePlugin, PluginContext, PluginRequest, PluginResponse } from '@postgate/plugin-sdk';
  *
- * export default definePlugin({
+ * const plugin: PostGatePlugin = {
+ *   name: 'my-plugin',
+ *   version: '1.0.0',
+ *
+ *   async onLoad(ctx) {
+ *     ctx.logger.info('Plugin loaded');
+ *     ctx.ui.registerPanel({
+ *       id: 'my-panel',
+ *       plugin_id: 'my-plugin',
+ *       title: 'My Panel',
+ *       content: { type: 'html', html: '<h1>Hello</h1>' }
+ *     });
+ *   },
+ *
+ *   async handleRequest(request, ctx) {
+ *     // Return a response to short-circuit, or null to pass through
+ *     return null;
+ *   },
+ *
+ *   async handleResponse(request, response, ctx) {
+ *     // Modify and return the response
+ *     return response;
+ *   }
+ * };
+ *
+ * export default plugin;
+ * ```
+ *
+ * @example
+ * ```javascript
+ * // Plain JavaScript (no SDK needed)
+ * export default {
  *   name: 'my-plugin',
  *   version: '1.0.0',
  *
@@ -18,15 +59,14 @@
  *   },
  *
  *   async handleRequest(request, ctx) {
- *     // Modify or respond to the request
- *     return null; // Return null to pass through
- *   },
- *
- *   async handleResponse(request, response, ctx) {
- *     // Modify the response
- *     return response;
+ *     return {
+ *       status: 200,
+ *       headers: { 'content-type': 'application/json' },
+ *       body: btoa(JSON.stringify({ hello: 'world' })),
+ *       body_base64: true
+ *     };
  *   }
- * });
+ * };
  * ```
  */
 
@@ -53,7 +93,7 @@ export interface PostGatePlugin {
    * Called when the plugin is unloaded
    * Use this to clean up resources
    */
-  onUnload?(): Promise<void>;
+  onUnload?(context: PluginContext): Promise<void>;
 
   /**
    * Handle an incoming request that matches this plugin's rule
@@ -76,7 +116,7 @@ export interface PostGatePlugin {
 }
 
 /**
- * Plugin context provided during initialization
+ * Plugin context provided during initialization and lifecycle events
  */
 export interface PluginContext {
   /** Persistent key-value storage for this plugin */
@@ -88,7 +128,7 @@ export interface PluginContext {
   /** UI registration interface */
   ui: PluginUI;
 
-  /** Configuration passed via rule (e.g., plugin://name?config=value) */
+  /** Configuration passed via rule or plugin settings */
   config: Record<string, string>;
 }
 
@@ -131,15 +171,22 @@ export interface PluginRequest {
   /** Request headers (lowercase keys) */
   headers: Record<string, string>;
 
-  /** Request body (null if no body) */
-  body: Uint8Array | null;
+  /**
+   * Request body
+   * - If `body_base64` is true, this is a base64-encoded string
+   * - Otherwise, it's the raw body string
+   */
+  body: string | null;
 
-  /** Timestamp when request was received */
+  /** Whether the body is base64 encoded */
+  body_base64: boolean;
+
+  /** Timestamp when request was received (milliseconds since epoch) */
   timestamp: number;
 }
 
 /**
- * HTTP response returned by the plugin
+ * HTTP response returned by or to the plugin
  */
 export interface PluginResponse {
   /** HTTP status code */
@@ -148,8 +195,15 @@ export interface PluginResponse {
   /** Response headers */
   headers: Record<string, string>;
 
-  /** Response body */
-  body: Uint8Array | null;
+  /**
+   * Response body
+   * - If `body_base64` is true, this should be a base64-encoded string
+   * - Otherwise, it's the raw body string
+   */
+  body: string | null;
+
+  /** Whether the body is base64 encoded */
+  body_base64: boolean;
 }
 
 /**
@@ -163,7 +217,7 @@ export interface PluginStorage {
   set<T = unknown>(key: string, value: T): Promise<void>;
 
   /** Delete a value */
-  delete(key: string): Promise<void>;
+  delete(key: string): Promise<boolean>;
 
   /** Check if a key exists */
   has(key: string): Promise<boolean>;
@@ -212,15 +266,29 @@ export interface UIPanel {
   /** Unique panel ID */
   id: string;
 
+  /** Plugin ID that owns this panel */
+  plugin_id: string;
+
   /** Panel title */
   title: string;
 
   /** Icon name (from lucide-react) */
   icon?: string;
 
-  /** HTML content or URL to iframe */
-  content: string | { type: "iframe"; url: string };
+  /** Panel content - either HTML or an iframe URL */
+  content: UIPanelContent;
 }
+
+/**
+ * Panel content types
+ */
+export type UIPanelContent =
+  | { type: "html"; html: string }
+  | { type: "iframe"; url: string };
+
+// ============================================================================
+// Helper functions
+// ============================================================================
 
 /**
  * Helper to define a plugin with proper typing
@@ -230,25 +298,34 @@ export function definePlugin(plugin: PostGatePlugin): PostGatePlugin {
 }
 
 /**
- * Helper to create a simple response
+ * Helper to create a response with base64-encoded body
  */
 export function createResponse(
   status: number,
   body: string | Uint8Array | object,
   headers: Record<string, string> = {}
 ): PluginResponse {
-  let bodyBytes: Uint8Array | null = null;
   const responseHeaders = { ...headers };
+  let bodyStr: string | null = null;
+  let isBase64 = false;
 
-  if (typeof body === "string") {
-    bodyBytes = new TextEncoder().encode(body);
+  if (body === null || body === undefined) {
+    bodyStr = null;
+  } else if (typeof body === "string") {
+    // Encode string as base64
+    bodyStr = stringToBase64(body);
+    isBase64 = true;
     if (!responseHeaders["content-type"]) {
       responseHeaders["content-type"] = "text/plain; charset=utf-8";
     }
   } else if (body instanceof Uint8Array) {
-    bodyBytes = body;
+    // Encode bytes as base64
+    bodyStr = uint8ArrayToBase64(body);
+    isBase64 = true;
   } else {
-    bodyBytes = new TextEncoder().encode(JSON.stringify(body));
+    // JSON object - encode as base64
+    bodyStr = stringToBase64(JSON.stringify(body));
+    isBase64 = true;
     if (!responseHeaders["content-type"]) {
       responseHeaders["content-type"] = "application/json; charset=utf-8";
     }
@@ -257,7 +334,8 @@ export function createResponse(
   return {
     status,
     headers: responseHeaders,
-    body: bodyBytes,
+    body: bodyStr,
+    body_base64: isBase64,
   };
 }
 
@@ -300,6 +378,7 @@ export function redirectResponse(
     status,
     headers: { location: url },
     body: null,
+    body_base64: false,
   };
 }
 
@@ -310,7 +389,9 @@ export function parseJsonBody<T = unknown>(request: PluginRequest): T | null {
   if (!request.body) return null;
 
   try {
-    const text = new TextDecoder().decode(request.body);
+    const text = request.body_base64
+      ? base64ToString(request.body)
+      : request.body;
     return JSON.parse(text) as T;
   } catch {
     return null;
@@ -322,17 +403,21 @@ export function parseJsonBody<T = unknown>(request: PluginRequest): T | null {
  */
 export function parseTextBody(request: PluginRequest): string | null {
   if (!request.body) return null;
-  return new TextDecoder().decode(request.body);
+  return request.body_base64 ? base64ToString(request.body) : request.body;
 }
 
 /**
  * Parse request body as form data
  */
-export function parseFormBody(request: PluginRequest): Record<string, string> | null {
+export function parseFormBody(
+  request: PluginRequest
+): Record<string, string> | null {
   if (!request.body) return null;
 
   try {
-    const text = new TextDecoder().decode(request.body);
+    const text = request.body_base64
+      ? base64ToString(request.body)
+      : request.body;
     const params = new URLSearchParams(text);
     const result: Record<string, string> = {};
 
@@ -344,4 +429,137 @@ export function parseFormBody(request: PluginRequest): Record<string, string> | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Get response body as text
+ */
+export function getResponseBodyText(response: PluginResponse): string | null {
+  if (!response.body) return null;
+  return response.body_base64
+    ? base64ToString(response.body)
+    : response.body;
+}
+
+/**
+ * Get response body as bytes
+ */
+export function getResponseBodyBytes(response: PluginResponse): Uint8Array | null {
+  if (!response.body) return null;
+  return response.body_base64
+    ? base64ToUint8Array(response.body)
+    : new TextEncoder().encode(response.body);
+}
+
+// ============================================================================
+// Internal utilities
+// ============================================================================
+
+/**
+ * Convert string to base64
+ * Works in both browser and Deno Core runtime
+ */
+function stringToBase64(str: string): string {
+  if (typeof btoa === "function") {
+    // Use built-in btoa (available in our Deno Core runtime)
+    return btoa(unescape(encodeURIComponent(str)));
+  }
+  // Fallback for environments without btoa
+  const bytes = new TextEncoder().encode(str);
+  return uint8ArrayToBase64(bytes);
+}
+
+/**
+ * Convert base64 to string
+ */
+function base64ToString(base64: string): string {
+  if (typeof atob === "function") {
+    return decodeURIComponent(escape(atob(base64)));
+  }
+  // Fallback
+  const bytes = base64ToUint8Array(base64);
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Convert Uint8Array to base64
+ */
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  if (typeof btoa === "function") {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  }
+  // Fallback implementation
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let result = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const a = bytes[i];
+    const b = bytes[i + 1];
+    const c = bytes[i + 2];
+    result += chars[a >> 2];
+    result += chars[((a & 3) << 4) | (b >> 4)];
+    result += chars[b === undefined ? 64 : ((b & 15) << 2) | (c >> 6)];
+    result += chars[c === undefined ? 64 : c & 63];
+  }
+  return result;
+}
+
+/**
+ * Convert base64 to Uint8Array
+ */
+function base64ToUint8Array(base64: string): Uint8Array {
+  if (typeof atob === "function") {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+  // Fallback implementation
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const cleanBase64 = base64.replace(/=+$/, "");
+  const bytes: number[] = [];
+  for (let i = 0; i < cleanBase64.length; i += 4) {
+    const a = chars.indexOf(cleanBase64[i]);
+    const b = chars.indexOf(cleanBase64[i + 1]);
+    const c = chars.indexOf(cleanBase64[i + 2]);
+    const d = chars.indexOf(cleanBase64[i + 3]);
+    bytes.push((a << 2) | (b >> 4));
+    if (c !== -1) bytes.push(((b & 15) << 4) | (c >> 2));
+    if (d !== -1) bytes.push(((c & 3) << 6) | d);
+  }
+  return new Uint8Array(bytes);
+}
+
+// ============================================================================
+// Global type declarations for Deno Core runtime
+// ============================================================================
+
+/**
+ * Global PostGate namespace available in the plugin runtime
+ * This is provided by the Deno Core runtime, not by this SDK
+ */
+declare global {
+  const PostGate: {
+    storage: PluginStorage;
+    ui: PluginUI;
+    createLogger: (pluginId?: string) => PluginLogger;
+    createContext: (config?: Record<string, string>) => PluginContext;
+    _internal: {
+      sendResponse: (requestId: string, response: PluginResponse | null) => void;
+      sendModifiedResponse: (requestId: string, response: PluginResponse) => void;
+      pluginLoaded: () => void;
+      pluginError: (message: string) => void;
+    };
+  };
+
+  // Base64 functions provided by the runtime
+  function btoa(str: string): string;
+  function atob(str: string): string;
 }

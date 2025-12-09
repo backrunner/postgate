@@ -8,9 +8,11 @@ import { DebugPage } from "@/pages/Debug";
 import { PluginsPage } from "@/pages/Plugins";
 import { SettingsPage } from "@/pages/Settings";
 import { useThemeStore } from "@/stores/theme";
+import { usePluginsStore } from "@/stores/plugins";
 
 function App() {
   const theme = useThemeStore((state) => state.theme);
+  const setupPluginEventListeners = usePluginsStore((state) => state.setupEventListeners);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -25,6 +27,22 @@ function App() {
       root.classList.add(theme);
     }
   }, [theme]);
+
+  // Initialize plugin event listeners on mount
+  useEffect(() => {
+    let unlisteners: (() => void)[] = [];
+
+    setupPluginEventListeners().then((listeners) => {
+      unlisteners = listeners;
+    }).catch((error) => {
+      console.error('Failed to setup plugin event listeners:', error);
+    });
+
+    return () => {
+      // Cleanup listeners on unmount
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, [setupPluginEventListeners]);
 
   return (
     <Routes>

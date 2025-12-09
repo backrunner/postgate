@@ -157,18 +157,21 @@ function CellContent({ column, request }: CellContentProps) {
         </span>
       );
 
-    case "host":
+    case "host": {
+      // Use different colors: green for HTTPS (TLS), default for HTTP
+      const isSecure = !!request.tlsInfo;
+      const hasRules = request.matchedRules.length > 0;
       return (
         <span
-          className={`${baseClasses} text-muted-foreground`}
+          className={`${baseClasses} ${isSecure ? "text-emerald-500" : "text-muted-foreground"}`}
           style={style}
-          title={request.host}
+          title={`${isSecure ? "HTTPS" : "HTTP"}: ${request.host}${hasRules ? " (has rules)" : ""}`}
         >
-          {request.tlsInfo && <span className="text-emerald-500 mr-1">S</span>}
-          {request.matchedRules.length > 0 && <span className="text-blue-500 mr-1">R</span>}
+          {hasRules && <span className="text-blue-500 mr-1">●</span>}
           {request.host}
         </span>
       );
+    }
 
     case "path":
       return (

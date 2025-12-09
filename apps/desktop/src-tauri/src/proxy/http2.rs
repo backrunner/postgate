@@ -123,6 +123,8 @@ async fn handle_http2_request(
     ctx.body_storage
         .store_request_body(&request_id, request_body.clone())
         .await;
+    // Persist request body
+    ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
 
     // Forward to upstream via HTTP/2
     match forward_http2_request(&parts, request_body.data, host, port).await {
@@ -146,6 +148,8 @@ async fn handle_http2_request(
             ctx.body_storage
                 .store_response_body(&request_id, response_body.clone())
                 .await;
+            // Persist response body
+            ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
 
             // Emit completion event
             ctx.app_state.emit_request_event(&CapturedRequestEvent {

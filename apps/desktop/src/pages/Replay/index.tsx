@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { 
   Send, 
   FolderPlus, 
@@ -17,7 +17,8 @@ import {
   Search,
   ArrowRight,
   Clock,
-  Database
+  Database,
+  WrapText
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -318,6 +319,7 @@ export function ReplayPage() {
                       items={currentRequest.query_params}
                       onChange={(query_params) => updateCurrentRequest({ query_params })}
                       placeholder="Add query parameter"
+                      showDescription
                     />
                   </TabsContent>
 
@@ -326,6 +328,7 @@ export function ReplayPage() {
                       items={currentRequest.headers}
                       onChange={(headers) => updateCurrentRequest({ headers })}
                       placeholder="Add header"
+                      showDescription
                     />
                   </TabsContent>
 
@@ -390,7 +393,7 @@ export function ReplayPage() {
                       </div>
 
                       <TabsContent value="body" className="m-0 p-0 relative group">
-                         <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                         <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10 flex gap-1">
                           <Button 
                             variant="secondary" 
                             size="sm" 
@@ -401,9 +404,10 @@ export function ReplayPage() {
                             Copy
                           </Button>
                         </div>
-                        <pre className="text-[11px] font-mono p-4 overflow-auto min-h-[200px] bg-background/50">
-                          {response.body || <span className="text-muted-foreground italic">(empty response)</span>}
-                        </pre>
+                        <ResponseBodyView 
+                          body={response.body} 
+                          contentType={response.contentType} 
+                        />
                       </TabsContent>
 
                       <TabsContent value="headers" className="m-0 p-4">
@@ -608,16 +612,17 @@ function RequestItem({ request, isSelected, onSelect, onDelete, onDuplicate, dep
   );
 }
 
-// Key-Value Editor
+// Key-Value Editor (Postman-style)
 interface KeyValueEditorProps {
   items: KeyValuePair[];
   onChange: (items: KeyValuePair[]) => void;
   placeholder?: string;
+  showDescription?: boolean;
 }
 
-function KeyValueEditor({ items, onChange, placeholder }: KeyValueEditorProps) {
+function KeyValueEditor({ items, onChange, placeholder, showDescription = false }: KeyValueEditorProps) {
   const addItem = () => {
-    onChange([...items, { key: "", value: "", enabled: true }]);
+    onChange([...items, { key: "", value: "", enabled: true, description: "" }]);
   };
 
   const updateItem = (index: number, updates: Partial<KeyValuePair>) => {
@@ -630,55 +635,133 @@ function KeyValueEditor({ items, onChange, placeholder }: KeyValueEditorProps) {
     onChange(items.filter((_, i) => i !== index));
   };
 
+  const toggleAll = (enabled: boolean) => {
+    onChange(items.map(item => ({ ...item, enabled })));
+  };
+
+  const removeAll = () => {
+    onChange([]);
+  };
+
+  const enabledCount = items.filter(i => i.enabled).length;
+
   return (
-    <div className="space-y-2">
-      <div className="grid grid-cols-[auto_1fr_1fr_auto] gap-2 items-center text-xs font-medium text-muted-foreground mb-2 px-1">
-        <div className="w-4" />
-        <div>Key</div>
-        <div>Value</div>
-        <div className="w-7" />
-      </div>
-      
-      {items.map((item, index) => (
-        <div key={index} className="grid grid-cols-[auto_1fr_1fr_auto] gap-2 items-center group">
+    <div className="space-y-0">
+      {/* Header row */}
+      <div className="flex items-center gap-2 px-2 py-1.5 bg-muted/30 rounded-t border border-b-0 text-xs font-medium text-muted-foreground">
+        <div className="w-5 flex items-center justify-center">
           <input
             type="checkbox"
-            checked={item.enabled}
-            onChange={(e) => updateItem(index, { enabled: e.target.checked })}
+            checked={items.length > 0 && enabledCount === items.length}
+            ref={(el) => {
+              if (el) el.indeterminate = enabledCount > 0 && enabledCount < items.length;
+            }}
+            onChange={(e) => toggleAll(e.target.checked)}
             className="h-3.5 w-3.5 rounded border-muted-foreground/30 text-primary focus:ring-primary/20"
+            disabled={items.length === 0}
           />
-          <Input
-            value={item.key}
-            onChange={(e) => updateItem(index, { key: e.target.value })}
-            placeholder="Key"
-            className={cn("h-8 text-xs font-mono", !item.enabled && "opacity-50 line-through")}
-          />
-          <Input
-            value={item.value}
-            onChange={(e) => updateItem(index, { value: e.target.value })}
-            placeholder="Value"
-            className={cn("h-8 text-xs font-mono", !item.enabled && "opacity-50 line-through")}
-          />
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            onClick={() => removeItem(index)}
-            className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity hover:text-destructive"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
         </div>
-      ))}
+        <div className="flex-1 min-w-[100px]">Key</div>
+        <div className="flex-1 min-w-[100px]">Value</div>
+        {showDescription && <div className="flex-1 min-w-[80px]">Description</div>}
+        <div className="w-8 flex items-center justify-center">
+          {items.length > 0 && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={removeAll}
+              className="h-5 w-5 hover:text-destructive"
+              title="Remove all"
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          )}
+        </div>
+      </div>
       
-      <Button 
-        variant="outline" 
-        size="sm" 
-        onClick={addItem} 
-        className="text-xs h-7 border-dashed border-border/60 hover:border-primary/50 text-muted-foreground hover:text-primary mt-2"
-      >
-        <Plus className="h-3 w-3 mr-1.5" />
-        {placeholder || "Add Parameter"}
-      </Button>
+      {/* Items */}
+      <div className="border border-t-0 rounded-b divide-y divide-border/50">
+        {items.map((item, index) => (
+          <div 
+            key={index} 
+            className={cn(
+              "flex items-center gap-2 px-2 py-1 group transition-colors",
+              !item.enabled && "bg-muted/20"
+            )}
+          >
+            <div className="w-5 flex items-center justify-center">
+              <input
+                type="checkbox"
+                checked={item.enabled}
+                onChange={(e) => updateItem(index, { enabled: e.target.checked })}
+                className="h-3.5 w-3.5 rounded border-muted-foreground/30 text-primary focus:ring-primary/20"
+              />
+            </div>
+            <input
+              value={item.key}
+              onChange={(e) => updateItem(index, { key: e.target.value })}
+              placeholder="Key"
+              className={cn(
+                "flex-1 min-w-[100px] h-7 px-2 text-xs font-mono bg-transparent border-0 focus:ring-1 focus:ring-primary/30 rounded",
+                !item.enabled && "opacity-50"
+              )}
+            />
+            <input
+              value={item.value}
+              onChange={(e) => updateItem(index, { value: e.target.value })}
+              placeholder="Value"
+              className={cn(
+                "flex-1 min-w-[100px] h-7 px-2 text-xs font-mono bg-transparent border-0 focus:ring-1 focus:ring-primary/30 rounded",
+                !item.enabled && "opacity-50"
+              )}
+            />
+            {showDescription && (
+              <input
+                value={item.description || ""}
+                onChange={(e) => updateItem(index, { description: e.target.value })}
+                placeholder="Description"
+                className={cn(
+                  "flex-1 min-w-[80px] h-7 px-2 text-xs bg-transparent border-0 focus:ring-1 focus:ring-primary/30 rounded text-muted-foreground",
+                  !item.enabled && "opacity-50"
+                )}
+              />
+            )}
+            <div className="w-8 flex items-center justify-center">
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                onClick={() => removeItem(index)}
+                className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity hover:text-destructive hover:bg-destructive/10"
+              >
+                <Trash2 className="h-3 w-3" />
+              </Button>
+            </div>
+          </div>
+        ))}
+        
+        {/* Add row */}
+        <div 
+          className="flex items-center gap-2 px-2 py-1 cursor-pointer hover:bg-muted/30 transition-colors"
+          onClick={addItem}
+        >
+          <div className="w-5 flex items-center justify-center">
+            <Plus className="h-3 w-3 text-muted-foreground" />
+          </div>
+          <span className="text-xs text-muted-foreground">
+            {placeholder || "Add new parameter"}
+          </span>
+        </div>
+      </div>
+      
+      {/* Stats */}
+      {items.length > 0 && (
+        <div className="flex items-center gap-2 px-2 pt-2 text-[10px] text-muted-foreground">
+          <span>{items.length} parameter{items.length !== 1 ? "s" : ""}</span>
+          {enabledCount !== items.length && (
+            <span>({enabledCount} enabled)</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -755,4 +838,128 @@ function BodyEditor({ body, onChange }: BodyEditorProps) {
       </div>
     </div>
   );
+}
+
+// Response Body View with syntax highlighting
+interface ResponseBodyViewProps {
+  body: string | null;
+  contentType: string | null;
+}
+
+function ResponseBodyView({ body, contentType }: ResponseBodyViewProps) {
+  const [wordWrap, setWordWrap] = useState(true);
+
+  const { isJson, highlighted } = useMemo(() => {
+    if (!body) {
+      return { isJson: false, highlighted: "" };
+    }
+
+    const isJsonContent = contentType?.includes("json") || false;
+    let html = "";
+
+    if (isJsonContent) {
+      try {
+        const parsed = JSON.parse(body);
+        html = highlightJson(parsed, 0);
+      } catch {
+        // Not valid JSON, show as-is
+        html = escapeHtml(body);
+      }
+    } else {
+      html = escapeHtml(body);
+    }
+
+    return { isJson: isJsonContent, highlighted: html };
+  }, [body, contentType]);
+
+  if (!body) {
+    return (
+      <div className="flex items-center justify-center min-h-[200px] text-muted-foreground italic text-sm">
+        (empty response)
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative">
+      <div className="absolute top-2 right-12 z-10">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-6 w-6 p-0"
+          onClick={() => setWordWrap(!wordWrap)}
+          title={wordWrap ? "Disable word wrap" : "Enable word wrap"}
+        >
+          <WrapText className={cn("h-3 w-3", wordWrap && "text-primary")} />
+        </Button>
+      </div>
+      <pre 
+        className={cn(
+          "text-[11px] font-mono p-4 overflow-auto min-h-[200px] max-h-[60vh] bg-background/50",
+          wordWrap && "whitespace-pre-wrap break-all"
+        )}
+      >
+        {isJson ? (
+          <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+        ) : (
+          body
+        )}
+      </pre>
+    </div>
+  );
+}
+
+// JSON syntax highlighting
+function highlightJson(value: unknown, indent: number): string {
+  const spaces = "  ".repeat(indent);
+
+  if (value === null) {
+    return `<span class="text-orange-500">null</span>`;
+  }
+
+  if (typeof value === "boolean") {
+    return `<span class="text-orange-500">${value}</span>`;
+  }
+
+  if (typeof value === "number") {
+    return `<span class="text-emerald-500">${value}</span>`;
+  }
+
+  if (typeof value === "string") {
+    const escaped = escapeHtml(value);
+    if (value.match(/^https?:\/\//)) {
+      return `<span class="text-sky-500">"${escaped}"</span>`;
+    }
+    return `<span class="text-amber-500">"${escaped}"</span>`;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return "[]";
+    }
+    const items = value.map((item) => `${spaces}  ${highlightJson(item, indent + 1)}`);
+    return `[\n${items.join(",\n")}\n${spaces}]`;
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) {
+      return "{}";
+    }
+    const items = entries.map(([key, val]) => {
+      return `${spaces}  <span class="text-purple-500">"${escapeHtml(key)}"</span>: ${highlightJson(val, indent + 1)}`;
+    });
+    return `{\n${items.join(",\n")}\n${spaces}}`;
+  }
+
+  return String(value);
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }

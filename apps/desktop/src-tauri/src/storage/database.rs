@@ -103,7 +103,55 @@ impl Database {
         .await
         .map_err(|e| PostGateError::Storage(format!("Migration failed: {}", e)))?;
 
+        // Captured requests table for proxy traffic persistence
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS captured_requests (
+                id TEXT PRIMARY KEY,
+                timestamp INTEGER NOT NULL,
+                method TEXT NOT NULL,
+                url TEXT NOT NULL,
+                host TEXT NOT NULL,
+                path TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                request_headers TEXT,
+                request_size INTEGER NOT NULL,
+                request_body_inline BLOB,
+                request_body_path TEXT,
+                response_status INTEGER,
+                response_headers TEXT,
+                response_size INTEGER,
+                response_body_inline BLOB,
+                response_body_path TEXT,
+                content_type TEXT,
+                duration_ms INTEGER,
+                matched_rules TEXT,
+                error TEXT,
+                tls_version TEXT,
+                remote_addr TEXT,
+                is_complete INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Migration failed: {}", e)))?;
+
+        // Index for timestamp ordering
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_captured_requests_timestamp ON captured_requests(timestamp DESC)"
+        )
+        .execute(&self.pool)
+        .await
+        .ok(); // Index creation failure should not block startup
+
         Ok(())
+    }
+
+    /// Get the pool reference
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Save a rule group

@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::proxy::{ProxyConfig, ProxyServer, ProxyStatus};
 use crate::state::AppState;
+use crate::storage::{PaginatedResult, StoredCapturedRequest};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -116,4 +117,83 @@ pub async fn get_response_body(
 pub async fn clear_captured_data(state: State<'_, Arc<AppState>>) -> Result<()> {
     state.body_storage.clear().await;
     Ok(())
+}
+
+/// Load captured history (paginated)
+#[tauri::command]
+pub async fn load_captured_history(
+    page: i32,
+    page_size: i32,
+    state: State<'_, Arc<AppState>>,
+) -> Result<PaginatedResult<StoredCapturedRequest>> {
+    let storage = state.get_captured_storage().await?;
+    storage.get_requests_paginated(page, page_size).await
+}
+
+/// Get persisted request body
+#[tauri::command]
+pub async fn get_persisted_request_body(
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<Vec<u8>>> {
+    let storage = state.get_captured_storage().await?;
+    let body = storage.get_body(&id, true).await?;
+    Ok(body.map(|b| b.to_vec()))
+}
+
+/// Get persisted response body
+#[tauri::command]
+pub async fn get_persisted_response_body(
+    id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<Vec<u8>>> {
+    let storage = state.get_captured_storage().await?;
+    let body = storage.get_body(&id, false).await?;
+    Ok(body.map(|b| b.to_vec()))
+}
+
+/// Clear all captured history (both memory and persistent)
+#[tauri::command]
+pub async fn clear_captured_history(state: State<'_, Arc<AppState>>) -> Result<()> {
+    // Clear memory storage
+    state.body_storage.clear().await;
+
+    // Clear persistent storage
+    let storage = state.get_captured_storage().await?;
+    storage.clear_all().await?;
+
+    Ok(())
+}
+
+/// Clear captured history before specified timestamp
+#[tauri::command]
+pub async fn clear_captured_history_before(
+    before_timestamp: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<u64> {
+    let storage = state.get_captured_storage().await?;
+    storage.clear_before(before_timestamp).await
+}
+
+/// Set persistence enabled/disabled
+#[tauri::command]
+pub async fn set_persistence_enabled(
+    enabled: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<()> {
+    state.set_persistence_enabled(enabled);
+    Ok(())
+}
+
+/// Get persistence enabled status
+#[tauri::command]
+pub async fn get_persistence_enabled(state: State<'_, Arc<AppState>>) -> Result<bool> {
+    Ok(state.is_persistence_enabled())
+}
+
+/// Get captured history count
+#[tauri::command]
+pub async fn get_captured_history_count(state: State<'_, Arc<AppState>>) -> Result<i64> {
+    let storage = state.get_captured_storage().await?;
+    storage.count().await
 }

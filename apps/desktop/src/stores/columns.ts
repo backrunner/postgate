@@ -21,14 +21,14 @@ export type ColumnId =
   | "size";
 
 const defaultColumns: ColumnConfig[] = [
-  { id: "method", label: "Method", visible: true, width: 60, minWidth: 50, resizable: true },
-  { id: "status", label: "Status", visible: true, width: 50, minWidth: 40, resizable: true },
-  { id: "protocol", label: "Protocol", visible: false, width: 70, minWidth: 50, resizable: true },
-  { id: "host", label: "Host", visible: true, width: 150, minWidth: 80, resizable: true },
-  { id: "path", label: "Path", visible: true, width: 0, minWidth: 100, resizable: true }, // 0 = flex
-  { id: "remoteAddr", label: "Server IP", visible: false, width: 120, minWidth: 80, resizable: true },
-  { id: "duration", label: "Time", visible: true, width: 60, minWidth: 45, resizable: true },
-  { id: "size", label: "Size", visible: true, width: 55, minWidth: 40, resizable: true },
+  { id: "method", label: "Method", visible: true, width: 70, minWidth: 55, resizable: true },
+  { id: "status", label: "Status", visible: true, width: 55, minWidth: 45, resizable: true },
+  { id: "protocol", label: "Protocol", visible: false, width: 75, minWidth: 60, resizable: true },
+  { id: "host", label: "Host", visible: true, width: 180, minWidth: 100, resizable: true },
+  { id: "path", label: "Path", visible: true, width: 0, minWidth: 120, resizable: true }, // 0 = flex
+  { id: "remoteAddr", label: "Server IP", visible: false, width: 140, minWidth: 100, resizable: true },
+  { id: "duration", label: "Time", visible: true, width: 65, minWidth: 50, resizable: true },
+  { id: "size", label: "Size", visible: true, width: 60, minWidth: 45, resizable: true },
 ];
 
 interface ColumnsState {

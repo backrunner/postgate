@@ -3,9 +3,10 @@ use crate::debug::{ConsoleLog, DebugServer, DebugSession, DebugStatus, PageError
 use crate::plugin::PluginManager;
 use crate::proxy::{BodyStorage, ProxyServer};
 use crate::rules::RuleEngine;
-use crate::storage::Database;
+use crate::storage::{CapturedRequestStorage, Database};
 use parking_lot::RwLock;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::broadcast;
@@ -24,6 +25,9 @@ pub struct AppState {
     database: tokio::sync::RwLock<Option<std::sync::Arc<Database>>>,
     debug_server: tokio::sync::RwLock<Option<Arc<DebugServer>>>,
     debug_session_manager: Arc<SessionManager>,
+    // Captured request persistence
+    captured_storage: tokio::sync::RwLock<Option<Arc<CapturedRequestStorage>>>,
+    persistence_enabled: AtomicBool,
 }
 
 impl AppState {
@@ -51,6 +55,8 @@ impl AppState {
             database: tokio::sync::RwLock::new(None),
             debug_server: tokio::sync::RwLock::new(None),
             debug_session_manager,
+            captured_storage: tokio::sync::RwLock::new(None),
+            persistence_enabled: AtomicBool::new(true),
         }
     }
 
@@ -76,7 +82,39 @@ impl AppState {
         Ok(db)
     }
 
-    /// Initialize or get the Certificate Authority
+    /// Get or initialize captured request storage
+    pub async fn get_captured_storage(&self) -> crate::error::Result<Arc<CapturedRequestStorage>> {
+        // Check if already initialized
+        {
+            let guard = self.captured_storage.read().await;
+            if let Some(ref storage) = *guard {
+                return Ok(storage.clone());
+            }
+        }
+
+        // Initialize storage
+        let db = self.get_database().await?;
+        let storage = Arc::new(CapturedRequestStorage::new(db.pool().clone(), &self.data_dir));
+
+        {
+            let mut guard = self.captured_storage.write().await;
+            *guard = Some(storage.clone());
+        }
+
+        Ok(storage)
+    }
+
+    /// Set whether persistence is enabled
+    pub fn set_persistence_enabled(&self, enabled: bool) {
+        self.persistence_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check if persistence is enabled
+    pub fn is_persistence_enabled(&self) -> bool {
+        self.persistence_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Initialize or get the Certificate Authority (loads from disk if exists)
     pub fn get_or_init_ca(&self) -> crate::error::Result<CertificateAuthority> {
         let mut ca_guard = self.ca.write();
 
@@ -84,14 +122,14 @@ impl AppState {
             return Ok(ca.clone());
         }
 
-        // Generate new CA
-        let ca = CertificateAuthority::new()?;
+        // Load existing CA or generate new one (persists to disk)
+        let ca = CertificateAuthority::load_or_create(&self.data_dir)?;
         *ca_guard = Some(ca.clone());
 
         Ok(ca)
     }
 
-    /// Emit a request event to the frontend
+    /// Emit a request event to the frontend and persist asynchronously
     pub fn emit_request_event(&self, event: &CapturedRequestEvent) {
         // Send via broadcast channel for internal use
         let _ = self.request_tx.send(event.clone());
@@ -100,6 +138,61 @@ impl AppState {
         if let Err(e) = self.app_handle.emit("proxy:request", event) {
             tracing::warn!("Failed to emit request event: {}", e);
         }
+
+        // Async persistence (only for completed events to avoid duplicates)
+        if self.is_persistence_enabled() {
+            let data = event.data.clone();
+            let data_dir = self.data_dir.clone();
+            let app_handle = self.app_handle.clone();
+            
+            tokio::spawn(async move {
+                if let Err(e) = Self::persist_request(app_handle, data_dir, data).await {
+                    tracing::warn!("Failed to persist captured request: {}", e);
+                }
+            });
+        }
+    }
+
+    /// Persist a captured request to storage
+    async fn persist_request(
+        app_handle: AppHandle,
+        data_dir: PathBuf,
+        data: CapturedRequestData,
+    ) -> crate::error::Result<()> {
+        // Get database path and create storage
+        let db_path = data_dir.join("postgate.db");
+        let db = Database::new(&db_path).await?;
+        let storage = CapturedRequestStorage::new(db.pool().clone(), &data_dir);
+        storage.save_request(&data).await?;
+        Ok(())
+    }
+
+    /// Persist body data asynchronously
+    pub fn persist_body(&self, request_id: String, body: bytes::Bytes, is_request: bool) {
+        if !self.is_persistence_enabled() {
+            return;
+        }
+
+        let data_dir = self.data_dir.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = Self::persist_body_internal(data_dir, request_id, body, is_request).await {
+                tracing::warn!("Failed to persist body: {}", e);
+            }
+        });
+    }
+
+    async fn persist_body_internal(
+        data_dir: PathBuf,
+        request_id: String,
+        body: bytes::Bytes,
+        is_request: bool,
+    ) -> crate::error::Result<()> {
+        let db_path = data_dir.join("postgate.db");
+        let db = Database::new(&db_path).await?;
+        let storage = CapturedRequestStorage::new(db.pool().clone(), &data_dir);
+        storage.save_body(&request_id, &body, is_request).await?;
+        Ok(())
     }
 
     // Debug server methods

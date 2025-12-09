@@ -122,6 +122,8 @@ async fn handle_https_request(
 
     let request_size = request_body.size as u64;
     ctx.body_storage.store_request_body(&request_id, request_body.clone()).await;
+    // Persist request body
+    ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
 
     // Forward to upstream
     match forward_https_request(parts, request_body.data, host, port).await {
@@ -138,6 +140,8 @@ async fn handle_https_request(
             let duration = start_time.elapsed().as_millis() as u64;
 
             ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
+            // Persist response body
+            ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
 
             // Emit completed event
             ctx.app_state.emit_request_event(&CapturedRequestEvent {

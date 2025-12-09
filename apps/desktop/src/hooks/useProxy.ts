@@ -49,7 +49,7 @@ interface RequestEvent {
  */
 export function useProxy() {
   const { setStatus, setError, config } = useProxyStore();
-  const { addRequest, updateRequest, isPaused } = useCaptureStore();
+  const { addRequest, updateRequest, isPaused, loadHistory, historyLoaded } = useCaptureStore();
 
   // Start proxy
   const startProxy = useCallback(async (proxyConfig?: Partial<ProxyConfig>) => {
@@ -173,10 +173,14 @@ export function useProxy() {
     };
   }, [addRequest, updateRequest, isPaused]);
 
-  // Get initial status on mount
+  // Get initial status on mount and load history
   useEffect(() => {
     getStatus();
-  }, [getStatus]);
+    // Load captured history on first mount
+    if (!historyLoaded) {
+      loadHistory();
+    }
+  }, [getStatus, historyLoaded, loadHistory]);
 
   return {
     startProxy,
@@ -212,13 +216,20 @@ function mapProtocol(protocol: string): Protocol {
 }
 
 /**
- * Hook to fetch request/response bodies
+ * Hook to fetch request/response bodies (with fallback to persistent storage)
  */
 export function useRequestBody(requestId: string | null) {
   const getRequestBody = useCallback(async () => {
     if (!requestId) return null;
     try {
-      const body = await invoke<number[] | null>("get_request_body", { id: requestId });
+      // Try memory storage first
+      let body = await invoke<number[] | null>("get_request_body", { id: requestId });
+      
+      // Fall back to persistent storage
+      if (!body) {
+        body = await invoke<number[] | null>("get_persisted_request_body", { id: requestId });
+      }
+      
       return body ? new Uint8Array(body) : null;
     } catch (e) {
       console.error("Failed to get request body:", e);
@@ -229,7 +240,14 @@ export function useRequestBody(requestId: string | null) {
   const getResponseBody = useCallback(async () => {
     if (!requestId) return null;
     try {
-      const body = await invoke<number[] | null>("get_response_body", { id: requestId });
+      // Try memory storage first
+      let body = await invoke<number[] | null>("get_response_body", { id: requestId });
+      
+      // Fall back to persistent storage
+      if (!body) {
+        body = await invoke<number[] | null>("get_persisted_response_body", { id: requestId });
+      }
+      
       return body ? new Uint8Array(body) : null;
     } catch (e) {
       console.error("Failed to get response body:", e);

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useMemo } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 export type Protocol = "http1" | "http2" | "quic" | "websocket" | "sse";
 
@@ -41,6 +42,37 @@ export interface FilterOptions {
   protocols: Protocol[];
 }
 
+// Stored captured request from backend
+interface StoredCapturedRequest {
+  id: string;
+  timestamp: number;
+  method: string;
+  url: string;
+  host: string;
+  path: string;
+  protocol: string;
+  requestHeaders: Record<string, string> | null;
+  requestSize: number;
+  responseStatus: number | null;
+  responseHeaders: Record<string, string> | null;
+  responseSize: number | null;
+  contentType: string | null;
+  durationMs: number | null;
+  matchedRules: string[];
+  error: string | null;
+  tlsVersion: string | null;
+  remoteAddr: string | null;
+  isComplete: boolean;
+}
+
+interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+}
+
 interface CaptureState {
   // Use Map for O(1) lookups and updates
   requestMap: Map<string, CapturedRequest>;
@@ -51,6 +83,11 @@ interface CaptureState {
   filter: FilterOptions;
   maxRequests: number;
 
+  // History loading state
+  isLoadingHistory: boolean;
+  historyLoaded: boolean;
+  historyTotal: number;
+
   addRequest: (request: CapturedRequest) => void;
   updateRequest: (id: string, update: Partial<CapturedRequest>) => void;
   setSelected: (id: string | null) => void;
@@ -60,6 +97,9 @@ interface CaptureState {
   resetFilter: () => void;
   // Helper to get requests as array (computed from map + ids)
   getRequests: () => CapturedRequest[];
+  // History management
+  loadHistory: () => Promise<void>;
+  clearHistory: () => Promise<void>;
 }
 
 const defaultFilter: FilterOptions = {
@@ -72,6 +112,56 @@ const defaultFilter: FilterOptions = {
   protocols: [],
 };
 
+function mapProtocol(protocol: string): Protocol {
+  switch (protocol.toLowerCase()) {
+    case "http1":
+    case "http/1.1":
+      return "http1";
+    case "http2":
+    case "http/2":
+    case "h2":
+      return "http2";
+    case "quic":
+    case "http3":
+    case "h3":
+      return "quic";
+    case "websocket":
+    case "ws":
+      return "websocket";
+    case "sse":
+    case "eventsource":
+      return "sse";
+    default:
+      return "http1";
+  }
+}
+
+function convertStoredToCaptured(stored: StoredCapturedRequest): CapturedRequest {
+  return {
+    id: stored.id,
+    timestamp: stored.timestamp,
+    method: stored.method,
+    url: stored.url,
+    host: stored.host,
+    path: stored.path,
+    requestHeaders: stored.requestHeaders || {},
+    requestBody: null, // Lazy loaded
+    responseStatus: stored.responseStatus,
+    responseHeaders: stored.responseHeaders,
+    responseBody: null, // Lazy loaded
+    durationMs: stored.durationMs,
+    matchedRules: stored.matchedRules || [],
+    protocol: mapProtocol(stored.protocol),
+    tlsInfo: stored.tlsVersion
+      ? { version: stored.tlsVersion, cipher: "", serverName: stored.host }
+      : null,
+    contentType: stored.contentType,
+    requestSize: stored.requestSize,
+    responseSize: stored.responseSize,
+    remoteAddr: stored.remoteAddr,
+  };
+}
+
 export const useCaptureStore = create<CaptureState>()((set, get) => ({
   requestMap: new Map(),
   requestIds: [],
@@ -79,6 +169,9 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   isPaused: false,
   filter: defaultFilter,
   maxRequests: 10000,
+  isLoadingHistory: false,
+  historyLoaded: false,
+  historyTotal: 0,
 
   addRequest: (request) => {
     if (get().isPaused) return;
@@ -142,6 +235,63 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
     return state.requestIds
       .map((id) => state.requestMap.get(id))
       .filter((r): r is CapturedRequest => r !== undefined);
+  },
+
+  loadHistory: async () => {
+    const state = get();
+    if (state.isLoadingHistory || state.historyLoaded) return;
+
+    set({ isLoadingHistory: true });
+
+    try {
+      // Load first page of history (most recent requests)
+      const result = await invoke<PaginatedResult<StoredCapturedRequest>>(
+        "load_captured_history",
+        { page: 1, pageSize: 500 }
+      );
+
+      const requests = result.items.map(convertStoredToCaptured);
+
+      set((state) => {
+        const newMap = new Map(state.requestMap);
+        const existingIds = new Set(state.requestIds);
+        const newIds = [...state.requestIds];
+
+        // Add historical requests that don't already exist
+        for (const req of requests) {
+          if (!existingIds.has(req.id)) {
+            newMap.set(req.id, req);
+            newIds.push(req.id); // Add to end (older requests)
+          }
+        }
+
+        return {
+          requestMap: newMap,
+          requestIds: newIds,
+          historyLoaded: true,
+          historyTotal: result.total,
+          isLoadingHistory: false,
+        };
+      });
+    } catch (e) {
+      console.error("Failed to load history:", e);
+      set({ isLoadingHistory: false, historyLoaded: true });
+    }
+  },
+
+  clearHistory: async () => {
+    try {
+      await invoke("clear_captured_history");
+      set({
+        requestMap: new Map(),
+        requestIds: [],
+        selectedId: null,
+        historyLoaded: false,
+        historyTotal: 0,
+      });
+    } catch (e) {
+      console.error("Failed to clear history:", e);
+    }
   },
 }));
 

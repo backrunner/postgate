@@ -130,6 +130,8 @@ async fn handle_request(
 
     // Store original request body
     ctx.body_storage.store_request_body(&request_id, request_body.clone()).await;
+    // Persist request body
+    ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
 
     // Apply request rules
     let request_modification = apply_request_rules(
@@ -150,7 +152,9 @@ async fn handle_request(
             size: short_circuit.body.len(),
             truncated: false,
         };
-        ctx.body_storage.store_response_body(&request_id, response_body).await;
+        ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
+        // Persist response body
+        ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
 
         // Emit completion event
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -274,7 +278,9 @@ async fn handle_request(
                 size: final_body.len(),
                 truncated: response_body.truncated,
             };
-            ctx.body_storage.store_response_body(&request_id, stored_body).await;
+            ctx.body_storage.store_response_body(&request_id, stored_body.clone()).await;
+            // Persist response body
+            ctx.app_state.persist_body(request_id.clone(), stored_body.data.clone(), false);
 
             let final_duration = start_time.elapsed().as_millis() as u64;
 

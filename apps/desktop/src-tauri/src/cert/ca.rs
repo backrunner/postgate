@@ -5,6 +5,7 @@ use rcgen::{
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use std::path::Path;
 use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
 
@@ -30,7 +31,7 @@ pub struct CertifiedKey {
 }
 
 impl CertificateAuthority {
-    /// Create a new Certificate Authority
+    /// Create a new Certificate Authority (generates fresh CA)
     pub fn new() -> Result<Self> {
         let (ca_cert, ca_key_pair, ca_cert_der, ca_cert_pem) = Self::generate_ca()?;
 
@@ -41,6 +42,88 @@ impl CertificateAuthority {
             ca_cert: Arc::new(ca_cert),
             cert_cache: Arc::new(DashMap::new()),
         })
+    }
+
+    /// Load CA from files, or create new one if files don't exist
+    pub fn load_or_create(data_dir: &Path) -> Result<Self> {
+        let cert_path = data_dir.join("ca.crt");
+        let key_path = data_dir.join("ca.key");
+
+        // Try to load existing CA
+        if cert_path.exists() && key_path.exists() {
+            match Self::load_from_files(&cert_path, &key_path) {
+                Ok(ca) => {
+                    tracing::info!("Loaded existing CA certificate from {:?}", cert_path);
+                    return Ok(ca);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load existing CA, generating new one: {}", e);
+                }
+            }
+        }
+
+        // Generate new CA and save it
+        let ca = Self::new()?;
+        ca.save_to_files(data_dir)?;
+        tracing::info!("Generated and saved new CA certificate to {:?}", cert_path);
+
+        Ok(ca)
+    }
+
+    /// Load CA from PEM files
+    fn load_from_files(cert_path: &Path, key_path: &Path) -> Result<Self> {
+        let cert_pem = std::fs::read_to_string(cert_path)?;
+        let key_pem = std::fs::read_to_string(key_path)?;
+
+        // Parse the key pair from PEM
+        let key_pair = KeyPair::from_pem(&key_pem)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA key: {}", e)))?;
+
+        // Parse the certificate from PEM
+        let params = CertificateParams::from_ca_cert_pem(&cert_pem)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA cert params: {}", e)))?;
+
+        // Recreate the certificate
+        let ca_cert = params
+            .self_signed(&key_pair)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to recreate CA cert: {}", e)))?;
+
+        let cert_der = ca_cert.der().to_vec();
+
+        Ok(Self {
+            ca_cert_der: cert_der,
+            ca_cert_pem: cert_pem,
+            ca_key_pair: Arc::new(key_pair),
+            ca_cert: Arc::new(ca_cert),
+            cert_cache: Arc::new(DashMap::new()),
+        })
+    }
+
+    /// Save CA certificate and key to files
+    pub fn save_to_files(&self, data_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(data_dir)?;
+
+        let cert_path = data_dir.join("ca.crt");
+        let key_path = data_dir.join("ca.key");
+
+        // Save certificate PEM
+        std::fs::write(&cert_path, &self.ca_cert_pem)?;
+
+        // Save private key PEM
+        let key_pem = self.ca_key_pair.serialize_pem();
+        std::fs::write(&key_path, key_pem)?;
+
+        // Set restrictive permissions on key file (Unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&key_path)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(&key_path, perms)?;
+        }
+
+        tracing::info!("Saved CA certificate and key to {:?}", data_dir);
+        Ok(())
     }
 
     /// Generate a new CA certificate

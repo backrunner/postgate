@@ -1,4 +1,5 @@
 use crate::cert::CertificateAuthority;
+use crate::debug::ScriptInjector;
 use crate::error::Result;
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::pool::ConnectionPool;
@@ -245,7 +246,20 @@ async fn handle_request(
 
             // Use modified body and headers
             let mut final_body = response_modification.body.unwrap_or(response_body.data.clone());
-            let final_headers = response_modification.headers;
+            let mut final_headers = response_modification.headers;
+
+            // Inject debug script if enabled
+            if response_modification.inject_debug {
+                let injector = ScriptInjector::new(9229); // Default debug port
+                if let Ok(html) = String::from_utf8(final_body.to_vec()) {
+                    if !ScriptInjector::is_already_injected(&html) {
+                        let injected = injector.inject_into_html(&html);
+                        final_body = Bytes::from(injected);
+                        // Update content-length header
+                        final_headers.insert("content-length".to_string(), final_body.len().to_string());
+                    }
+                }
+            }
 
             // Apply response speed throttling if specified
             if let Some(speed_kbps) = response_modification.speed_kbps {

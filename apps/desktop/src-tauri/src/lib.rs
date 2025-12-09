@@ -1,7 +1,10 @@
 mod cert;
 mod commands;
+mod debug;
 mod error;
+mod plugin;
 mod proxy;
+mod replay;
 mod rules;
 mod storage;
 mod state;
@@ -51,6 +54,41 @@ pub fn run() {
             commands::rules::delete_rule_group,
             commands::rules::toggle_rule_group,
             commands::rules::parse_rules,
+            commands::plugin::get_plugins,
+            commands::plugin::discover_plugins,
+            commands::plugin::load_plugin,
+            commands::plugin::unload_plugin,
+            commands::plugin::toggle_plugin,
+            commands::plugin::get_plugin,
+            commands::plugin::get_plugin_panels,
+            commands::plugin::get_plugins_dir,
+            commands::plugin::install_plugin,
+            commands::plugin::uninstall_plugin,
+            commands::replay::get_collection_tree,
+            commands::replay::get_collections,
+            commands::replay::create_collection,
+            commands::replay::update_collection,
+            commands::replay::delete_collection,
+            commands::replay::get_saved_requests,
+            commands::replay::get_saved_request,
+            commands::replay::create_saved_request,
+            commands::replay::update_saved_request,
+            commands::replay::delete_saved_request,
+            commands::replay::move_request,
+            commands::replay::duplicate_request,
+            commands::replay::execute_saved_request,
+            commands::replay::get_request_history,
+            commands::replay::clear_request_history,
+            commands::replay::import_from_capture,
+            commands::debug::start_debug_server,
+            commands::debug::stop_debug_server,
+            commands::debug::get_debug_status,
+            commands::debug::get_debug_sessions,
+            commands::debug::get_console_logs,
+            commands::debug::clear_console_logs,
+            commands::debug::get_page_errors,
+            commands::debug::clear_all_debug_data,
+            commands::debug::remove_debug_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

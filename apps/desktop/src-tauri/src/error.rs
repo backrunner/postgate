@@ -15,6 +15,9 @@ pub enum PostGateError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    #[error("Plugin error: {0}")]
+    Plugin(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 

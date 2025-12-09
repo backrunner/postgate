@@ -37,6 +37,15 @@ pub struct RequestModification {
     pub ignore: bool,
     /// Debug name for logging
     pub debug_name: Option<String>,
+    /// Plugin to handle request (name, config)
+    pub plugin: Option<PluginHandlerInfo>,
+}
+
+/// Plugin handler information
+#[derive(Debug, Clone)]
+pub struct PluginHandlerInfo {
+    pub name: String,
+    pub config: serde_json::Value,
 }
 
 /// Upstream proxy configuration
@@ -81,6 +90,8 @@ pub struct ResponseModification {
     pub status_code: Option<u16>,
     /// Cookies to set
     pub cookies: Vec<String>,
+    /// Inject debug script into HTML responses
+    pub inject_debug: bool,
 }
 
 /// Apply rules to a request and return modifications
@@ -343,6 +354,13 @@ pub fn apply_request_rules(
                     }
                 }
 
+                RuleAction::Plugin { name, config } => {
+                    modification.plugin = Some(PluginHandlerInfo {
+                        name: name.clone(),
+                        config: config.clone(),
+                    });
+                }
+
                 _ => {
                     // Response-only actions are skipped here
                 }
@@ -593,6 +611,13 @@ pub fn apply_response_rules(
                         tracing::info!(target: "rule_log", "{}", msg);
                     } else {
                         tracing::info!(target: "rule_log", "Response for: {}", url);
+                    }
+                }
+
+                RuleAction::Debug { .. } => {
+                    // Enable debug script injection for HTML responses
+                    if is_html(content_type) {
+                        modification.inject_debug = true;
                     }
                 }
 

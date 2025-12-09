@@ -1,9 +1,13 @@
 use crate::cert::CertificateAuthority;
+use crate::debug::{ConsoleLog, DebugServer, DebugSession, DebugStatus, PageError, SessionManager};
+use crate::plugin::PluginManager;
 use crate::proxy::{BodyStorage, ProxyServer};
 use crate::rules::RuleEngine;
+use crate::storage::Database;
 use parking_lot::RwLock;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::broadcast;
 
 /// Application-wide shared state
@@ -14,11 +18,25 @@ pub struct AppState {
     pub rule_engine: Arc<RuleEngine>,
     pub request_tx: broadcast::Sender<CapturedRequestEvent>,
     pub body_storage: Arc<BodyStorage>,
+    pub plugin_manager: tokio::sync::RwLock<PluginManager>,
+    pub plugins_dir: PathBuf,
+    pub data_dir: PathBuf,
+    database: tokio::sync::RwLock<Option<std::sync::Arc<Database>>>,
+    debug_server: tokio::sync::RwLock<Option<Arc<DebugServer>>>,
+    debug_session_manager: Arc<SessionManager>,
 }
 
 impl AppState {
     pub fn new(app_handle: AppHandle) -> Self {
         let (request_tx, _) = broadcast::channel(10000);
+
+        // Get app data directory
+        let data_dir = app_handle.path().app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+
+        let plugins_dir = data_dir.join("plugins");
+        let plugin_manager = PluginManager::new(plugins_dir.clone());
+        let debug_session_manager = SessionManager::new();
 
         Self {
             app_handle,
@@ -27,7 +45,35 @@ impl AppState {
             rule_engine: Arc::new(RuleEngine::new()),
             request_tx,
             body_storage: Arc::new(BodyStorage::default()),
+            plugin_manager: tokio::sync::RwLock::new(plugin_manager),
+            plugins_dir,
+            data_dir,
+            database: tokio::sync::RwLock::new(None),
+            debug_server: tokio::sync::RwLock::new(None),
+            debug_session_manager,
         }
+    }
+
+    /// Get or initialize the database
+    pub async fn get_database(&self) -> crate::error::Result<std::sync::Arc<Database>> {
+        // Check if already initialized
+        {
+            let guard = self.database.read().await;
+            if let Some(ref db) = *guard {
+                return Ok(db.clone());
+            }
+        }
+
+        // Initialize database
+        let db_path = self.data_dir.join("postgate.db");
+        let db = std::sync::Arc::new(Database::new(&db_path).await?);
+        
+        {
+            let mut guard = self.database.write().await;
+            *guard = Some(db.clone());
+        }
+
+        Ok(db)
     }
 
     /// Initialize or get the Certificate Authority
@@ -54,6 +100,96 @@ impl AppState {
         if let Err(e) = self.app_handle.emit("proxy:request", event) {
             tracing::warn!("Failed to emit request event: {}", e);
         }
+    }
+
+    // Debug server methods
+
+    /// Start the debug WebSocket server
+    pub async fn start_debug_server(&self, port: u16) -> Result<(), String> {
+        let mut server_guard = self.debug_server.write().await;
+        
+        if server_guard.is_some() {
+            return Err("Debug server is already running".to_string());
+        }
+
+        let server = DebugServer::new(Arc::clone(&self.debug_session_manager));
+        server.start(port).await?;
+        *server_guard = Some(server);
+
+        // Emit event to frontend
+        let _ = self.app_handle.emit("debug:server_started", port);
+
+        Ok(())
+    }
+
+    /// Stop the debug server
+    pub async fn stop_debug_server(&self) {
+        let mut server_guard = self.debug_server.write().await;
+        
+        if let Some(server) = server_guard.take() {
+            server.stop().await;
+        }
+
+        let _ = self.app_handle.emit("debug:server_stopped", ());
+    }
+
+    /// Get debug server status
+    pub async fn get_debug_status(&self) -> Result<DebugStatus, String> {
+        let server_guard = self.debug_server.read().await;
+        
+        if let Some(ref server) = *server_guard {
+            Ok(server.get_status().await)
+        } else {
+            Ok(DebugStatus {
+                is_running: false,
+                port: 9229,
+                session_count: 0,
+                total_logs: 0,
+            })
+        }
+    }
+
+    /// Get all debug sessions
+    pub fn get_debug_sessions(&self) -> Vec<DebugSession> {
+        self.debug_session_manager.get_sessions()
+    }
+
+    /// Get console logs
+    pub fn get_console_logs(&self, session_id: Option<&str>, limit: Option<usize>, offset: Option<usize>) -> Vec<ConsoleLog> {
+        if let Some(sid) = session_id {
+            self.debug_session_manager.get_console_logs(sid, limit, offset)
+        } else {
+            self.debug_session_manager.get_all_console_logs(limit)
+        }
+    }
+
+    /// Clear console logs
+    pub fn clear_console_logs(&self, session_id: Option<&str>) {
+        if let Some(sid) = session_id {
+            self.debug_session_manager.clear_console_logs(sid);
+        } else {
+            self.debug_session_manager.clear_all();
+        }
+    }
+
+    /// Get page errors
+    pub fn get_page_errors(&self, session_id: &str) -> Vec<PageError> {
+        self.debug_session_manager.get_page_errors(session_id)
+    }
+
+    /// Clear all debug data
+    pub fn clear_all_debug_data(&self) {
+        self.debug_session_manager.clear_all();
+    }
+
+    /// Remove a debug session
+    pub fn remove_debug_session(&self, session_id: &str) {
+        self.debug_session_manager.remove_session(session_id);
+    }
+
+    /// Get the debug session manager (for use by proxy handler)
+    pub fn get_debug_session_manager(&self) -> &Arc<SessionManager> {
+        &self.debug_session_manager
     }
 }
 

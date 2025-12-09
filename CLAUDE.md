@@ -10,7 +10,7 @@ PostGate is a Tauri 2.0-based MITM proxy tool designed for local frontend develo
 
 > Last updated: 2025-12-09
 
-### Overall Status: Phase 4 Complete (100%)
+### Overall Status: Phase 7 Complete (100%)
 
 | Phase | Status | Progress |
 |-------|--------|----------|
@@ -18,9 +18,9 @@ PostGate is a Tauri 2.0-based MITM proxy tool designed for local frontend develo
 | Phase 2: Core Proxy Engine | **COMPLETE** | 95% |
 | Phase 3: Rule Engine | **COMPLETE** | 100% |
 | Phase 4: Request Viewer UI | **COMPLETE** | 100% |
-| Phase 5: Plugin System | NOT STARTED | 0% |
-| Phase 6: Request Replay | NOT STARTED | 0% |
-| Phase 7: Frontend Debugging | NOT STARTED | 0% |
+| Phase 5: Plugin System | **COMPLETE** | 100% |
+| Phase 6: Request Replay | **COMPLETE** | 100% |
+| Phase 7: Frontend Debugging | **COMPLETE** | 100% |
 
 ### Phase 1 Completed Items
 
@@ -113,7 +113,65 @@ None - Phase 3 Complete!
 
 None - Phase 4 Complete!
 
-### Files Created (85+ files)
+### Phase 5 Completed Items
+
+- [x] **Plugin architecture design** - Types for plugin info, requests, responses, panels
+- [x] **Rust plugin manager** - `src/plugin/manager.rs` with discovery, loading, lifecycle
+- [x] **Plugin runtime** - `src/plugin/runtime.rs` Node.js subprocess-based plugin execution
+- [x] **Plugin wrapper script** - `src/plugin/plugin_wrapper.mjs` JavaScript bootstrap
+- [x] **Plugin types** - `src/plugin/types.rs` comprehensive message/data types
+- [x] **Tauri IPC commands** - get_plugins, load_plugin, unload_plugin, toggle_plugin, etc.
+- [x] **Frontend plugin store** - `src/stores/plugins.ts` Zustand store for plugin management
+- [x] **Plugin UI page** - `src/pages/Plugins/index.tsx` with discovery, toggle, uninstall
+- [x] **AlertDialog component** - `src/components/ui/alert-dialog.tsx` for confirmations
+- [x] **Plugin rule syntax** - `plugin://name?config` in rules applicator
+- [x] **Sample plugin** - `examples/postgate-plugin-mock-api` demonstration plugin
+
+### Phase 5 Remaining Items
+
+None - Phase 5 Complete!
+
+### Phase 6 Completed Items
+
+- [x] **Replay types** - `src-tauri/src/replay/types.rs` Collection, SavedRequest, RequestBody, ReplayResponse, RequestHistory
+- [x] **Request executor** - `src-tauri/src/replay/executor.rs` HTTP client using hyper/hyper-rustls
+- [x] **Database storage** - Extended `src-tauri/src/storage/database.rs` with collections, saved_requests, request_history tables
+- [x] **Tauri IPC commands** - `src-tauri/src/commands/replay.rs` for CRUD operations on collections/requests
+- [x] **Frontend store** - `src/stores/replay.ts` Zustand store with tree structure
+- [x] **Replay page UI** - `src/pages/Replay/index.tsx` complete Postman-like interface
+- [x] **CollectionTree sidebar** - Folder tree with expand/collapse, context menus
+- [x] **RequestEditor** - URL bar with method selector, tabs for params/headers/body
+- [x] **KeyValueEditor** - Reusable key-value pair editor with enable/disable toggles
+- [x] **BodyEditor** - Multi-type body editor (none, raw, form-data, urlencoded)
+- [x] **Response viewer** - Body/headers tabs with status/timing display
+
+### Phase 6 Remaining Items
+
+None - Phase 6 Complete!
+
+### Phase 7 Completed Items
+
+- [x] **Debug types** - `src-tauri/src/debug/types.rs` DebugSession, ConsoleLog, ConsoleArg, PageError, ClientMessage, ServerMessage
+- [x] **Session manager** - `src-tauri/src/debug/session.rs` manages debug sessions, console logs, page errors
+- [x] **WebSocket server** - `src-tauri/src/debug/server.rs` accepts connections + HTTP /json/list endpoint
+- [x] **Script injector** - `src-tauri/src/debug/injector.rs` injects Chobitsu CDP debug script into HTML
+- [x] **Tauri IPC commands** - `src-tauri/src/commands/debug.rs` start/stop server, get logs, clear data
+- [x] **Frontend debug store** - `src/stores/debug.ts` Zustand store for debug state management
+- [x] **Debug page UI** - `src/pages/Debug/index.tsx` Console viewer + DevTools panel with CDP URLs
+- [x] **Chobitsu CDP integration** - Full Chrome DevTools Protocol support via Chobitsu library
+- [x] **CDP target discovery** - HTTP /json/list and /json/version endpoints for DevTools compatibility
+- [x] **DevTools connection panel** - UI to copy devtools:// URLs for connecting Chrome DevTools
+- [x] **Debug page UI** - `src/pages/Debug/index.tsx` Console viewer with session sidebar, log filtering, search
+- [x] **Proxy integration** - Handler injects debug script when `debug://` rule matches HTML responses
+- [x] **Console capture** - Inline inject script captures console.log/warn/error/info/debug/trace
+- [x] **Error capture** - Captures window.onerror and unhandledrejection events
+- [x] **Network capture** - Captures fetch() and XMLHttpRequest from page
+
+### Phase 7 Remaining Items
+
+None - Phase 7 Complete!
+
+### Files Created (95+ files)
 
 ```
 postgate/
@@ -212,6 +270,30 @@ postgate/
 | `src/components/capture/TimingWaterfall.tsx` | Request timing visualization |
 | `src/lib/export.ts` | HAR export and cURL/fetch generation |
 | `src-tauri/icons/*` | Application icons for Tauri |
+| `src/plugin/mod.rs` | Plugin module entry point |
+| `src/plugin/types.rs` | Plugin types and data structures |
+| `src/plugin/manager.rs` | Plugin discovery, loading, lifecycle management |
+| `src/plugin/runtime.rs` | Node.js subprocess plugin runtime |
+| `src/plugin/plugin_wrapper.mjs` | JavaScript plugin bootstrap wrapper |
+| `src/commands/plugin.rs` | Tauri IPC commands for plugins |
+| `src/stores/plugins.ts` | Zustand store for plugin management |
+| `src/pages/Plugins/index.tsx` | Plugin management UI page |
+| `src/components/ui/alert-dialog.tsx` | Alert dialog component |
+| `examples/postgate-plugin-mock-api/` | Sample mock API plugin |
+| `src/replay/mod.rs` | Replay module entry point |
+| `src/replay/types.rs` | Replay types (Collection, SavedRequest, etc.) |
+| `src/replay/executor.rs` | HTTP request executor using hyper |
+| `src/commands/replay.rs` | Tauri IPC commands for replay |
+| `src/stores/replay.ts` | Zustand store for replay state |
+| `src/pages/Replay/index.tsx` | Complete Replay page UI |
+| `src/debug/mod.rs` | Debug module entry point |
+| `src/debug/types.rs` | Debug types (DebugSession, ConsoleLog, etc.) |
+| `src/debug/session.rs` | Debug session manager |
+| `src/debug/server.rs` | WebSocket server for debug connections |
+| `src/debug/injector.rs` | Script injector for HTML responses |
+| `src/commands/debug.rs` | Tauri IPC commands for debugging |
+| `src/stores/debug.ts` | Zustand store for debug state |
+| `src/pages/Debug/index.tsx` | Debug page with console viewer |
 
 ### Actual Dependencies (Latest Versions)
 

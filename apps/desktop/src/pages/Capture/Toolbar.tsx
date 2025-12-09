@@ -1,4 +1,4 @@
-import { Pause, Play, Trash2, Filter, Search, X, Download } from "lucide-react";
+import { Pause, Play, Trash2, Filter, Search, X, Download, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -10,14 +10,29 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useCaptureStore, useRequests } from "@/stores/capture";
-import { useState } from "react";
-import { exportToHar } from "@/lib/export";
+import { useState, useCallback } from "react";
+import { exportToHar, importFromHar } from "@/lib/export";
 
 export function Toolbar() {
-  const { isPaused, togglePause, clearRequests, filter, setFilter, resetFilter } =
+  const { isPaused, togglePause, clearRequests, filter, setFilter, resetFilter, addRequests } =
     useCaptureStore();
   const requests = useRequests();
   const [showFilters, setShowFilters] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+
+  const handleImport = useCallback(async () => {
+    setIsImporting(true);
+    try {
+      const importedRequests = await importFromHar();
+      if (importedRequests.length > 0) {
+        addRequests(importedRequests);
+      }
+    } catch (error) {
+      console.error("Failed to import HAR:", error);
+    } finally {
+      setIsImporting(false);
+    }
+  }, [addRequests]);
 
   const hasActiveFilters =
     filter.search ||
@@ -115,6 +130,18 @@ export function Toolbar() {
         )}
 
         <div className="flex-1" />
+
+        {/* Import */}
+        <Button 
+          variant="ghost" 
+          size="sm" 
+          className="h-8 gap-1.5 text-xs text-muted-foreground"
+          onClick={handleImport}
+          disabled={isImporting}
+        >
+          <Upload className="h-4 w-4" />
+          {isImporting ? "Importing..." : "Import"}
+        </Button>
 
         {/* Export */}
         <DropdownMenu>

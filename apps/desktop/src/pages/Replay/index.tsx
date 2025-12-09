@@ -46,6 +46,7 @@ import {
   CollectionNode,
   KeyValuePair,
   RequestBody,
+  RequestHistory,
 } from "@/stores/replay";
 import { cn, getMethodClass, getStatusClass, formatDuration, formatBytes } from "@/lib/utils";
 
@@ -55,10 +56,12 @@ export function ReplayPage() {
     selectedRequest,
     currentRequest,
     response,
+    history,
     isLoading,
     isExecuting,
     error,
     fetchTree,
+    fetchHistory,
     createCollection,
     deleteCollection,
     selectRequest,
@@ -68,16 +71,25 @@ export function ReplayPage() {
     duplicateRequest,
     updateCurrentRequest,
     executeRequest,
+    loadHistoryItem,
   } = useReplayStore();
 
   const [newCollectionName, setNewCollectionName] = useState("");
   const [showNewCollection, setShowNewCollection] = useState(false);
   const [expandedCollections, setExpandedCollections] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
+  const [responseTab, setResponseTab] = useState<"response" | "history">("response");
+
+  // Filter history for current request
+  const currentHistory = useMemo(() => {
+    if (!selectedRequest?.id) return history;
+    return history.filter(h => h.saved_request_id === selectedRequest.id);
+  }, [history, selectedRequest?.id]);
 
   useEffect(() => {
     fetchTree();
-  }, [fetchTree]);
+    fetchHistory();
+  }, [fetchTree, fetchHistory]);
 
   const toggleCollection = (id: string) => {
     const next = new Set(expandedCollections);
@@ -343,9 +355,35 @@ export function ReplayPage() {
 
               {/* Response Panel */}
               <div className="flex-1 overflow-hidden flex flex-col bg-muted/5">
+                {/* Panel Header with Response/History toggle */}
                 <div className="h-10 border-b px-4 flex items-center justify-between bg-muted/10">
-                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Response</span>
-                  {response && (
+                  <div className="flex items-center gap-4">
+                    <button
+                      onClick={() => setResponseTab("response")}
+                      className={cn(
+                        "text-xs font-semibold uppercase tracking-wider transition-colors",
+                        responseTab === "response" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      Response
+                    </button>
+                    <button
+                      onClick={() => setResponseTab("history")}
+                      className={cn(
+                        "text-xs font-semibold uppercase tracking-wider transition-colors flex items-center gap-1.5",
+                        responseTab === "history" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      <Clock className="h-3 w-3" />
+                      History
+                      {currentHistory.length > 0 && (
+                        <Badge variant="secondary" className="h-4 min-w-4 px-1 text-[9px]">
+                          {currentHistory.length}
+                        </Badge>
+                      )}
+                    </button>
+                  </div>
+                  {responseTab === "response" && response && (
                     <div className="flex items-center gap-3 text-xs">
                       <Badge variant="outline" className={cn("rounded-sm px-1.5 py-0.5", getStatusClass(response.status))}>
                         {response.status} {response.statusText}
@@ -362,75 +400,82 @@ export function ReplayPage() {
                   )}
                 </div>
 
-                <ScrollArea className="flex-1">
-                  {error ? (
-                    <div className="p-6">
-                      <div className="rounded-md bg-destructive/10 p-4 border border-destructive/20">
-                        <div className="flex items-center gap-2 text-destructive mb-2">
-                          <X className="h-4 w-4" />
-                          <h4 className="text-sm font-semibold">Request Failed</h4>
+                {responseTab === "response" ? (
+                  <ScrollArea className="flex-1">
+                    {error ? (
+                      <div className="p-6">
+                        <div className="rounded-md bg-destructive/10 p-4 border border-destructive/20">
+                          <div className="flex items-center gap-2 text-destructive mb-2">
+                            <X className="h-4 w-4" />
+                            <h4 className="text-sm font-semibold">Request Failed</h4>
+                          </div>
+                          <p className="text-xs text-destructive/80 font-mono">{error}</p>
                         </div>
-                        <p className="text-xs text-destructive/80 font-mono">{error}</p>
                       </div>
-                    </div>
-                  ) : response ? (
-                    <Tabs defaultValue="body" className="flex-1">
-                      <div className="border-b px-4 bg-background/50">
-                        <TabsList className="h-8 p-0 bg-transparent gap-4">
-                          <TabsTrigger 
-                            value="body"
-                            className="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none font-medium text-muted-foreground data-[state=active]:text-foreground"
-                          >
-                            Body
-                          </TabsTrigger>
-                          <TabsTrigger 
-                            value="headers"
-                            className="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none font-medium text-muted-foreground data-[state=active]:text-foreground"
-                          >
-                            Headers
-                          </TabsTrigger>
-                        </TabsList>
-                      </div>
+                    ) : response ? (
+                      <Tabs defaultValue="body" className="flex-1">
+                        <div className="border-b px-4 bg-background/50">
+                          <TabsList className="h-8 p-0 bg-transparent gap-4">
+                            <TabsTrigger 
+                              value="body"
+                              className="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none font-medium text-muted-foreground data-[state=active]:text-foreground"
+                            >
+                              Body
+                            </TabsTrigger>
+                            <TabsTrigger 
+                              value="headers"
+                              className="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none font-medium text-muted-foreground data-[state=active]:text-foreground"
+                            >
+                              Headers
+                            </TabsTrigger>
+                          </TabsList>
+                        </div>
 
-                      <TabsContent value="body" className="m-0 p-0 relative group">
-                         <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10 flex gap-1">
-                          <Button 
-                            variant="secondary" 
-                            size="sm" 
-                            className="h-6 text-[10px] gap-1 shadow-sm"
-                            onClick={() => navigator.clipboard.writeText(response.body ?? "")}
-                          >
-                            <Copy className="h-3 w-3" />
-                            Copy
-                          </Button>
-                        </div>
-                        <ResponseBodyView 
-                          body={response.body} 
-                          contentType={response.contentType} 
-                        />
-                      </TabsContent>
+                        <TabsContent value="body" className="m-0 p-0 relative group">
+                          <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10 flex gap-1">
+                            <Button 
+                              variant="secondary" 
+                              size="sm" 
+                              className="h-6 text-[10px] gap-1 shadow-sm"
+                              onClick={() => navigator.clipboard.writeText(response.body ?? "")}
+                            >
+                              <Copy className="h-3 w-3" />
+                              Copy
+                            </Button>
+                          </div>
+                          <ResponseBodyView 
+                            body={response.body} 
+                            contentType={response.contentType} 
+                          />
+                        </TabsContent>
 
-                      <TabsContent value="headers" className="m-0 p-4">
-                        <div className="grid gap-2">
-                          {Object.entries(response.headers).map(([key, value]) => (
-                            <div key={key} className="flex gap-3 text-xs border-b border-border/40 pb-1.5 last:border-0">
-                              <span className="font-semibold text-muted-foreground min-w-[120px] shrink-0">{key}</span>
-                              <span className="break-all font-mono text-foreground/80">{value}</span>
-                            </div>
-                          ))}
+                        <TabsContent value="headers" className="m-0 p-4">
+                          <div className="grid gap-2">
+                            {Object.entries(response.headers).map(([key, value]) => (
+                              <div key={key} className="flex gap-3 text-xs border-b border-border/40 pb-1.5 last:border-0">
+                                <span className="font-semibold text-muted-foreground min-w-[120px] shrink-0">{key}</span>
+                                <span className="break-all font-mono text-foreground/80">{value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </TabsContent>
+                      </Tabs>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center min-h-[300px] h-[calc(100vh-200px)] text-muted-foreground p-8">
+                        <div className="h-16 w-16 rounded-full bg-muted/30 flex items-center justify-center mb-4">
+                          <Send className="h-8 w-8 opacity-20" />
                         </div>
-                      </TabsContent>
-                    </Tabs>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center min-h-[300px] h-[calc(100vh-200px)] text-muted-foreground p-8">
-                      <div className="h-16 w-16 rounded-full bg-muted/30 flex items-center justify-center mb-4">
-                        <Send className="h-8 w-8 opacity-20" />
+                        <p className="text-sm font-medium">Ready to send request</p>
+                        <p className="text-xs text-muted-foreground mt-1">Enter URL and method to start</p>
                       </div>
-                      <p className="text-sm font-medium">Ready to send request</p>
-                      <p className="text-xs text-muted-foreground mt-1">Enter URL and method to start</p>
-                    </div>
-                  )}
-                </ScrollArea>
+                    )}
+                  </ScrollArea>
+                ) : (
+                  <HistoryPanel 
+                    history={currentHistory} 
+                    onSelect={loadHistoryItem}
+                  />
+                )}
               </div>
             </div>
           </>
@@ -962,4 +1007,244 @@ function escapeHtml(text: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+// History Panel Component
+interface HistoryPanelProps {
+  history: RequestHistory[];
+  onSelect: (item: RequestHistory) => void;
+}
+
+function HistoryPanel({ history, onSelect }: HistoryPanelProps) {
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
+  const selectedItem = history.find(h => h.id === selectedHistoryId);
+
+  const formatDate = (timestamp: number) => {
+    const date = new Date(timestamp);
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    
+    if (isToday) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+    return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + 
+           date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  if (history.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[300px] h-[calc(100vh-200px)] text-muted-foreground p-8">
+        <div className="h-16 w-16 rounded-full bg-muted/30 flex items-center justify-center mb-4">
+          <Clock className="h-8 w-8 opacity-20" />
+        </div>
+        <p className="text-sm font-medium">No history yet</p>
+        <p className="text-xs text-muted-foreground mt-1">Send a request to see its history here</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full">
+      {/* History List */}
+      <div className="w-72 border-r flex flex-col">
+        <ScrollArea className="flex-1">
+          <div className="p-2 space-y-1">
+            {history.map((item) => (
+              <div
+                key={item.id}
+                onClick={() => setSelectedHistoryId(item.id)}
+                className={cn(
+                  "p-2 rounded-md cursor-pointer transition-colors",
+                  selectedHistoryId === item.id
+                    ? "bg-primary/10 border border-primary/20"
+                    : "hover:bg-muted/50"
+                )}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className={cn("text-[9px] font-mono font-bold", getMethodClass(item.request.method))}>
+                      {item.request.method}
+                    </span>
+                    {item.response && (
+                      <Badge 
+                        variant="outline" 
+                        className={cn("h-4 px-1 text-[9px]", getStatusClass(item.response.status))}
+                      >
+                        {item.response.status}
+                      </Badge>
+                    )}
+                    {item.error && (
+                      <Badge variant="destructive" className="h-4 px-1 text-[9px]">
+                        Error
+                      </Badge>
+                    )}
+                  </div>
+                  <span className="text-[10px] text-muted-foreground">
+                    {formatDate(item.executed_at)}
+                  </span>
+                </div>
+                <div className="text-xs text-muted-foreground truncate font-mono">
+                  {item.request.url}
+                </div>
+                {item.response && (
+                  <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground">
+                    <span>{formatDuration(item.response.durationMs)}</span>
+                    <span>{formatBytes(item.response.bodySize)}</span>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      </div>
+
+      {/* History Detail */}
+      <div className="flex-1 overflow-hidden">
+        {selectedItem ? (
+          <div className="h-full flex flex-col">
+            <div className="p-3 border-b bg-muted/5 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={cn("text-xs font-mono font-bold", getMethodClass(selectedItem.request.method))}>
+                  {selectedItem.request.method}
+                </span>
+                <span className="text-xs font-mono text-muted-foreground truncate max-w-[300px]">
+                  {selectedItem.request.url}
+                </span>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                onClick={() => onSelect(selectedItem)}
+              >
+                <Play className="h-3 w-3" />
+                Load this request
+              </Button>
+            </div>
+            
+            <ScrollArea className="flex-1">
+              <Tabs defaultValue="response" className="flex-1">
+                <div className="border-b px-4 bg-background/50">
+                  <TabsList className="h-8 p-0 bg-transparent gap-4">
+                    <TabsTrigger 
+                      value="response"
+                      className="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none font-medium text-muted-foreground data-[state=active]:text-foreground"
+                    >
+                      Response
+                    </TabsTrigger>
+                    <TabsTrigger 
+                      value="request"
+                      className="h-full rounded-none border-b-2 border-transparent px-2 text-xs data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:shadow-none font-medium text-muted-foreground data-[state=active]:text-foreground"
+                    >
+                      Request
+                    </TabsTrigger>
+                  </TabsList>
+                </div>
+
+                <TabsContent value="response" className="m-0">
+                  {selectedItem.error ? (
+                    <div className="p-4">
+                      <div className="rounded-md bg-destructive/10 p-4 border border-destructive/20">
+                        <div className="flex items-center gap-2 text-destructive mb-2">
+                          <X className="h-4 w-4" />
+                          <h4 className="text-sm font-semibold">Request Failed</h4>
+                        </div>
+                        <p className="text-xs text-destructive/80 font-mono">{selectedItem.error}</p>
+                      </div>
+                    </div>
+                  ) : selectedItem.response ? (
+                    <div>
+                      <div className="p-3 border-b bg-muted/5">
+                        <div className="flex items-center gap-3 text-xs">
+                          <Badge variant="outline" className={cn("rounded-sm px-1.5 py-0.5", getStatusClass(selectedItem.response.status))}>
+                            {selectedItem.response.status} {selectedItem.response.statusText}
+                          </Badge>
+                          <div className="flex items-center gap-1.5 text-muted-foreground">
+                            <Clock className="h-3 w-3" />
+                            <span>{formatDuration(selectedItem.response.durationMs)}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-muted-foreground">
+                            <ArrowRight className="h-3 w-3" />
+                            <span>{formatBytes(selectedItem.response.bodySize)}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <ResponseBodyView 
+                        body={selectedItem.response.body} 
+                        contentType={selectedItem.response.contentType} 
+                      />
+                    </div>
+                  ) : (
+                    <div className="p-4 text-center text-muted-foreground text-sm">
+                      No response data
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="request" className="m-0 p-4">
+                  <div className="space-y-4">
+                    {/* Headers */}
+                    {selectedItem.request.headers.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-muted-foreground mb-2">Headers</h4>
+                        <div className="grid gap-1 text-xs">
+                          {selectedItem.request.headers.filter(h => h.enabled).map((header, i) => (
+                            <div key={i} className="flex gap-2 font-mono">
+                              <span className="text-purple-500">{header.key}:</span>
+                              <span className="text-muted-foreground">{header.value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Query Params */}
+                    {selectedItem.request.query_params.length > 0 && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-muted-foreground mb-2">Query Parameters</h4>
+                        <div className="grid gap-1 text-xs">
+                          {selectedItem.request.query_params.filter(p => p.enabled).map((param, i) => (
+                            <div key={i} className="flex gap-2 font-mono">
+                              <span className="text-blue-500">{param.key}:</span>
+                              <span className="text-muted-foreground">{param.value}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Body */}
+                    {selectedItem.request.body.type !== "none" && (
+                      <div>
+                        <h4 className="text-xs font-semibold text-muted-foreground mb-2">Body</h4>
+                        {"content" in selectedItem.request.body && (
+                          <pre className="text-xs font-mono p-3 bg-muted/30 rounded-md overflow-auto max-h-[200px]">
+                            {selectedItem.request.body.content}
+                          </pre>
+                        )}
+                        {"fields" in selectedItem.request.body && (
+                          <div className="grid gap-1 text-xs">
+                            {selectedItem.request.body.fields.filter((f: KeyValuePair) => f.enabled).map((field: KeyValuePair, i: number) => (
+                              <div key={i} className="flex gap-2 font-mono">
+                                <span className="text-green-500">{field.key}:</span>
+                                <span className="text-muted-foreground">{field.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </ScrollArea>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-8">
+            <p className="text-sm">Select a history item to view details</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }

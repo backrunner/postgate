@@ -49,7 +49,7 @@ interface RequestEvent {
  */
 export function useProxy() {
   const { setStatus, setError, config } = useProxyStore();
-  const { addRequest, updateRequest, isPaused, loadHistory, historyLoaded } = useCaptureStore();
+  const { addRequest, updateRequest, isPaused } = useCaptureStore();
 
   // Start proxy
   const startProxy = useCallback(async (proxyConfig?: Partial<ProxyConfig>) => {
@@ -173,14 +173,10 @@ export function useProxy() {
     };
   }, [addRequest, updateRequest, isPaused]);
 
-  // Get initial status on mount and load history
+  // Get initial status on mount
   useEffect(() => {
     getStatus();
-    // Load captured history on first mount
-    if (!historyLoaded) {
-      loadHistory();
-    }
-  }, [getStatus, historyLoaded, loadHistory]);
+  }, [getStatus]);
 
   return {
     startProxy,

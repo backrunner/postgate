@@ -383,3 +383,104 @@ function getStatusText(status: number): string {
   
   return statusTexts[status] || 'Unknown';
 }
+
+/**
+ * Parse HAR file and convert to CapturedRequest array
+ */
+export function parseHar(harContent: string): CapturedRequest[] {
+  const har: Har = JSON.parse(harContent);
+  
+  return har.log.entries.map((entry, index) => {
+    const url = new URL(entry.request.url);
+    
+    // Convert headers from array to object
+    const requestHeaders: Record<string, string> = {};
+    for (const header of entry.request.headers) {
+      requestHeaders[header.name.toLowerCase()] = header.value;
+    }
+    
+    const responseHeaders: Record<string, string> = {};
+    for (const header of entry.response.headers) {
+      responseHeaders[header.name.toLowerCase()] = header.value;
+    }
+    
+    // Parse protocol
+    const httpVersion = entry.request.httpVersion.toLowerCase();
+    let protocol: CapturedRequest['protocol'] = 'http1';
+    if (httpVersion.includes('2')) {
+      protocol = 'http2';
+    } else if (httpVersion.includes('3') || httpVersion.includes('quic')) {
+      protocol = 'quic';
+    }
+    
+    // Generate unique ID
+    const id = `har-${Date.now()}-${index}`;
+    
+    // Parse request body
+    let requestBody: Uint8Array | null = null;
+    if (entry.request.postData?.text) {
+      requestBody = new TextEncoder().encode(entry.request.postData.text);
+    }
+    
+    // Parse response body
+    let responseBody: Uint8Array | null = null;
+    if (entry.response.content.text) {
+      responseBody = new TextEncoder().encode(entry.response.content.text);
+    }
+    
+    return {
+      id,
+      timestamp: new Date(entry.startedDateTime).getTime(),
+      method: entry.request.method,
+      url: entry.request.url,
+      host: url.host,
+      path: url.pathname + url.search,
+      requestHeaders,
+      requestBody,
+      responseStatus: entry.response.status,
+      responseHeaders,
+      responseBody,
+      durationMs: entry.time > 0 ? entry.time : null,
+      matchedRules: [],
+      protocol,
+      tlsInfo: url.protocol === 'https:' ? { version: 'TLS 1.2', cipher: '', serverName: url.host } : null,
+      contentType: entry.response.content.mimeType || null,
+      requestSize: entry.request.bodySize > 0 ? entry.request.bodySize : 0,
+      responseSize: entry.response.bodySize > 0 ? entry.response.bodySize : null,
+      remoteAddr: null,
+    };
+  });
+}
+
+/**
+ * Import HAR file via file picker
+ */
+export async function importFromHar(): Promise<CapturedRequest[]> {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.har,application/json';
+    
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) {
+        resolve([]);
+        return;
+      }
+      
+      try {
+        const content = await file.text();
+        const requests = parseHar(content);
+        resolve(requests);
+      } catch (error) {
+        reject(new Error(`Failed to parse HAR file: ${error}`));
+      }
+    };
+    
+    input.oncancel = () => {
+      resolve([]);
+    };
+    
+    input.click();
+  });
+}

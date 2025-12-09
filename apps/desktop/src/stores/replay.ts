@@ -117,6 +117,10 @@ interface ReplayState {
   clearResponse: () => void;
   clearHistory: () => Promise<void>;
   
+  // History for current request
+  getHistoryForRequest: (requestId: string) => RequestHistory[];
+  loadHistoryItem: (historyItem: RequestHistory) => void;
+  
   // Import
   importFromCapture: (data: { method: string; url: string; path: string; request_headers?: Record<string, string> }, collectionId?: string) => Promise<SavedRequest>;
 }
@@ -262,6 +266,19 @@ export const useReplayStore = create<ReplayState>((set, get) => ({
   clearHistory: async () => {
     await invoke('clear_request_history');
     set({ history: [] });
+  },
+
+  getHistoryForRequest: (requestId: string) => {
+    const { history } = get();
+    return history.filter(h => h.saved_request_id === requestId);
+  },
+
+  loadHistoryItem: (historyItem: RequestHistory) => {
+    set({
+      currentRequest: { ...historyItem.request },
+      response: historyItem.response,
+      error: historyItem.error,
+    });
   },
 
   importFromCapture: async (data, collectionId) => {

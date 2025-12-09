@@ -89,6 +89,7 @@ interface CaptureState {
   historyTotal: number;
 
   addRequest: (request: CapturedRequest) => void;
+  addRequests: (requests: CapturedRequest[]) => void;
   updateRequest: (id: string, update: Partial<CapturedRequest>) => void;
   setSelected: (id: string | null) => void;
   togglePause: () => void;
@@ -191,6 +192,34 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
 
       // Trim if exceeds max
       if (newIds.length > state.maxRequests) {
+        const removedId = newIds.pop()!;
+        newMap.delete(removedId);
+      }
+
+      return {
+        requestMap: newMap,
+        requestIds: newIds,
+      };
+    });
+  },
+
+  addRequests: (requests) => {
+    set((state) => {
+      const newMap = new Map(state.requestMap);
+      const newIds = [...state.requestIds];
+
+      // Sort by timestamp descending (newest first)
+      const sortedRequests = [...requests].sort((a, b) => b.timestamp - a.timestamp);
+
+      for (const request of sortedRequests) {
+        if (!newMap.has(request.id)) {
+          newMap.set(request.id, request);
+          newIds.unshift(request.id);
+        }
+      }
+
+      // Trim if exceeds max
+      while (newIds.length > state.maxRequests) {
         const removedId = newIds.pop()!;
         newMap.delete(removedId);
       }

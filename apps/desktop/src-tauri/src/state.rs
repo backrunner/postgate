@@ -56,7 +56,7 @@ impl AppState {
             debug_server: tokio::sync::RwLock::new(None),
             debug_session_manager,
             captured_storage: tokio::sync::RwLock::new(None),
-            persistence_enabled: AtomicBool::new(true),
+            persistence_enabled: AtomicBool::new(false),
         }
     }
 

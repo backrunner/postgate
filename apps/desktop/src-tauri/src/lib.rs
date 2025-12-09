@@ -16,6 +16,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install the default CryptoProvider for rustls (ring)
+    // This must be done before any TLS operations
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     // Initialize logging
     tracing_subscriber::registry()
         .with(
@@ -56,6 +62,7 @@ pub fn run() {
             commands::rules::delete_rule_group,
             commands::rules::toggle_rule_group,
             commands::rules::parse_rules,
+            commands::rules::has_active_debug_rules,
             commands::plugin::get_plugins,
             commands::plugin::discover_plugins,
             commands::plugin::load_plugin,

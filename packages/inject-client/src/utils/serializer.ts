@@ -89,13 +89,14 @@ export function serialize(value: unknown, seen = new WeakSet()): unknown {
     }
 
     if (ArrayBuffer.isView(value)) {
+      const typedArray = value as unknown as { length: number; slice?: (start: number, end: number) => ArrayLike<number> };
       return {
         __type: "typedarray",
         name: value.constructor.name,
-        length: (value as unknown as { length: number }).length,
+        length: typedArray.length,
         preview: Array.from(
-          (value as unknown as ArrayLike<number>).slice
-            ? (value as unknown as { slice(start: number, end: number): ArrayLike<number> }).slice(0, 10)
+          typedArray.slice
+            ? typedArray.slice(0, 10)
             : []
         ),
       };

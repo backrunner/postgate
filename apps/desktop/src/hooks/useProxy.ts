@@ -142,6 +142,7 @@ export function useProxy() {
             contentType: data.contentType || null,
             requestSize: data.requestSize,
             responseSize: null,
+            remoteAddr: data.remoteAddr || null,
           };
           addRequest(request);
         } else if (eventType === "completed" || eventType === "response_received") {

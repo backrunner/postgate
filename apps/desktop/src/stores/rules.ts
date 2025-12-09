@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { useDebugStore } from './debug';
 
 export interface RuleGroup {
   id: string;
@@ -98,6 +99,8 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     try {
       const groups = await invoke<RuleGroup[]>('get_rule_groups');
       set({ groups, isLoading: false });
+      // Sync debug server with rules on initial load
+      useDebugStore.getState().syncWithRules();
     } catch (e) {
       set({ error: String(e), isLoading: false });
     }
@@ -117,12 +120,16 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     
     await invoke('save_rule_group', { group });
     await get().loadGroups();
+    // Sync debug server with rule changes
+    useDebugStore.getState().syncWithRules();
     return group;
   },
   
   updateGroup: async (group: RuleGroup) => {
     await invoke('save_rule_group', { group: { ...group, updatedAt: Date.now() } });
     await get().loadGroups();
+    // Sync debug server with rule changes
+    useDebugStore.getState().syncWithRules();
   },
   
   deleteGroup: async (id: string) => {
@@ -132,11 +139,15 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       set({ selectedGroupId: null, editorContent: '', parseResult: null, isDirty: false });
     }
     await get().loadGroups();
+    // Sync debug server with rule changes
+    useDebugStore.getState().syncWithRules();
   },
   
   toggleGroup: async (id: string, enabled: boolean) => {
     await invoke('toggle_rule_group', { id, enabled });
     await get().loadGroups();
+    // Sync debug server with rule changes
+    useDebugStore.getState().syncWithRules();
   },
   
   selectGroup: (id: string | null) => {
@@ -201,6 +212,8 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     await invoke('save_rule_group', { group: updatedGroup });
     await get().loadGroups();
     set({ isDirty: false });
+    // Sync debug server with rule changes
+    useDebugStore.getState().syncWithRules();
   },
   
   discardChanges: () => {

@@ -1,4 +1,4 @@
-use super::types::{Rule, RuleGroup};
+use super::types::{Rule, RuleAction, RuleGroup};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -126,6 +126,16 @@ impl RuleEngine {
             total_rules,
             enabled_rules,
         }
+    }
+
+    /// Check if any enabled rule has a debug action
+    pub fn has_active_debug_rules(&self) -> bool {
+        let compiled = self.compiled_rules.read();
+        compiled.iter().any(|cr| {
+            cr.group_enabled
+                && cr.rule.enabled
+                && cr.rule.actions.iter().any(|a| matches!(a, RuleAction::Debug { .. }))
+        })
     }
 }
 

@@ -80,7 +80,7 @@ export class DevToolsBridge {
     try {
       switch (method) {
         case "Runtime.evaluate":
-          result = this.handleRuntimeEvaluate(params);
+          result = this.handleRuntimeEvaluate(params ?? {});
           break;
 
         case "Page.reload":

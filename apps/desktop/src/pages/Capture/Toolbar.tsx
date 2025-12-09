@@ -9,13 +9,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useCaptureStore } from "@/stores/capture";
+import { useCaptureStore, useRequests } from "@/stores/capture";
 import { useState } from "react";
 import { exportToHar } from "@/lib/export";
 
 export function Toolbar() {
-  const { isPaused, togglePause, clearRequests, filter, setFilter, resetFilter, requests } =
+  const { isPaused, togglePause, clearRequests, filter, setFilter, resetFilter } =
     useCaptureStore();
+  const requests = useRequests();
   const [showFilters, setShowFilters] = useState(false);
 
   const hasActiveFilters =
@@ -28,52 +29,66 @@ export function Toolbar() {
     filter.protocols.length > 0;
 
   return (
-    <div className="flex flex-col border-b">
-      <div className="flex h-10 items-center gap-2 px-3">
+    <div className="flex flex-col border-b bg-muted/10">
+      <div className="flex h-12 items-center gap-3 px-4">
         {/* Pause/Resume */}
-        <Button variant="ghost" size="icon-sm" onClick={togglePause} title={isPaused ? "Resume" : "Pause"}>
-          {isPaused ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button 
+            variant={isPaused ? "secondary" : "default"} 
+            size="sm" 
+            onClick={togglePause} 
+            className="h-7 text-xs px-3 gap-1.5"
+            title={isPaused ? "Resume capturing" : "Pause capturing"}
+          >
+            {isPaused ? <Play className="h-3.5 w-3.5 fill-current" /> : <Pause className="h-3.5 w-3.5 fill-current" />}
+            {isPaused ? "Resume" : "Pause"}
+          </Button>
 
-        {/* Clear */}
-        <Button variant="ghost" size="icon-sm" onClick={clearRequests} title="Clear all requests">
-          <Trash2 className="h-4 w-4" />
-        </Button>
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onClick={clearRequests} 
+            title="Clear all requests"
+            className="h-7 px-2 text-muted-foreground hover:text-destructive"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
 
-        <Separator orientation="vertical" className="h-6" />
+        <Separator orientation="vertical" className="h-6 mx-1" />
 
         {/* Search */}
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <div className="relative flex-1 max-w-md group">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground group-focus-within:text-foreground transition-colors" />
           <Input
             placeholder="Filter by URL, host, path..."
             value={filter.search}
             onChange={(e) => setFilter({ search: e.target.value })}
-            className="h-8 pl-8 text-sm"
+            className="h-8 pl-8 text-xs bg-background/50 border-muted-foreground/20 focus-visible:ring-primary/20 transition-all focus-visible:bg-background"
           />
           {filter.search && (
             <Button
               variant="ghost"
-              size="icon-sm"
-              className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2"
+              size="icon"
+              className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2 hover:bg-transparent"
               onClick={() => setFilter({ search: "" })}
             >
-              <X className="h-3 w-3" />
+              <X className="h-3 w-3 text-muted-foreground hover:text-foreground" />
             </Button>
           )}
         </div>
 
         {/* Filter Toggle */}
         <Button
-          variant={showFilters ? "secondary" : "ghost"}
+          variant={showFilters ? "secondary" : "outline"}
           size="sm"
           onClick={() => setShowFilters(!showFilters)}
-          className="gap-1"
+          className="h-8 gap-1.5 text-xs bg-background/50"
         >
-          <Filter className="h-4 w-4" />
+          <Filter className="h-3.5 w-3.5" />
           Filters
           {hasActiveFilters && (
-            <Badge variant="secondary" className="ml-1 h-5 px-1.5">
+            <Badge variant="secondary" className="ml-0.5 h-4 min-w-4 px-1 rounded-sm text-[9px] leading-none justify-center">
               {
                 [
                   filter.methods.length,
@@ -89,8 +104,13 @@ export function Toolbar() {
         </Button>
 
         {hasActiveFilters && (
-          <Button variant="ghost" size="sm" onClick={resetFilter} className="text-muted-foreground">
-            Clear filters
+          <Button 
+            variant="ghost" 
+            size="sm" 
+            onClick={resetFilter} 
+            className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+          >
+            Clear
           </Button>
         )}
 
@@ -99,93 +119,101 @@ export function Toolbar() {
         {/* Export */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" className="gap-1" disabled={requests.length === 0}>
+            <Button variant="ghost" size="sm" className="h-8 gap-1.5 text-xs text-muted-foreground" disabled={requests.length === 0}>
               <Download className="h-4 w-4" />
               Export
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onClick={() => exportToHar(requests)}>
+            <DropdownMenuItem onClick={() => exportToHar(requests)} className="text-xs">
               Export all as HAR ({requests.length})
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
+        <Separator orientation="vertical" className="h-6 mx-1" />
+
         {/* Request count */}
-        <span className="text-sm text-muted-foreground">
-          {requests.length.toLocaleString()} requests
-          {isPaused && <span className="ml-2 text-amber-500">(paused)</span>}
-        </span>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
+          <span className="font-semibold text-foreground">{requests.length.toLocaleString()}</span> requests
+          {isPaused && <span className="text-amber-500 font-medium px-1.5 py-0.5 bg-amber-500/10 rounded ml-1">PAUSED</span>}
+        </div>
       </div>
 
       {/* Filter Panel */}
       {showFilters && (
-        <div className="flex flex-wrap items-center gap-2 border-t px-3 py-2">
+        <div className="flex flex-wrap items-center gap-4 border-t px-4 py-3 bg-muted/20 animate-in slide-in-from-top-1 duration-200">
           {/* Method filters */}
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-muted-foreground mr-1">Method:</span>
-            {["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => (
-              <Button
-                key={method}
-                variant={filter.methods.includes(method) ? "secondary" : "outline"}
-                size="sm"
-                className="h-6 px-2 text-xs"
-                onClick={() => {
-                  const methods = filter.methods.includes(method)
-                    ? filter.methods.filter((m) => m !== method)
-                    : [...filter.methods, method];
-                  setFilter({ methods });
-                }}
-              >
-                {method}
-              </Button>
-            ))}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Method</span>
+            <div className="flex gap-1">
+              {["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) => (
+                <Button
+                  key={method}
+                  variant={filter.methods.includes(method) ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-6 px-2 text-[10px] font-mono border border-transparent data-[state=active]:border-border hover:bg-muted/50"
+                  onClick={() => {
+                    const methods = filter.methods.includes(method)
+                      ? filter.methods.filter((m) => m !== method)
+                      : [...filter.methods, method];
+                    setFilter({ methods });
+                  }}
+                >
+                  {method}
+                </Button>
+              ))}
+            </div>
           </div>
 
           <Separator orientation="vertical" className="h-6" />
 
           {/* Status code filters */}
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-muted-foreground mr-1">Status:</span>
-            {["2xx", "3xx", "4xx", "5xx"].map((status) => (
-              <Button
-                key={status}
-                variant={filter.statusCodes.includes(status) ? "secondary" : "outline"}
-                size="sm"
-                className="h-6 px-2 text-xs"
-                onClick={() => {
-                  const statusCodes = filter.statusCodes.includes(status)
-                    ? filter.statusCodes.filter((s) => s !== status)
-                    : [...filter.statusCodes, status];
-                  setFilter({ statusCodes });
-                }}
-              >
-                {status}
-              </Button>
-            ))}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Status</span>
+            <div className="flex gap-1">
+              {["2xx", "3xx", "4xx", "5xx"].map((status) => (
+                <Button
+                  key={status}
+                  variant={filter.statusCodes.includes(status) ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-6 px-2 text-[10px] font-mono border border-transparent data-[state=active]:border-border hover:bg-muted/50"
+                  onClick={() => {
+                    const statusCodes = filter.statusCodes.includes(status)
+                      ? filter.statusCodes.filter((s) => s !== status)
+                      : [...filter.statusCodes, status];
+                    setFilter({ statusCodes });
+                  }}
+                >
+                  {status}
+                </Button>
+              ))}
+            </div>
           </div>
 
           <Separator orientation="vertical" className="h-6" />
 
           {/* Content type filters */}
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-muted-foreground mr-1">Type:</span>
-            {["json", "html", "js", "css", "image"].map((type) => (
-              <Button
-                key={type}
-                variant={filter.contentTypes.includes(type) ? "secondary" : "outline"}
-                size="sm"
-                className="h-6 px-2 text-xs"
-                onClick={() => {
-                  const contentTypes = filter.contentTypes.includes(type)
-                    ? filter.contentTypes.filter((t) => t !== type)
-                    : [...filter.contentTypes, type];
-                  setFilter({ contentTypes });
-                }}
-              >
-                {type}
-              </Button>
-            ))}
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Type</span>
+            <div className="flex gap-1">
+              {["json", "html", "js", "css", "image"].map((type) => (
+                <Button
+                  key={type}
+                  variant={filter.contentTypes.includes(type) ? "secondary" : "ghost"}
+                  size="sm"
+                  className="h-6 px-2 text-[10px] font-mono border border-transparent data-[state=active]:border-border hover:bg-muted/50"
+                  onClick={() => {
+                    const contentTypes = filter.contentTypes.includes(type)
+                      ? filter.contentTypes.filter((t) => t !== type)
+                      : [...filter.contentTypes, type];
+                    setFilter({ contentTypes });
+                  }}
+                >
+                  {type}
+                </Button>
+              ))}
+            </div>
           </div>
         </div>
       )}

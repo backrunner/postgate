@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { useProxyStore } from "./proxy";
 
 // Types matching Rust backend
 
@@ -80,6 +81,7 @@ interface DebugState {
 
   // Actions
   fetchStatus: () => Promise<void>;
+  syncWithRules: () => Promise<void>;
   startServer: (port?: number) => Promise<void>;
   stopServer: () => Promise<void>;
   fetchSessions: () => Promise<void>;
@@ -124,10 +126,29 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     }
   },
 
-  startServer: async (port = 9229) => {
+  syncWithRules: async () => {
+    try {
+      const hasDebugRules = await invoke<boolean>("has_active_debug_rules");
+      const currentStatus = get().status;
+      const debugPort = useProxyStore.getState().config.debugPort;
+
+      if (hasDebugRules && !currentStatus.is_running) {
+        // Start server if debug rules exist but server is not running
+        await get().startServer(debugPort);
+      } else if (!hasDebugRules && currentStatus.is_running) {
+        // Stop server if no debug rules but server is running
+        await get().stopServer();
+      }
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  startServer: async (port?: number) => {
+    const debugPort = port ?? useProxyStore.getState().config.debugPort;
     set({ isLoading: true, error: null });
     try {
-      await invoke("start_debug_server", { port });
+      await invoke("start_debug_server", { port: debugPort });
       await get().fetchStatus();
     } catch (e) {
       set({ error: String(e) });

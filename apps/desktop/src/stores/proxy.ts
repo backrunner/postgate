@@ -7,6 +7,7 @@ export interface ProxyConfig {
   enableHttp2: boolean;
   enableQuic: boolean;
   quicPort: number | null;
+  debugPort: number;
 }
 
 interface ProxyState {
@@ -25,6 +26,7 @@ export const useProxyStore = create<ProxyState>()((set) => ({
     enableHttp2: true,
     enableQuic: false,
     quicPort: null,
+    debugPort: 9229,
   },
   error: null,
   setStatus: (status) => set({ status }),

@@ -10,7 +10,7 @@ export function CapturePage() {
   const selectedId = useCaptureStore((state) => state.selectedId);
   const filteredRequests = useFilteredRequests();
   const selectedRequest = useCaptureStore((state) =>
-    state.requests.find((r) => r.id === state.selectedId)
+    state.selectedId ? state.requestMap.get(state.selectedId) : undefined
   );
 
   // Initialize proxy event listeners

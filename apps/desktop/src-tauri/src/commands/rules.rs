@@ -25,7 +25,22 @@ pub struct ParseError {
 /// Get all rule groups
 #[tauri::command]
 pub async fn get_rule_groups(state: State<'_, Arc<AppState>>) -> Result<Vec<RuleGroup>> {
-    Ok(state.rule_engine.get_all_groups())
+    // Check if in-memory engine is empty, if so, load from database
+    let groups = state.rule_engine.get_all_groups();
+    if groups.is_empty() {
+        // Load from database
+        let db = state.get_database().await?;
+        let db_groups = db.get_rule_groups().await?;
+        
+        // Populate the in-memory engine
+        for group in &db_groups {
+            state.rule_engine.upsert_group(group.clone());
+        }
+        
+        return Ok(db_groups);
+    }
+    
+    Ok(groups)
 }
 
 /// Save a rule group
@@ -58,7 +73,12 @@ pub async fn save_rule_group(
         updated_at: now,
     };
 
+    // Update in-memory engine
     state.rule_engine.upsert_group(group.clone());
+
+    // Persist to database
+    let db = state.get_database().await?;
+    db.save_rule_group(&group).await?;
 
     Ok(group)
 }
@@ -66,7 +86,13 @@ pub async fn save_rule_group(
 /// Delete a rule group
 #[tauri::command]
 pub async fn delete_rule_group(id: String, state: State<'_, Arc<AppState>>) -> Result<bool> {
+    // Remove from in-memory engine
     let removed = state.rule_engine.remove_group(&id);
+    
+    // Delete from database
+    let db = state.get_database().await?;
+    db.delete_rule_group(&id).await?;
+    
     Ok(removed.is_some())
 }
 
@@ -77,7 +103,18 @@ pub async fn toggle_rule_group(
     enabled: bool,
     state: State<'_, Arc<AppState>>,
 ) -> Result<bool> {
-    Ok(state.rule_engine.toggle_group(&id, enabled))
+    // Toggle in memory
+    let toggled = state.rule_engine.toggle_group(&id, enabled);
+    
+    if toggled {
+        // Persist the updated state to database
+        if let Some(group) = state.rule_engine.get_group(&id) {
+            let db = state.get_database().await?;
+            db.save_rule_group(&group).await?;
+        }
+    }
+    
+    Ok(toggled)
 }
 
 /// Parse rules from text (returns success/errors for validation)
@@ -103,4 +140,10 @@ pub async fn parse_rules(content: String) -> Result<ParseResult> {
             })
         }
     }
+}
+
+/// Check if any enabled rule group has a debug:// action
+#[tauri::command]
+pub async fn has_active_debug_rules(state: State<'_, Arc<AppState>>) -> Result<bool> {
+    Ok(state.rule_engine.has_active_debug_rules())
 }

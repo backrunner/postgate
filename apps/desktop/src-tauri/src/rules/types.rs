@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 /// A rule group containing multiple rules
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuleGroup {
     pub id: String,
     pub name: String,
@@ -23,6 +24,7 @@ pub struct RuleGroup {
 
 /// A single proxy rule
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Rule {
     pub id: String,
     pub pattern: Pattern,
@@ -35,6 +37,7 @@ pub struct Rule {
 
 /// Filters for conditional rule matching (whistle compatible)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuleFilters {
     /// Match specific HTTP methods (GET, POST, etc.)
     #[serde(default)]
@@ -418,6 +421,7 @@ pub struct HeaderModifications {
 
 /// Cookie options for response cookies
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CookieOptions {
     pub value: String,
     #[serde(default)]
@@ -436,7 +440,7 @@ pub struct CookieOptions {
 
 /// Body content for replacement
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyContent {
     /// Raw text/string content
     Text { content: String, content_type: String },

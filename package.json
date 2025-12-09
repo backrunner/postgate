@@ -4,8 +4,12 @@
   "private": true,
   "description": "A Tauri 2.0 based MITM proxy tool for local frontend development",
   "scripts": {
-    "dev": "turbo dev",
+    "dev": "turbo dev --filter=@postgate/shared --filter=@postgate/plugin-sdk --filter=@postgate/inject-client",
+    "dev:desktop": "pnpm dev & pnpm --filter @postgate/desktop tauri:dev",
+    "tauri:dev": "pnpm run build:packages && pnpm --filter @postgate/desktop tauri:dev",
+    "tauri:build": "pnpm run build:packages && pnpm --filter @postgate/desktop tauri:build",
     "build": "turbo build",
+    "build:packages": "turbo build --filter=@postgate/shared --filter=@postgate/plugin-sdk --filter=@postgate/inject-client",
     "lint": "turbo lint",
     "test": "turbo test",
     "clean": "turbo clean && rm -rf node_modules",

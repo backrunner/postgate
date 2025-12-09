@@ -1,0 +1,88 @@
+[package]
+name = "postgate"
+version = "0.1.0"
+description = "A Tauri 2.0 based MITM proxy tool for local frontend development"
+authors = ["PostGate Team"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "postgate_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async Runtime
+tokio = { version = "1.42", features = ["full"] }
+
+# HTTP/Networking
+hyper = { version = "1.5", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1.9"
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+# Certificate Generation
+rcgen = "0.13"
+x509-parser = "0.16"
+time = "0.3"
+
+# HTTP/2
+h2 = "0.4"
+
+# QUIC/HTTP/3 (optional, feature-gated)
+quinn = { version = "0.11", optional = true }
+
+# Concurrent Data Structures
+dashmap = "6.1"
+parking_lot = "0.12"
+
+# Error Handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utils
+uuid = { version = "1.11", features = ["v4", "serde"] }
+regex = "1.11"
+glob = "0.3"
+url = "2"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+mime_guess = "2"
+urlencoding = "2"
+
+# Storage
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# WebSocket
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+quic = ["quinn"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

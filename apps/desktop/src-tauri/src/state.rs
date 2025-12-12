@@ -155,7 +155,7 @@ impl AppState {
 
     /// Persist a captured request to storage
     async fn persist_request(
-        app_handle: AppHandle,
+        _app_handle: AppHandle,
         data_dir: PathBuf,
         data: CapturedRequestData,
     ) -> crate::error::Result<()> {
@@ -280,9 +280,20 @@ impl AppState {
         self.debug_session_manager.remove_session(session_id);
     }
 
-    /// Get the debug session manager (for use by proxy handler)
-    pub fn get_debug_session_manager(&self) -> &Arc<SessionManager> {
-        &self.debug_session_manager
+    // ==================== Streaming Events (SSE/WebSocket) ====================
+
+    /// Emit a stream message event to the frontend
+    pub fn emit_stream_message(&self, event: &StreamMessageEvent) {
+        if let Err(e) = self.app_handle.emit("proxy:stream-message", event) {
+            tracing::warn!("Failed to emit stream message event: {}", e);
+        }
+    }
+
+    /// Emit a stream ended event to the frontend
+    pub fn emit_stream_ended(&self, event: &StreamEndedEvent) {
+        if let Err(e) = self.app_handle.emit("proxy:stream-ended", event) {
+            tracing::warn!("Failed to emit stream ended event: {}", e);
+        }
     }
 }
 
@@ -299,7 +310,6 @@ pub struct CapturedRequestEvent {
 #[serde(rename_all = "snake_case")]
 pub enum RequestEventType {
     Started,
-    ResponseReceived,
     Completed,
     Error,
 }
@@ -335,4 +345,82 @@ pub struct CapturedRequestData {
     pub tls_version: Option<String>,
     #[serde(rename = "remoteAddr", skip_serializing_if = "Option::is_none")]
     pub remote_addr: Option<String>,
+}
+
+// ==================== Streaming Events (SSE/WebSocket) ====================
+
+/// Event sent when a stream message is received (SSE event or WebSocket frame)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StreamMessageEvent {
+    /// Connection/request ID this message belongs to
+    #[serde(rename = "connectionId")]
+    pub connection_id: String,
+    /// The stream message data
+    pub message: StreamMessage,
+}
+
+/// A single message in a stream (SSE event or WebSocket frame)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StreamMessage {
+    /// Unique message ID
+    pub id: String,
+    /// Timestamp when the message was captured
+    pub timestamp: i64,
+    /// Direction of the message
+    pub direction: StreamDirection,
+    /// Type of the message
+    #[serde(rename = "messageType")]
+    pub message_type: StreamMessageType,
+    /// Message data (text content or base64 encoded binary)
+    pub data: String,
+    /// Whether the data is base64 encoded
+    #[serde(rename = "isBase64")]
+    pub is_base64: bool,
+    /// Size in bytes
+    pub size: usize,
+}
+
+/// Direction of a stream message
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamDirection {
+    /// Message from server to client (downstream)
+    Inbound,
+    /// Message from client to server (upstream)
+    Outbound,
+}
+
+/// Type of stream message
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamMessageType {
+    // SSE types
+    SseEvent,
+    
+    // WebSocket types
+    WsText,
+    WsBinary,
+    WsPing,
+    WsPong,
+    WsClose,
+}
+
+/// Event sent when a stream connection ends
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StreamEndedEvent {
+    /// Connection/request ID
+    #[serde(rename = "connectionId")]
+    pub connection_id: String,
+    /// Total messages received
+    #[serde(rename = "messageCount")]
+    pub message_count: u64,
+    /// Total bytes transferred
+    #[serde(rename = "totalBytes")]
+    pub total_bytes: u64,
+    /// Duration in milliseconds
+    #[serde(rename = "durationMs")]
+    pub duration_ms: u64,
+    /// Close reason (if any)
+    #[serde(rename = "closeReason", skip_serializing_if = "Option::is_none")]
+    pub close_reason: Option<String>,
 }

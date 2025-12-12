@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::proxy::{ProxyConfig, ProxyServer, ProxyStatus};
 use crate::state::AppState;
 use crate::storage::{PaginatedResult, StoredCapturedRequest};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
 

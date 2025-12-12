@@ -334,6 +334,7 @@ impl ScriptInjector {
     }
 
     /// Check if a content type is HTML
+    #[allow(dead_code)]
     pub fn is_html_content_type(content_type: &str) -> bool {
         let ct = content_type.to_lowercase();
         ct.contains("text/html") || ct.contains("application/xhtml")

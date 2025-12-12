@@ -135,6 +135,7 @@ impl ThrottledBody {
 }
 
 /// Async throttled read function
+#[allow(dead_code)]
 pub async fn throttled_send(body: Bytes, kbps: u64) -> ThrottledSender {
     ThrottledSender::new(body, ThrottleConfig::from_kbps(kbps))
 }

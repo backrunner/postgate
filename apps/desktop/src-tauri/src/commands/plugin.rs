@@ -1,7 +1,7 @@
 //! Plugin management Tauri commands
 
 use crate::error::Result;
-use crate::plugin::{PluginInfo, PluginManager, PluginPanel};
+use crate::plugin::{PluginInfo, PluginPanel};
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::Arc;

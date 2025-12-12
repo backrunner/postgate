@@ -75,7 +75,7 @@ impl DebugServer {
     }
 
     /// Handle an incoming connection - detect if HTTP or WebSocket
-    async fn handle_incoming(&self, mut stream: TcpStream) -> Result<(), String> {
+    async fn handle_incoming(&self, stream: TcpStream) -> Result<(), String> {
         // Peek at the first few bytes to detect if it's an HTTP request or WebSocket upgrade
         let mut buf = [0u8; 1024];
         let n = stream.peek(&mut buf).await.map_err(|e| e.to_string())?;
@@ -161,6 +161,7 @@ impl DebugServer {
     }
 
     /// Check if server is running
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
     }
@@ -338,6 +339,7 @@ impl DebugServer {
     }
 
     /// Get session manager
+    #[allow(dead_code)]
     pub fn session_manager(&self) -> &Arc<SessionManager> {
         &self.session_manager
     }

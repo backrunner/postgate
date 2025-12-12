@@ -246,35 +246,6 @@ impl Database {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Get a single rule group
-    pub async fn get_rule_group(&self, id: &str) -> Result<Option<RuleGroup>> {
-        let row = sqlx::query_as::<_, RuleGroupRow>(
-            r#"
-            SELECT id, name, enabled, priority, raw_content, created_at, updated_at
-            FROM rule_groups
-            WHERE id = ?
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to fetch rule group: {}", e)))?;
-
-        Ok(row.map(|row| {
-            let rules = crate::rules::parse_rules(&row.raw_content).unwrap_or_default();
-            RuleGroup {
-                id: row.id,
-                name: row.name,
-                enabled: row.enabled != 0,
-                priority: row.priority,
-                rules,
-                raw_content: row.raw_content,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
-            }
-        }))
-    }
-
     // ==================== Collection Methods ====================
 
     /// Get all collections
@@ -581,7 +552,8 @@ struct SavedRequestRow {
     url: String,
     headers: String,
     query_params: String,
-    body_type: String,
+    #[sqlx(rename = "body_type")]
+    _body_type: String,
     body_content: Option<String>,
     created_at: i64,
     updated_at: i64,

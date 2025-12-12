@@ -5,10 +5,10 @@
 //! the Deno Core runtime and exposed to JavaScript code.
 
 use crate::plugin::storage::PluginStorage;
-use crate::plugin::types::{LogLevel, PluginPanel, PluginResponse};
+use crate::plugin::types::{PluginPanel, PluginResponse};
 use deno_core::{extension, op2, OpState};
 use deno_error::JsError;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::cell::RefCell;
 use std::rc::Rc;
 use tokio::sync::mpsc;
@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 /// Custom error type for plugin operations that implements JsErrorClass
 #[derive(Debug, thiserror::Error, JsError)]
 #[class(generic)]
+#[allow(dead_code)]
 pub enum PluginOpError {
     #[error("Storage error: {0}")]
     Storage(String),

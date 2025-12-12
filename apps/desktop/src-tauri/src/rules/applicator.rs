@@ -31,8 +31,6 @@ pub struct RequestModification {
     pub speed_kbps: Option<u64>,
     /// Target host override
     pub target_host: Option<String>,
-    /// Target proxy (for proxy chaining)
-    pub upstream_proxy: Option<UpstreamProxy>,
     /// Whether to ignore/skip this request
     pub ignore: bool,
     /// Debug name for logging
@@ -46,23 +44,6 @@ pub struct RequestModification {
 pub struct PluginHandlerInfo {
     pub name: String,
     pub config: serde_json::Value,
-}
-
-/// Upstream proxy configuration
-#[derive(Debug, Clone)]
-pub struct UpstreamProxy {
-    pub proxy_type: ProxyType,
-    pub host: String,
-    pub port: u16,
-    pub auth: Option<(String, String)>,
-}
-
-#[derive(Debug, Clone)]
-pub enum ProxyType {
-    Http,
-    Https,
-    Socks4,
-    Socks5,
 }
 
 /// Response to return instead of proxying
@@ -311,31 +292,8 @@ pub fn apply_request_rules(
                     }
                 }
 
-                RuleAction::HttpProxy { host, port, auth } => {
-                    modification.upstream_proxy = Some(UpstreamProxy {
-                        proxy_type: ProxyType::Http,
-                        host: host.clone(),
-                        port: *port,
-                        auth: auth.as_ref().map(|a| (a.username.clone(), a.password.clone())),
-                    });
-                }
-
-                RuleAction::HttpsProxy { host, port, auth } => {
-                    modification.upstream_proxy = Some(UpstreamProxy {
-                        proxy_type: ProxyType::Https,
-                        host: host.clone(),
-                        port: *port,
-                        auth: auth.as_ref().map(|a| (a.username.clone(), a.password.clone())),
-                    });
-                }
-
-                RuleAction::SocksProxy { host, port, version, auth } => {
-                    modification.upstream_proxy = Some(UpstreamProxy {
-                        proxy_type: if *version == 4 { ProxyType::Socks4 } else { ProxyType::Socks5 },
-                        host: host.clone(),
-                        port: *port,
-                        auth: auth.as_ref().map(|a| (a.username.clone(), a.password.clone())),
-                    });
+                RuleAction::HttpProxy { .. } | RuleAction::HttpsProxy { .. } | RuleAction::SocksProxy { .. } => {
+                    // Upstream proxy chaining not yet implemented
                 }
 
                 RuleAction::Debug { name } => {

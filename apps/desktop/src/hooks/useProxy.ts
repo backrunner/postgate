@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { useProxyStore } from "@/stores/proxy";
 import { useCaptureStore, CapturedRequest, Protocol } from "@/stores/capture";
+import { useStreamStore, StreamDirection, StreamMessageType } from "@/stores/stream";
 
 export interface ProxyConfig {
   port: number;
@@ -44,12 +45,35 @@ interface RequestEvent {
   data: RequestEventData;
 }
 
+// Stream event types from backend
+interface StreamMessageEventPayload {
+  connectionId: string;
+  message: {
+    id: string;
+    timestamp: number;
+    direction: "inbound" | "outbound";
+    messageType: "sse_event" | "sse_comment" | "ws_text" | "ws_binary" | "ws_ping" | "ws_pong" | "ws_close";
+    data: string;
+    isBase64: boolean;
+    size: number;
+  };
+}
+
+interface StreamEndedEventPayload {
+  connectionId: string;
+  messageCount: number;
+  totalBytes: number;
+  durationMs: number;
+  closeReason: string | null;
+}
+
 /**
  * Hook to manage proxy state and listen for events
  */
 export function useProxy() {
   const { setStatus, setError, config } = useProxyStore();
   const { addRequest, updateRequest, isPaused } = useCaptureStore();
+  const { addMessage, endStream } = useStreamStore();
 
   // Start proxy
   const startProxy = useCallback(async (proxyConfig?: Partial<ProxyConfig>) => {
@@ -111,10 +135,13 @@ export function useProxy() {
 
   // Listen for proxy events
   useEffect(() => {
-    let unlistenFn: UnlistenFn | null = null;
+    let unlistenRequest: UnlistenFn | null = null;
+    let unlistenStreamMessage: UnlistenFn | null = null;
+    let unlistenStreamEnded: UnlistenFn | null = null;
 
-    const setupListener = async () => {
-      unlistenFn = await listen<RequestEvent>("proxy:request", (event) => {
+    const setupListeners = async () => {
+      // Request events
+      unlistenRequest = await listen<RequestEvent>("proxy:request", (event) => {
         if (isPaused) return;
 
         const { id, eventType, data } = event.payload;
@@ -162,16 +189,47 @@ export function useProxy() {
           });
         }
       });
+
+      // Stream message events (SSE/WebSocket)
+      unlistenStreamMessage = await listen<StreamMessageEventPayload>("proxy:stream-message", (event) => {
+        if (isPaused) return;
+        
+        const { connectionId, message } = event.payload;
+        addMessage({
+          connectionId,
+          message: {
+            id: message.id,
+            timestamp: message.timestamp,
+            direction: message.direction as StreamDirection,
+            messageType: message.messageType as StreamMessageType,
+            data: message.data,
+            isBase64: message.isBase64,
+            size: message.size,
+          },
+        });
+      });
+
+      // Stream ended events
+      unlistenStreamEnded = await listen<StreamEndedEventPayload>("proxy:stream-ended", (event) => {
+        const { connectionId, messageCount, totalBytes, durationMs, closeReason } = event.payload;
+        endStream({
+          connectionId,
+          messageCount,
+          totalBytes,
+          durationMs,
+          closeReason,
+        });
+      });
     };
 
-    setupListener();
+    setupListeners();
 
     return () => {
-      if (unlistenFn) {
-        unlistenFn();
-      }
+      if (unlistenRequest) unlistenRequest();
+      if (unlistenStreamMessage) unlistenStreamMessage();
+      if (unlistenStreamEnded) unlistenStreamEnded();
     };
-  }, [addRequest, updateRequest, isPaused]);
+  }, [addRequest, updateRequest, addMessage, endStream, isPaused]);
 
   // Get initial status on mount
   useEffect(() => {

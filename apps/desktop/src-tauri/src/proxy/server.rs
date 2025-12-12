@@ -75,14 +75,8 @@ impl ProxyServer {
         body_storage: Arc<BodyStorage>,
         app_state: Arc<AppState>,
     ) -> Self {
-        // Create connection pool with config
-        let pool_config = PoolConfig {
-            max_connections_per_host: config.max_connections_per_host,
-            idle_timeout: Duration::from_secs(config.connection_idle_timeout),
-            max_lifetime: Duration::from_secs(300),
-        };
-        
-        let connection_pool = ConnectionPool::new(pool_config)
+        // Create connection pool (pooling not yet fully integrated)
+        let connection_pool = ConnectionPool::new(PoolConfig::default())
             .expect("Failed to create connection pool");
 
         let ctx = Arc::new(ProxyContext {
@@ -206,6 +200,7 @@ impl ProxyServer {
     }
 
     /// Check if the proxy is running
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
@@ -222,10 +217,5 @@ impl ProxyServer {
     /// Get the configuration
     pub fn config(&self) -> &ProxyConfig {
         &self.config
-    }
-
-    /// Get connection pool statistics
-    pub fn pool_stats(&self) -> &super::pool::PoolStats {
-        self.ctx.connection_pool.stats()
     }
 }

@@ -2,7 +2,6 @@ use super::types::{Rule, RuleAction, RuleGroup};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 /// Rule engine for matching and applying rules
 pub struct RuleEngine {
@@ -15,7 +14,6 @@ pub struct RuleEngine {
 /// A compiled rule optimized for fast matching
 struct CompiledRule {
     rule: Rule,
-    group_id: String,
     group_enabled: bool,
 }
 
@@ -77,7 +75,6 @@ impl RuleEngine {
             for rule in &group.rules {
                 compiled.push(CompiledRule {
                     rule: rule.clone(),
-                    group_id: group.id.clone(),
                     group_enabled: group.enabled,
                 });
             }
@@ -92,7 +89,7 @@ impl RuleEngine {
     /// Match a request against all rules
     pub fn match_request(
         &self,
-        method: &str,
+        _method: &str,
         host: &str,
         path: &str,
         _headers: &HashMap<String, String>,
@@ -111,23 +108,6 @@ impl RuleEngine {
             .collect()
     }
 
-    /// Get statistics about the rule engine
-    pub fn stats(&self) -> RuleEngineStats {
-        let groups = self.groups.len();
-        let compiled = self.compiled_rules.read();
-        let total_rules = compiled.len();
-        let enabled_rules = compiled
-            .iter()
-            .filter(|r| r.group_enabled && r.rule.enabled)
-            .count();
-
-        RuleEngineStats {
-            groups,
-            total_rules,
-            enabled_rules,
-        }
-    }
-
     /// Check if any enabled rule has a debug action
     pub fn has_active_debug_rules(&self) -> bool {
         let compiled = self.compiled_rules.read();
@@ -143,12 +123,4 @@ impl Default for RuleEngine {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Statistics about the rule engine
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RuleEngineStats {
-    pub groups: usize,
-    pub total_rules: usize,
-    pub enabled_rules: usize,
 }

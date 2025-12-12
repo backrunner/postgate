@@ -155,7 +155,6 @@ async fn execute_https_request(
     _host: &str,
     _port: u16,
 ) -> Result<Response<Incoming>> {
-    use hyper_util::client::legacy::connect::HttpConnector;
     use hyper_rustls::HttpsConnectorBuilder;
     
     let https = HttpsConnectorBuilder::new()

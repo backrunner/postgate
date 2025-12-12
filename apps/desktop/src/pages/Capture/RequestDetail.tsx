@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { CapturedRequest } from "@/stores/capture";
+import { useStreamConnection, formatMessageType } from "@/stores/stream";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,7 +12,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { X, Copy, Send, FileCode, Download, Terminal, Code } from "lucide-react";
+import { X, Copy, Send, FileCode, Download, Terminal, Code, Radio, ArrowDown, ArrowUp } from "lucide-react";
 import { useCaptureStore } from "@/stores/capture";
 import { useReplayStore } from "@/stores/replay";
 import { useRequestBody } from "@/hooks/useProxy";
@@ -35,6 +36,10 @@ export function RequestDetail({ request }: RequestDetailProps) {
   const setSelected = useCaptureStore((state) => state.setSelected);
   const importFromCapture = useReplayStore((state) => state.importFromCapture);
   const { getRequestBody, getResponseBody } = useRequestBody(request.id);
+  
+  // Stream connection for SSE/WebSocket requests
+  const streamConnection = useStreamConnection(request.id);
+  const isStreamRequest = request.protocol === "websocket" || request.protocol === "sse";
   
   const [requestBody, setRequestBody] = useState<Uint8Array | null>(null);
   const [responseBody, setResponseBody] = useState<Uint8Array | null>(null);
@@ -214,11 +219,21 @@ export function RequestDetail({ request }: RequestDetailProps) {
       </div>
 
       {/* Tabs */}
-      <Tabs defaultValue="overview" className="flex-1 flex flex-col overflow-hidden">
+      <Tabs defaultValue={isStreamRequest ? "stream" : "overview"} className="flex-1 flex flex-col overflow-hidden">
         <TabsList className="mx-3 mt-1.5 w-fit h-8">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="request">Request</TabsTrigger>
-          <TabsTrigger value="response">Response</TabsTrigger>
+          {isStreamRequest ? (
+            <TabsTrigger value="stream" className="flex items-center gap-1">
+              <Radio className="h-3 w-3" />
+              Stream
+              {streamConnection && !streamConnection.isEnded && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              )}
+            </TabsTrigger>
+          ) : (
+            <TabsTrigger value="response">Response</TabsTrigger>
+          )}
           <TabsTrigger value="timing">Timing</TabsTrigger>
         </TabsList>
 
@@ -362,6 +377,120 @@ export function RequestDetail({ request }: RequestDetailProps) {
             </div>
           </ScrollArea>
         </TabsContent>
+
+        {/* Stream Tab - for SSE/WebSocket */}
+        {isStreamRequest && (
+          <TabsContent value="stream" className="flex-1 overflow-hidden mt-0 px-3">
+            <div className="h-full flex flex-col">
+              {/* Stream Stats */}
+              {streamConnection && (
+                <div className="flex items-center gap-4 text-xs py-2 border-b mb-2">
+                  <div className="flex items-center gap-1">
+                    <span className="text-muted-foreground">Messages:</span>
+                    <span className="font-medium">{streamConnection.messageCount}</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-muted-foreground">Bytes:</span>
+                    <span className="font-medium">{formatBytes(streamConnection.totalBytes)}</span>
+                  </div>
+                  {streamConnection.durationMs !== null && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-muted-foreground">Duration:</span>
+                      <span className="font-medium">{formatDuration(streamConnection.durationMs)}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1">
+                    <span className={cn(
+                      "w-2 h-2 rounded-full",
+                      streamConnection.isEnded ? "bg-gray-400" : "bg-emerald-500 animate-pulse"
+                    )} />
+                    <span className="text-muted-foreground">
+                      {streamConnection.isEnded ? "Ended" : "Live"}
+                    </span>
+                  </div>
+                  {streamConnection.closeReason && (
+                    <div className="flex items-center gap-1 text-muted-foreground">
+                      <span>Reason: {streamConnection.closeReason}</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Message List */}
+              <ScrollArea className="flex-1">
+                <div className="space-y-1 py-2">
+                  {streamConnection && streamConnection.messages.length > 0 ? (
+                    streamConnection.messages.map((msg) => (
+                      <div
+                        key={msg.id}
+                        className={cn(
+                          "flex items-start gap-2 p-2 rounded text-xs font-mono",
+                          msg.direction === "inbound"
+                            ? "bg-blue-50 dark:bg-blue-950/30"
+                            : "bg-green-50 dark:bg-green-950/30"
+                        )}
+                      >
+                        {/* Direction indicator */}
+                        <div className={cn(
+                          "shrink-0 p-1 rounded",
+                          msg.direction === "inbound"
+                            ? "text-blue-600 dark:text-blue-400"
+                            : "text-green-600 dark:text-green-400"
+                        )}>
+                          {msg.direction === "inbound" ? (
+                            <ArrowDown className="h-3 w-3" />
+                          ) : (
+                            <ArrowUp className="h-3 w-3" />
+                          )}
+                        </div>
+                        
+                        {/* Message content */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <Badge variant="outline" className="text-[10px] py-0 h-4">
+                              {formatMessageType(msg.messageType)}
+                            </Badge>
+                            <span className="text-muted-foreground text-[10px]">
+                              {new Date(msg.timestamp).toLocaleTimeString()}
+                            </span>
+                            <span className="text-muted-foreground text-[10px]">
+                              {formatBytes(msg.size)}
+                            </span>
+                          </div>
+                          <pre className="whitespace-pre-wrap break-all text-[11px] leading-relaxed">
+                            {msg.isBase64 ? (
+                              <span className="text-muted-foreground italic">
+                                [Binary data - {formatBytes(msg.size)}]
+                              </span>
+                            ) : (
+                              msg.data
+                            )}
+                          </pre>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-center text-muted-foreground py-8">
+                      {isStreamRequest ? (
+                        <>
+                          <Radio className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                          <p>Waiting for stream messages...</p>
+                          <p className="text-xs mt-1">
+                            {request.protocol === "websocket"
+                              ? "WebSocket frames will appear here"
+                              : "SSE events will appear here"}
+                          </p>
+                        </>
+                      ) : (
+                        <p>No stream data for this request</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </ScrollArea>
+            </div>
+          </TabsContent>
+        )}
 
         <TabsContent value="timing" className="flex-1 overflow-hidden mt-0 px-3">
           <ScrollArea className="h-full">

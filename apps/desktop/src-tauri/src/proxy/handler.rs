@@ -4,6 +4,8 @@ use crate::error::Result;
 use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::pool::ConnectionPool;
+use crate::proxy::sse;
+use crate::proxy::websocket;
 use crate::proxy::BodyStorage;
 use crate::rules::{apply_request_rules, apply_response_rules, RuleEngine};
 use crate::state::{AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType};
@@ -24,6 +26,7 @@ use super::tls::TlsAcceptor;
 use super::tunnel::tunnel_connection;
 
 /// Context passed through the proxy pipeline
+#[allow(dead_code)]
 pub struct ProxyContext {
     pub ca: Arc<CertificateAuthority>,
     pub rule_engine: Arc<RuleEngine>,
@@ -92,6 +95,11 @@ async fn handle_request(
         .collect();
 
     let content_type = request_headers.get("content-type").cloned();
+
+    // Check if this is a WebSocket upgrade request
+    if websocket::is_websocket_upgrade(&request_headers) {
+        return handle_websocket_upgrade(req, &request_id, timestamp, &host, &path, &request_headers, peer_addr, ctx).await;
+    }
 
     // Emit request started event
     ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -198,7 +206,7 @@ async fn handle_request(
 
     // Use modified headers and body for the forwarded request
     let modified_body = request_modification.body.unwrap_or(request_body.data.clone());
-    let target_host = request_modification.target_host.as_ref().unwrap_or(&host);
+    let _target_host = request_modification.target_host.as_ref().unwrap_or(&host);
 
     // Rebuild request with modified body and headers
     let mut new_req = Request::builder()
@@ -219,11 +227,64 @@ async fn handle_request(
         .body(Full::new(modified_body).map_err(|_| unreachable!()).boxed())
         .unwrap();
 
-    // Forward request to upstream
-    let response = forward_http_request(req, target_host).await;
+    // Forward request to upstream and check for SSE
+    let response = forward_http_request_check_sse(req, &request_id, &ctx).await;
 
     match response {
-        Ok((resp, response_body)) => {
+        Ok(ForwardResult::Sse { parts, body, content_type }) => {
+            // Handle SSE streaming response
+            let status = parts.status.as_u16();
+            let response_headers: HashMap<String, String> = parts.headers
+                .iter()
+                .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+
+            // Emit started event with SSE protocol
+            ctx.app_state.emit_request_event(&CapturedRequestEvent {
+                id: request_id.clone(),
+                event_type: RequestEventType::Started,
+                data: CapturedRequestData {
+                    id: request_id.clone(),
+                    timestamp,
+                    method: method.clone(),
+                    url: uri.clone(),
+                    host: host.clone(),
+                    path: path.clone(),
+                    request_headers: Some(request_headers.clone()),
+                    response_status: Some(status),
+                    response_headers: Some(response_headers.clone()),
+                    matched_rules: matched_rule_ids.clone(),
+                    protocol: "sse".to_string(),
+                    content_type,
+                    request_size,
+                    ..Default::default()
+                },
+            });
+
+            // For SSE, we need to stream the body while capturing events
+            // Use a wrapping stream that captures data as it passes through
+            let request_id_clone = request_id.clone();
+            let ctx_clone = ctx.clone();
+
+            // Create a wrapper that captures SSE events while streaming
+            let wrapped_body = SseCapturingBody::new(body, request_id_clone, ctx_clone.app_state.clone());
+
+            // Build streaming response
+            let mut builder = Response::builder().status(status);
+            for (k, v) in &response_headers {
+                if let (Ok(name), Ok(value)) = (
+                    hyper::header::HeaderName::from_bytes(k.as_bytes()),
+                    hyper::header::HeaderValue::from_str(v),
+                ) {
+                    builder = builder.header(name, value);
+                }
+            }
+            
+            // Convert the wrapped body to BoxBody
+            let boxed_body = wrapped_body.boxed();
+            Ok(builder.body(boxed_body).unwrap())
+        }
+        Ok(ForwardResult::Normal { response: resp, body: response_body }) => {
             let status = resp.status().as_u16();
             let response_headers: HashMap<String, String> = resp
                 .headers()
@@ -467,11 +528,13 @@ async fn handle_connect(
         .unwrap())
 }
 
-/// Forward an HTTP request to the upstream server and capture response body
-async fn forward_http_request(
+/// Forward HTTP request and check if response is SSE
+/// Returns either (response, body) for normal responses or starts SSE streaming
+async fn forward_http_request_check_sse(
     req: Request<BoxBody<Bytes, hyper::Error>>,
-    _host: &str,
-) -> std::result::Result<(Response<()>, CapturedBody), Box<dyn std::error::Error + Send + Sync>> {
+    _request_id: &str,
+    _ctx: &Arc<ProxyContext>,
+) -> std::result::Result<ForwardResult, Box<dyn std::error::Error + Send + Sync>> {
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
@@ -480,14 +543,47 @@ async fn forward_http_request(
 
     let resp = client.request(req).await?;
     
-    // Collect response body
+    // Check if this is an SSE response
+    let content_type = resp.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    
+    if sse::is_sse_response(content_type.as_deref()) {
+        // Return SSE info for streaming
+        let (parts, body) = resp.into_parts();
+        return Ok(ForwardResult::Sse {
+            parts,
+            body,
+            content_type,
+        });
+    }
+    
+    // Normal response - collect body
     let (parts, body) = resp.into_parts();
     let incoming_body: Incoming = body;
     let captured_body = collect_body(incoming_body, MAX_BODY_SIZE).await?;
-    
     let resp_without_body = Response::from_parts(parts, ());
     
-    Ok((resp_without_body, captured_body))
+    Ok(ForwardResult::Normal {
+        response: resp_without_body,
+        body: captured_body,
+    })
+}
+
+/// Result of forwarding an HTTP request
+enum ForwardResult {
+    /// Normal HTTP response with collected body
+    Normal {
+        response: Response<()>,
+        body: CapturedBody,
+    },
+    /// SSE response that needs streaming
+    Sse {
+        parts: hyper::http::response::Parts,
+        body: Incoming,
+        content_type: Option<String>,
+    },
 }
 
 /// Extract query parameters from URL
@@ -557,4 +653,183 @@ fn emit_error_event(
             ..Default::default()
         },
     });
+}
+
+/// Handle WebSocket upgrade request
+async fn handle_websocket_upgrade(
+    req: Request<Incoming>,
+    request_id: &str,
+    timestamp: i64,
+    host: &str,
+    path: &str,
+    request_headers: &HashMap<String, String>,
+    peer_addr: SocketAddr,
+    ctx: Arc<ProxyContext>,
+) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    let url = format!("ws://{}{}", host, path);
+    
+    // Emit request started event with websocket protocol
+    ctx.app_state.emit_request_event(&CapturedRequestEvent {
+        id: request_id.to_string(),
+        event_type: RequestEventType::Started,
+        data: CapturedRequestData {
+            id: request_id.to_string(),
+            timestamp,
+            method: "GET".to_string(),
+            url: url.clone(),
+            host: host.to_string(),
+            path: path.to_string(),
+            request_headers: Some(request_headers.clone()),
+            protocol: "websocket".to_string(),
+            remote_addr: Some(peer_addr.to_string()),
+            ..Default::default()
+        },
+    });
+
+    let request_id = request_id.to_string();
+    let host = host.to_string();
+    let path = path.to_string();
+    let ctx_clone = ctx.clone();
+    let target_url = websocket::build_ws_url(&host, 80, &path, false);
+
+    // Spawn the WebSocket upgrade handling
+    tokio::task::spawn(async move {
+        match hyper::upgrade::on(req).await {
+            Ok(upgraded) => {
+                let io = TokioIo::new(upgraded);
+                let ws_proxy = websocket::WebSocketProxy::new(request_id.clone(), ctx_clone.app_state.clone());
+                
+                if let Err(e) = ws_proxy.proxy(io, &target_url).await {
+                    tracing::debug!("WebSocket proxy error for {}: {}", request_id, e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("WebSocket upgrade error: {}", e);
+            }
+        }
+    });
+
+    // Return 101 Switching Protocols
+    Ok(Response::builder()
+        .status(101)
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .body(Empty::<Bytes>::new().map_err(|_: std::convert::Infallible| unreachable!()).boxed())
+        .unwrap())
+}
+
+// ==================== SSE Capturing Body ====================
+
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use hyper::body::{Body, Frame, SizeHint};
+
+/// A body wrapper that captures SSE events as data flows through
+struct SseCapturingBody {
+    inner: Incoming,
+    connection_id: String,
+    app_state: Arc<AppState>,
+    parser: sse::SseParser,
+    message_count: u64,
+    total_bytes: u64,
+    start_time: std::time::Instant,
+    ended: bool,
+}
+
+impl SseCapturingBody {
+    fn new(inner: Incoming, connection_id: String, app_state: Arc<AppState>) -> Self {
+        Self {
+            inner,
+            connection_id,
+            app_state,
+            parser: sse::SseParser::new(),
+            message_count: 0,
+            total_bytes: 0,
+            start_time: std::time::Instant::now(),
+            ended: false,
+        }
+    }
+
+    fn emit_stream_ended(&self) {
+        self.app_state.emit_stream_ended(&crate::state::StreamEndedEvent {
+            connection_id: self.connection_id.clone(),
+            message_count: self.message_count,
+            total_bytes: self.total_bytes,
+            duration_ms: self.start_time.elapsed().as_millis() as u64,
+            close_reason: None,
+        });
+    }
+}
+
+impl Body for SseCapturingBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        let inner = Pin::new(&mut self.inner);
+        
+        match inner.poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    let chunk = data.clone();
+                    self.total_bytes += chunk.len() as u64;
+
+                    // Parse SSE events from the chunk
+                    let events = self.parser.feed(&chunk);
+                    for event in events {
+                        self.message_count += 1;
+                        
+                        let event_data = if let Some(ref event_type) = event.event_type {
+                            format!("event: {}\ndata: {}", event_type, event.data)
+                        } else {
+                            event.data.clone()
+                        };
+
+                        let stream_msg = crate::state::StreamMessage {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                            direction: crate::state::StreamDirection::Inbound,
+                            message_type: crate::state::StreamMessageType::SseEvent,
+                            data: event_data,
+                            is_base64: false,
+                            size: event.data.len(),
+                        };
+
+                        self.app_state.emit_stream_message(&crate::state::StreamMessageEvent {
+                            connection_id: self.connection_id.clone(),
+                            message: stream_msg,
+                        });
+                    }
+                }
+                
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                if !self.ended {
+                    self.ended = true;
+                    self.emit_stream_ended();
+                }
+                Poll::Ready(Some(std::result::Result::Err(e)))
+            }
+            Poll::Ready(None) => {
+                if !self.ended {
+                    self.ended = true;
+                    self.emit_stream_ended();
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }

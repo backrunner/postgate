@@ -16,6 +16,7 @@ pub struct CapturedBody {
 }
 
 impl CapturedBody {
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         Self {
             data: Bytes::new(),
@@ -24,6 +25,7 @@ impl CapturedBody {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new(data: Bytes, truncated: bool) -> Self {
         let size = data.len();
         Self {
@@ -123,6 +125,7 @@ impl BodyStorage {
         self.response_bodies.read().await.get(id).cloned()
     }
 
+    #[allow(dead_code)]
     pub async fn remove(&self, id: &str) {
         self.request_bodies.write().await.remove(id);
         self.response_bodies.write().await.remove(id);

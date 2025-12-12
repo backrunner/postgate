@@ -213,7 +213,6 @@ async fn forward_https_request(
     host: &str,
     port: u16,
 ) -> Result<(Response<()>, crate::proxy::body::CapturedBody)> {
-    use http_body_util::Empty;
 
     // Connect to upstream
     let addr = format!("{}:{}", host, port);

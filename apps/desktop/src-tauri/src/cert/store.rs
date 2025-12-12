@@ -17,6 +17,7 @@ impl CertStore {
     }
 
     /// Get the path to the CA private key file
+    #[allow(dead_code)]
     pub fn ca_key_path(&self) -> PathBuf {
         self.data_dir.join("ca.key")
     }
@@ -29,6 +30,7 @@ impl CertStore {
     }
 
     /// Load CA certificate from disk
+    #[allow(dead_code)]
     pub fn load_ca_cert(&self) -> Result<String> {
         let path = self.ca_cert_path();
         if !path.exists() {
@@ -38,6 +40,7 @@ impl CertStore {
     }
 
     /// Check if CA certificate exists
+    #[allow(dead_code)]
     pub fn ca_exists(&self) -> bool {
         self.ca_cert_path().exists()
     }

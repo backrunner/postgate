@@ -2,30 +2,33 @@
 //!
 //! This module provides HTTP/2 client and server handling for HTTPS tunnels.
 
-use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
-use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::body::{CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::handler::ProxyContext;
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use bytes::Bytes;
 use h2::server::SendResponse;
 use h2::RecvStream;
-use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::{Request, Response};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
+
+#[allow(unused_imports)]
+use http_body_util::Full;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
 use super::tls::{create_tls_connector, parse_server_name};
 
 /// Check if a connection should use HTTP/2
+#[allow(dead_code)]
 pub fn should_use_http2(alpn: Option<&[u8]>) -> bool {
     alpn.map(|p| p == b"h2").unwrap_or(false)
 }
 
 /// Handle an HTTP/2 connection from client
+#[allow(dead_code)]
 pub async fn handle_http2_connection<S>(
     stream: S,
     host: String,

@@ -1,6 +1,7 @@
 import { memo, CSSProperties, useMemo } from "react";
 import { CapturedRequest } from "@/stores/capture";
 import { ColumnConfig } from "@/stores/columns";
+import { useStreamStore } from "@/stores/stream";
 
 // Pre-computed class mappings for zero runtime lookup
 const METHOD_CLASSES: Record<string, string> = {
@@ -100,14 +101,26 @@ export const RequestListItem = memo(function RequestListItem({
     [columns]
   );
 
-  const baseClass = isSelected
-    ? "flex cursor-pointer items-center h-full select-none text-xs font-mono bg-accent"
-    : "flex cursor-pointer items-center h-full select-none text-xs font-mono hover:bg-accent/50";
+  const hasMatchedRules = request.matchedRules.length > 0;
+  
+  // Build class name: selected state takes priority, then matched rules style
+  let baseClass = "flex cursor-pointer items-center h-full select-none text-xs font-mono";
+  
+  if (isSelected) {
+    baseClass += " bg-accent";
+  } else {
+    baseClass += " hover:bg-accent/50";
+  }
+  
+  // Add blue-gray bold style for matched rules
+  if (hasMatchedRules) {
+    baseClass += " font-semibold text-slate-600 dark:text-slate-400";
+  }
 
   return (
     <div style={style} onClick={onClick} className={baseClass}>
       {visibleColumns.map((col) => (
-        <CellContent key={col.id} column={col} request={request} />
+        <CellContent key={col.id} column={col} request={request} hasMatchedRules={hasMatchedRules} />
       ))}
     </div>
   );
@@ -116,21 +129,32 @@ export const RequestListItem = memo(function RequestListItem({
 interface CellContentProps {
   column: ColumnConfig;
   request: CapturedRequest;
+  hasMatchedRules: boolean;
 }
 
-function CellContent({ column, request }: CellContentProps) {
+function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
+  // Get stream connection status for SSE/WebSocket requests
+  const streamConnection = useStreamStore((state) => 
+    (request.protocol === "websocket" || request.protocol === "sse") 
+      ? state.connections.get(request.id) 
+      : undefined
+  );
+  
   const isFlex = column.width === 0;
   const style: React.CSSProperties = isFlex
     ? { flex: 1, minWidth: column.minWidth }
     : { width: column.width, flexShrink: 0 };
 
   const baseClasses = "truncate";
+  // For rows with matched rules, use inherited color (blue-gray from parent)
+  // Only override colors for specific columns when NOT matched
+  const mutedClass = hasMatchedRules ? "" : "text-muted-foreground";
   
   switch (column.id) {
     case "method":
       return (
         <span
-          className={`${baseClasses} pl-2 font-semibold ${getMethodClass(request.method)}`}
+          className={`${baseClasses} pl-2 ${hasMatchedRules ? "" : "font-semibold"} ${hasMatchedRules ? "" : getMethodClass(request.method)}`}
           style={style}
         >
           {request.method}
@@ -140,34 +164,47 @@ function CellContent({ column, request }: CellContentProps) {
     case "status":
       return (
         <span
-          className={`${baseClasses} text-center ${getStatusClass(request.responseStatus)}`}
+          className={`${baseClasses} text-center ${hasMatchedRules ? "" : getStatusClass(request.responseStatus)}`}
           style={style}
         >
           {request.responseStatus ?? "-"}
         </span>
       );
 
-    case "protocol":
+    case "protocol": {
+      const isStreaming = request.protocol === "websocket" || request.protocol === "sse";
+      const isLive = streamConnection && !streamConnection.isEnded;
       return (
         <span
-          className={`${baseClasses} text-muted-foreground`}
+          className={`${baseClasses} ${mutedClass} flex items-center gap-1`}
           style={style}
         >
           {PROTOCOL_DISPLAY[request.protocol] || request.protocol.toUpperCase()}
+          {isStreaming && isLive && (
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+          )}
+          {streamConnection && streamConnection.messageCount > 0 && (
+            <span className="text-[10px] text-muted-foreground">
+              ({streamConnection.messageCount})
+            </span>
+          )}
         </span>
       );
+    }
 
     case "host": {
       // Use different colors: green for HTTPS (TLS), default for HTTP
+      // But if matched rules, inherit the blue-gray color from parent
       const isSecure = !!request.tlsInfo;
-      const hasRules = request.matchedRules.length > 0;
+      const hostClass = hasMatchedRules 
+        ? "" 
+        : (isSecure ? "text-emerald-500" : "text-muted-foreground");
       return (
         <span
-          className={`${baseClasses} ${isSecure ? "text-emerald-500" : "text-muted-foreground"}`}
+          className={`${baseClasses} ${hostClass}`}
           style={style}
-          title={`${isSecure ? "HTTPS" : "HTTP"}: ${request.host}${hasRules ? " (has rules)" : ""}`}
+          title={`${isSecure ? "HTTPS" : "HTTP"}: ${request.host}${hasMatchedRules ? " (matched rules)" : ""}`}
         >
-          {hasRules && <span className="text-blue-500 mr-1">●</span>}
           {request.host}
         </span>
       );
@@ -187,7 +224,7 @@ function CellContent({ column, request }: CellContentProps) {
     case "remoteAddr":
       return (
         <span
-          className={`${baseClasses} text-muted-foreground`}
+          className={`${baseClasses} ${mutedClass}`}
           style={style}
           title={request.remoteAddr || undefined}
         >
@@ -198,7 +235,7 @@ function CellContent({ column, request }: CellContentProps) {
     case "duration":
       return (
         <span
-          className={`${baseClasses} text-right text-muted-foreground`}
+          className={`${baseClasses} text-right ${mutedClass}`}
           style={style}
         >
           {formatDuration(request.durationMs)}
@@ -208,7 +245,7 @@ function CellContent({ column, request }: CellContentProps) {
     case "size":
       return (
         <span
-          className={`${baseClasses} text-right text-muted-foreground pr-2`}
+          className={`${baseClasses} text-right ${mutedClass} pr-2`}
           style={style}
         >
           {formatSize(request.responseSize)}

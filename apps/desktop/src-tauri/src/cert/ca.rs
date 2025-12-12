@@ -268,16 +268,19 @@ impl CertificateAuthority {
     }
 
     /// Get CA certificate in DER format
+    #[allow(dead_code)]
     pub fn get_ca_der(&self) -> &[u8] {
         &self.ca_cert_der
     }
 
     /// Clear the certificate cache
+    #[allow(dead_code)]
     pub fn clear_cache(&self) {
         self.cert_cache.clear();
     }
 
     /// Get cache statistics
+    #[allow(dead_code)]
     pub fn cache_stats(&self) -> (usize, usize) {
         (self.cert_cache.len(), 1000) // (current, max)
     }

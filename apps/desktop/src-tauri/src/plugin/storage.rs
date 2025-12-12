@@ -152,6 +152,7 @@ impl PluginStorage {
     }
 
     /// Clear all storage for a specific plugin (static method for cleanup)
+    #[allow(dead_code)]
     pub async fn clear_plugin_storage(pool: &SqlitePool, plugin_id: &str) -> Result<u64> {
         let result = sqlx::query(
             "DELETE FROM plugin_storage WHERE plugin_id = ?"

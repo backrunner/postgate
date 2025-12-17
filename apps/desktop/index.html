@@ -5,6 +5,32 @@
     <link rel="icon" type="image/svg+xml" href="/postgate.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PostGate</title>
+    <script>
+      // 立即根据系统偏好设置主题，避免闪烁
+      (function() {
+        const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (isDark) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+    <style>
+      /* 预设背景色避免白屏 */
+      html {
+        background-color: #ffffff;
+      }
+      html.dark {
+        background-color: #09090b;
+      }
+      /* 隐藏内容直到 React 加载完成 */
+      #root {
+        opacity: 0;
+        transition: opacity 0.15s ease-in;
+      }
+      #root.loaded {
+        opacity: 1;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

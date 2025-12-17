@@ -34,6 +34,7 @@ pub async fn handle_http2_connection<S>(
     host: String,
     port: u16,
     ctx: Arc<ProxyContext>,
+    tls_version: String,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -48,9 +49,10 @@ where
 
         let host = host.clone();
         let ctx = ctx.clone();
+        let tls_ver = tls_version.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_http2_request(request, respond, &host, port, ctx).await {
+            if let Err(e) = handle_http2_request(request, respond, &host, port, ctx, &tls_ver).await {
                 tracing::error!("HTTP/2 request error: {}", e);
             }
         });
@@ -66,6 +68,7 @@ async fn handle_http2_request(
     host: &str,
     port: u16,
     ctx: Arc<ProxyContext>,
+    tls_version: &str,
 ) -> Result<()> {
     let request_id = Uuid::new_v4().to_string();
     let start_time = std::time::Instant::now();
@@ -107,7 +110,7 @@ async fn handle_http2_request(
             request_headers: Some(request_headers.clone()),
             protocol: "h2".to_string(),
             content_type: content_type.clone(),
-            tls_version: Some("TLS 1.3".to_string()),
+            tls_version: Some(tls_version.to_string()),
             ..Default::default()
         },
     });
@@ -174,7 +177,7 @@ async fn handle_http2_request(
                     content_type: response_content_type,
                     request_size,
                     response_size: Some(response_size),
-                    tls_version: Some("TLS 1.3".to_string()),
+                    tls_version: Some(tls_version.to_string()),
                     ..Default::default()
                 },
             });

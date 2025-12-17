@@ -39,7 +39,7 @@ webpki-roots = "1"
 hyper-rustls = { version = "0.27", features = ["http1", "http2", "webpki-tokio"] }
 
 # Certificate Generation
-rcgen = "0.13"
+rcgen = { version = "0.13", features = ["x509-parser"] }
 x509-parser = "0.18"
 pem = "3"
 time = "0.3"
@@ -53,6 +53,7 @@ quinn = { version = "0.11", optional = true }
 # Concurrent Data Structures
 dashmap = "6"
 parking_lot = "0.12"
+moka = { version = "0.12", features = ["sync"] }
 
 # Error Handling
 thiserror = "2"

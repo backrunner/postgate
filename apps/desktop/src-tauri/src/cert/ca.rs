@@ -1,5 +1,5 @@
 use crate::error::{PostGateError, Result};
-use dashmap::DashMap;
+use moka::sync::Cache;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
@@ -7,7 +7,17 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
+
+/// Maximum number of cached host certificates
+const CERT_CACHE_MAX_CAPACITY: u64 = 1000;
+
+/// TTL for cached certificates (23 hours - less than cert validity to ensure fresh certs)
+const CERT_CACHE_TTL_HOURS: u64 = 23;
+
+/// Host certificate validity period in days
+const HOST_CERT_VALIDITY_DAYS: i64 = 30;
 
 /// Certificate Authority for generating TLS certificates
 #[derive(Clone)]
@@ -20,8 +30,8 @@ pub struct CertificateAuthority {
     ca_key_pair: Arc<KeyPair>,
     /// CA certificate for signing
     ca_cert: Arc<Certificate>,
-    /// Cache of generated host certificates
-    cert_cache: Arc<DashMap<String, Arc<CertifiedKey>>>,
+    /// Cache of generated host certificates (with TTL and max size)
+    cert_cache: Cache<String, Arc<CertifiedKey>>,
 }
 
 /// A certified key containing certificate chain and private key
@@ -40,8 +50,16 @@ impl CertificateAuthority {
             ca_cert_pem,
             ca_key_pair: Arc::new(ca_key_pair),
             ca_cert: Arc::new(ca_cert),
-            cert_cache: Arc::new(DashMap::new()),
+            cert_cache: Self::create_cache(),
         })
+    }
+
+    /// Create a certificate cache with TTL and max capacity
+    fn create_cache() -> Cache<String, Arc<CertifiedKey>> {
+        Cache::builder()
+            .max_capacity(CERT_CACHE_MAX_CAPACITY)
+            .time_to_live(StdDuration::from_secs(CERT_CACHE_TTL_HOURS * 3600))
+            .build()
     }
 
     /// Load CA from files, or create new one if files don't exist
@@ -79,47 +97,37 @@ impl CertificateAuthority {
         let key_pair = KeyPair::from_pem(&key_pem)
             .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA key: {}", e)))?;
 
-        // Parse certificate to extract information
+        // Parse certificate PEM to get DER bytes
         let pem_parsed = pem::parse(&cert_pem)
             .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA cert PEM: {}", e)))?;
         
-        let cert = x509_parser::parse_x509_certificate(&pem_parsed.contents())
-            .map_err(|e| PostGateError::Certificate(format!("Failed to parse X509 certificate: {}", e)))?
-            .1;
+        let cert_der_bytes = pem_parsed.contents().to_vec();
+        let cert_der_ref = CertificateDer::from(cert_der_bytes.as_slice());
 
-        // Create minimal params for CA loading - we just need to recreate the cert
-        let mut params = CertificateParams::default();
-        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params.key_usages = vec![
-            rcgen::KeyUsagePurpose::KeyCertSign,
-            rcgen::KeyUsagePurpose::CrlSign,
-        ];
-        
-        // Extract subject from original cert
-        let subject_cn = cert.subject()
-            .iter_common_name()
-            .next()
-            .and_then(|cn| cn.as_str().ok())
-            .unwrap_or("PostGate CA");
-        
-        params.distinguished_name.push(
-            rcgen::DnType::CommonName,
-            subject_cn,
-        );
+        // Parse using x509-parser to validate and extract info
+        let (_, x509_cert) = x509_parser::parse_x509_certificate(&cert_der_bytes)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to parse X509 certificate: {}", e)))?;
 
-        // Recreate the certificate with the loaded key
-        let ca_cert = params
+        // Create CertificateParams from the existing certificate using rcgen's from_ca_cert_der
+        // This extracts issuer info needed for signing host certificates
+        let ca_cert = CertificateParams::from_ca_cert_der(&cert_der_ref)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA cert params: {}", e)))?
             .self_signed(&key_pair)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to recreate CA cert: {}", e)))?;
+            .map_err(|e| PostGateError::Certificate(format!("Failed to create CA cert: {}", e)))?;
 
-        let cert_der = ca_cert.der().to_vec();
+        // Verify the loaded certificate is a CA
+        if !x509_cert.is_ca() {
+            return Err(PostGateError::Certificate(
+                "Loaded certificate is not a CA".into(),
+            ));
+        }
 
         Ok(Self {
-            ca_cert_der: cert_der,
+            ca_cert_der: cert_der_bytes,
             ca_cert_pem: cert_pem,
             ca_key_pair: Arc::new(key_pair),
             ca_cert: Arc::new(ca_cert),
-            cert_cache: Arc::new(DashMap::new()),
+            cert_cache: Self::create_cache(),
         })
     }
 
@@ -195,14 +203,14 @@ impl CertificateAuthority {
     pub fn get_cert_for_host(&self, host: &str) -> Result<Arc<CertifiedKey>> {
         // Check cache first
         if let Some(cached) = self.cert_cache.get(host) {
-            return Ok(cached.clone());
+            return Ok(cached);
         }
 
         // Generate new certificate
         let certified_key = self.generate_host_cert(host)?;
         let certified_key = Arc::new(certified_key);
 
-        // Cache it
+        // Cache it (with automatic TTL and LRU eviction)
         self.cert_cache.insert(host.to_string(), certified_key.clone());
 
         Ok(certified_key)
@@ -218,10 +226,10 @@ impl CertificateAuthority {
         dn.push(DnType::OrganizationName, "PostGate Proxy");
         params.distinguished_name = dn;
 
-        // Set validity period (1 year)
+        // Set validity period (30 days - short-lived for security)
         let now = OffsetDateTime::now_utc();
         params.not_before = now;
-        params.not_after = now + Duration::days(365);
+        params.not_after = now + Duration::days(HOST_CERT_VALIDITY_DAYS);
 
         // Set Subject Alternative Names
         let san = if host.parse::<std::net::IpAddr>().is_ok() {
@@ -276,12 +284,12 @@ impl CertificateAuthority {
     /// Clear the certificate cache
     #[allow(dead_code)]
     pub fn clear_cache(&self) {
-        self.cert_cache.clear();
+        self.cert_cache.invalidate_all();
     }
 
     /// Get cache statistics
     #[allow(dead_code)]
-    pub fn cache_stats(&self) -> (usize, usize) {
-        (self.cert_cache.len(), 1000) // (current, max)
+    pub fn cache_stats(&self) -> (u64, u64) {
+        (self.cert_cache.entry_count(), CERT_CACHE_MAX_CAPACITY)
     }
 }

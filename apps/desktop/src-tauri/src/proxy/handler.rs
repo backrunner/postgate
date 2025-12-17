@@ -472,7 +472,31 @@ async fn handle_connect(
     timestamp: i64,
     ctx: Arc<ProxyContext>,
 ) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let host = req.uri().host().unwrap_or("").to_string();
+    // Validate and extract hostname
+    let host = match req.uri().host() {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => {
+            tracing::warn!("CONNECT request with missing or empty hostname");
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from("Missing hostname in CONNECT request"))
+                    .map_err(|_: std::convert::Infallible| unreachable!())
+                    .boxed())
+                .unwrap());
+        }
+    };
+
+    // Basic hostname validation (allow localhost, IPs, and valid domain names)
+    if !is_valid_hostname(&host) {
+        tracing::warn!("CONNECT request with invalid hostname: {}", host);
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Full::new(Bytes::from("Invalid hostname"))
+                .map_err(|_: std::convert::Infallible| unreachable!())
+                .boxed())
+            .unwrap());
+    }
+
     let port = req.uri().port_u16().unwrap_or(443);
 
     tracing::debug!("CONNECT request to {}:{}", host, port);
@@ -612,6 +636,49 @@ fn extract_host(req: &Request<Incoming>) -> String {
                 .unwrap_or("unknown")
                 .to_string()
         })
+}
+
+/// Validate hostname for CONNECT requests
+/// Allows localhost, IP addresses, and valid domain names
+fn is_valid_hostname(host: &str) -> bool {
+    // Allow localhost
+    if host == "localhost" {
+        return true;
+    }
+
+    // Allow IP addresses (both IPv4 and IPv6)
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+
+    // Basic domain name validation
+    // - Must not be empty
+    // - Must not start or end with a dot or hyphen
+    // - Labels must be 1-63 characters
+    // - Total length must be <= 253 characters
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+
+    if host.starts_with('.') || host.ends_with('.') || host.starts_with('-') || host.ends_with('-') {
+        return false;
+    }
+
+    // Check each label
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        // Allow alphanumeric and hyphens
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Create an error response

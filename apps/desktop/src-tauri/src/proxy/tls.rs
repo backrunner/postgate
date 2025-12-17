@@ -60,3 +60,15 @@ pub fn parse_server_name(host: &str) -> Result<ServerName<'static>> {
     ServerName::try_from(host.to_string())
         .map_err(|_| PostGateError::Certificate(format!("Invalid server name: {}", host)))
 }
+
+/// Get TLS protocol version string from rustls ProtocolVersion
+pub fn tls_version_string(version: Option<rustls::ProtocolVersion>) -> String {
+    match version {
+        Some(rustls::ProtocolVersion::TLSv1_0) => "TLS 1.0".to_string(),
+        Some(rustls::ProtocolVersion::TLSv1_1) => "TLS 1.1".to_string(),
+        Some(rustls::ProtocolVersion::TLSv1_2) => "TLS 1.2".to_string(),
+        Some(rustls::ProtocolVersion::TLSv1_3) => "TLS 1.3".to_string(),
+        Some(v) => format!("TLS {:?}", v),
+        None => "Unknown".to_string(),
+    }
+}

@@ -57,6 +57,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::window::show_main_window,
             commands::proxy::start_proxy,
             commands::proxy::stop_proxy,
             commands::proxy::get_proxy_status,

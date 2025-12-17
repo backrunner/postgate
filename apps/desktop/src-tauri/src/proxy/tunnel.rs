@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-use super::tls::{create_tls_connector, parse_server_name, TlsAcceptor};
+use super::tls::{create_tls_connector, parse_server_name, tls_version_string, TlsAcceptor};
 
 /// Handle a tunneled HTTPS connection with MITM
 /// Takes a TokioIo-wrapped stream for hyper interoperability
@@ -33,6 +33,13 @@ where
 {
     // Accept TLS from client - TokioIo<S> implements AsyncRead/AsyncWrite
     let tls_stream = acceptor.accept(upgraded).await?;
+    
+    // Get the negotiated TLS version from the client connection
+    let tls_version = {
+        let (_, server_conn) = tls_stream.get_ref();
+        tls_version_string(server_conn.protocol_version())
+    };
+    
     let io = TokioIo::new(tls_stream);
 
     let host = host.to_string();
@@ -47,7 +54,8 @@ where
             service_fn(move |req| {
                 let host = host.clone();
                 let ctx = ctx_clone.clone();
-                async move { handle_https_request(req, &host, port, ctx).await }
+                let tls_ver = tls_version.clone();
+                async move { handle_https_request(req, &host, port, ctx, &tls_ver).await }
             }),
         )
         .await
@@ -62,6 +70,7 @@ async fn handle_https_request(
     host: &str,
     port: u16,
     ctx: Arc<ProxyContext>,
+    tls_version: &str,
 ) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     let request_id = Uuid::new_v4().to_string();
     let start_time = std::time::Instant::now();
@@ -98,7 +107,7 @@ async fn handle_https_request(
             request_headers: Some(request_headers.clone()),
             protocol: "https".to_string(),
             content_type: content_type.clone(),
-            tls_version: Some("TLS 1.3".to_string()),
+            tls_version: Some(tls_version.to_string()),
             ..Default::default()
         },
     });
@@ -163,7 +172,7 @@ async fn handle_https_request(
                     content_type: response_content_type,
                     request_size,
                     response_size: Some(response_size),
-                    tls_version: Some("TLS 1.3".to_string()),
+                    tls_version: Some(tls_version.to_string()),
                     ..Default::default()
                 },
             });

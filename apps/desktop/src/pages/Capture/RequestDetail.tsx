@@ -12,11 +12,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { X, Copy, Send, FileCode, Download, Terminal, Code, Radio, ArrowDown, ArrowUp } from "lucide-react";
+import { X, Copy, Send, FileCode, Download, Terminal, Code, Radio, ArrowDown, ArrowUp, Zap } from "lucide-react";
 import { useCaptureStore } from "@/stores/capture";
 import { useReplayStore } from "@/stores/replay";
 import { useRequestBody } from "@/hooks/useProxy";
 import { BodyPreview } from "@/components/capture/BodyPreview";
+import { MatchedRulesDisplay } from "@/components/capture/MatchedRulesDisplay";
 import { SimpleTimingDisplay } from "@/components/capture/TimingWaterfall";
 import { copyAsCurl, requestToFetch, exportToHar } from "@/lib/export";
 import {
@@ -112,12 +113,31 @@ export function RequestDetail({ request }: RequestDetailProps) {
   };
 
   const formatHeaders = (headers: Record<string, string>) => {
-    return Object.entries(headers).map(([key, value]) => (
-      <div key={key} className="flex gap-1 py-0.5 text-xs border-b border-border/30 last:border-0">
-        <span className="font-medium text-muted-foreground min-w-[120px] shrink-0">{key}:</span>
-        <span className="break-all">{value}</span>
-      </div>
-    ));
+    return Object.entries(headers).map(([key, value]) => {
+      // Determine header type for coloring
+      const keyLower = key.toLowerCase();
+      let valueClass = "break-all";
+      
+      // Color-code values based on header type
+      if (keyLower === "content-type" || keyLower === "accept") {
+        valueClass += " text-amber-600 dark:text-amber-400";
+      } else if (keyLower === "authorization" || keyLower === "cookie" || keyLower === "set-cookie") {
+        valueClass += " text-rose-600 dark:text-rose-400";
+      } else if (keyLower.startsWith("x-") || keyLower.startsWith("sec-")) {
+        valueClass += " text-purple-600 dark:text-purple-400";
+      } else if (keyLower === "cache-control" || keyLower === "expires" || keyLower === "etag") {
+        valueClass += " text-sky-600 dark:text-sky-400";
+      } else if (keyLower === "location" || keyLower === "referer" || keyLower === "origin") {
+        valueClass += " text-emerald-600 dark:text-emerald-400";
+      }
+      
+      return (
+        <div key={key} className="flex gap-2 py-0.5 text-xs border-b border-border/30 last:border-0 font-mono">
+          <span className="font-semibold text-indigo-600 dark:text-indigo-400 min-w-[140px] shrink-0">{key}:</span>
+          <span className={valueClass}>{value}</span>
+        </div>
+      );
+    });
   };
 
   return (
@@ -220,7 +240,7 @@ export function RequestDetail({ request }: RequestDetailProps) {
 
       {/* Tabs */}
       <Tabs defaultValue={isStreamRequest ? "stream" : "overview"} className="flex-1 flex flex-col overflow-hidden">
-        <TabsList className="mx-3 mt-1.5 w-fit h-8">
+        <TabsList className="mx-3 mt-2 w-fit">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="request">Request</TabsTrigger>
           {isStreamRequest ? (
@@ -296,16 +316,10 @@ export function RequestDetail({ request }: RequestDetailProps) {
               {request.matchedRules.length > 0 && (
                 <section>
                   <h3 className="font-semibold mb-1.5 text-xs uppercase text-muted-foreground flex items-center gap-1">
-                    <FileCode className="h-3 w-3" />
-                    Matched Rules
+                    <Zap className="h-3 w-3 text-indigo-500" />
+                    Matched Rules ({request.matchedRules.length})
                   </h3>
-                  <div className="flex flex-wrap gap-1">
-                    {request.matchedRules.map((rule, i) => (
-                      <Badge key={i} variant="outline" className="text-xs py-0">
-                        {rule}
-                      </Badge>
-                    ))}
-                  </div>
+                  <MatchedRulesDisplay rules={request.matchedRules} />
                 </section>
               )}
             </div>

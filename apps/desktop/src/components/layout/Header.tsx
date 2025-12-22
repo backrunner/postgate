@@ -49,7 +49,7 @@ export function Header() {
   };
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-4">
+    <header className="flex h-12 shrink-0 items-center justify-between border-b px-4">
       <div className="flex items-center gap-4">
         {/* Proxy Control */}
         <div className="flex items-center gap-3">

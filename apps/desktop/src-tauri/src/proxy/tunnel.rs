@@ -1,7 +1,9 @@
 use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
-use crate::proxy::body::{collect_body, MAX_BODY_SIZE};
+use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
+use crate::rules::{apply_request_rules, apply_response_rules};
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
@@ -76,13 +78,19 @@ async fn handle_https_request(
     let start_time = std::time::Instant::now();
     let timestamp = chrono::Utc::now().timestamp_millis();
 
-    let method = req.method().to_string();
+    let method = req.method().clone();
+    let method_str = method.to_string();
     let path = req
         .uri()
         .path_and_query()
         .map(|pq| pq.to_string())
         .unwrap_or_else(|| "/".to_string());
-    let url = format!("https://{}:{}{}", host, port, path);
+    // Build URL - omit default port (443 for HTTPS) for cleaner display
+    let url = if port == 443 {
+        format!("https://{}{}", host, path)
+    } else {
+        format!("https://{}:{}{}", host, port, path)
+    };
 
     // Extract headers
     let request_headers: HashMap<String, String> = req
@@ -100,7 +108,7 @@ async fn handle_https_request(
         data: CapturedRequestData {
             id: request_id.clone(),
             timestamp,
-            method: method.clone(),
+            method: method_str.clone(),
             url: url.clone(),
             host: host.to_string(),
             path: path.clone(),
@@ -112,9 +120,9 @@ async fn handle_https_request(
         },
     });
 
-    // Match rules
-    let matched_rules = ctx.rule_engine.match_request(&method, host, &path, &request_headers);
-    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.id.clone()).collect();
+    // Match rules - now returns MatchedRule with remaining_path
+    let matched_rules = ctx.rule_engine.match_request(&method_str, host, &path, "https", port, &request_headers);
+    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.rule.raw_line.clone()).collect();
 
     // Collect request body
     let (parts, body) = req.into_parts();
@@ -131,11 +139,94 @@ async fn handle_https_request(
 
     let request_size = request_body.size as u64;
     ctx.body_storage.store_request_body(&request_id, request_body.clone()).await;
-    // Persist request body
     ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
 
-    // Forward to upstream
-    match forward_https_request(parts, request_body.data, host, port).await {
+    // Apply request rules to get modifications
+    let request_modification = apply_request_rules(
+        &matched_rules,
+        &url,
+        &method_str,
+        &request_headers,
+        Some(&request_body.data),
+    );
+
+    // Handle short-circuit responses (e.g., redirect, file, statusCode)
+    if let Some(short_circuit) = request_modification.short_circuit {
+        let duration = start_time.elapsed().as_millis() as u64;
+        
+        let response_body = CapturedBody {
+            data: short_circuit.body.clone(),
+            size: short_circuit.body.len(),
+            truncated: false,
+        };
+        ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
+        ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
+
+        ctx.app_state.emit_request_event(&CapturedRequestEvent {
+            id: request_id.clone(),
+            event_type: RequestEventType::Completed,
+            data: CapturedRequestData {
+                id: request_id,
+                timestamp,
+                method: method_str,
+                url,
+                host: host.to_string(),
+                path,
+                request_headers: Some(request_headers),
+                response_status: Some(short_circuit.status),
+                response_headers: Some(short_circuit.headers.clone()),
+                duration_ms: Some(duration),
+                matched_rules: matched_rule_ids,
+                protocol: "https".to_string(),
+                content_type: short_circuit.headers.get("content-type").cloned(),
+                request_size,
+                response_size: Some(short_circuit.body.len() as u64),
+                tls_version: Some(tls_version.to_string()),
+                ..Default::default()
+            },
+        });
+
+        let mut builder = Response::builder().status(short_circuit.status);
+        for (k, v) in &short_circuit.headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+        return Ok(builder
+            .body(Full::new(short_circuit.body).map_err(|_| unreachable!()).boxed())
+            .unwrap());
+    }
+
+    // Apply request delay if specified
+    if let Some(delay_ms) = request_modification.delay_ms {
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+    }
+
+    // Determine target for forwarding
+    let forward_result = if let Some(target_host) = &request_modification.target_host {
+        // Rule specifies a target - parse it and forward
+        let remaining_path = request_modification.remaining_path.as_deref().unwrap_or("");
+        
+        match ForwardTarget::parse(target_host, remaining_path, "https") {
+            Ok(target) => {
+                tracing::debug!(
+                    "Forwarding {} to {} (remaining: {})", 
+                    url, 
+                    target.build_url(),
+                    remaining_path
+                );
+                
+                // Use modified body and headers
+                let body_to_send = request_modification.body.unwrap_or(request_body.data.clone());
+                forward_to_target(method.clone(), &target, &request_modification.headers, body_to_send).await
+            }
+            Err(e) => Err(e)
+        }
+    } else {
+        // No rule target - forward to original host
+        let body_to_send = request_modification.body.unwrap_or(request_body.data.clone());
+        forward_https_request(parts, body_to_send, host, port).await
+    };
+
+    match forward_result {
         Ok((resp, response_body)) => {
             let status = resp.status().as_u16();
             let response_headers: HashMap<String, String> = resp
@@ -145,12 +236,31 @@ async fn handle_https_request(
                 .collect();
 
             let response_content_type = response_headers.get("content-type").cloned();
-            let response_size = response_body.size as u64;
+            
+            // Apply response rules
+            let response_modification = apply_response_rules(
+                &matched_rules,
+                &url,
+                &method_str,
+                &request_headers,
+                &response_headers,
+                Some(&response_body.data),
+                response_content_type.as_deref(),
+            );
+
+            let final_body = response_modification.body.unwrap_or(response_body.data.clone());
+            let final_status = response_modification.status_code.unwrap_or(status);
+            
+            let response_size = final_body.len() as u64;
             let duration = start_time.elapsed().as_millis() as u64;
 
-            ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
-            // Persist response body
-            ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
+            let final_body_captured = CapturedBody {
+                data: final_body.clone(),
+                size: final_body.len(),
+                truncated: false,
+            };
+            ctx.body_storage.store_response_body(&request_id, final_body_captured).await;
+            ctx.app_state.persist_body(request_id.clone(), final_body.clone(), false);
 
             // Emit completed event
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -159,13 +269,13 @@ async fn handle_https_request(
                 data: CapturedRequestData {
                     id: request_id,
                     timestamp,
-                    method,
+                    method: method_str,
                     url,
                     host: host.to_string(),
                     path,
                     request_headers: Some(request_headers),
-                    response_status: Some(status),
-                    response_headers: Some(response_headers),
+                    response_status: Some(final_status),
+                    response_headers: Some(response_modification.headers.clone()),
                     duration_ms: Some(duration),
                     matched_rules: matched_rule_ids,
                     protocol: "https".to_string(),
@@ -177,12 +287,20 @@ async fn handle_https_request(
                 },
             });
 
-            // Rebuild response
-            let (resp_parts, _) = resp.into_parts();
-            Ok(Response::from_parts(
-                resp_parts,
-                Full::new(response_body.data).map_err(|_| unreachable!()).boxed(),
-            ))
+            // Build final response
+            let mut builder = Response::builder().status(final_status);
+            for (k, v) in &response_modification.headers {
+                if let (Ok(name), Ok(value)) = (
+                    hyper::header::HeaderName::from_bytes(k.as_bytes()),
+                    hyper::header::HeaderValue::from_str(v),
+                ) {
+                    builder = builder.header(name, value);
+                }
+            }
+            
+            Ok(builder
+                .body(Full::new(final_body).map_err(|_| unreachable!()).boxed())
+                .unwrap())
         }
         Err(e) => {
             let duration = start_time.elapsed().as_millis() as u64;
@@ -194,7 +312,7 @@ async fn handle_https_request(
                 data: CapturedRequestData {
                     id: request_id,
                     timestamp,
-                    method,
+                    method: method_str,
                     url,
                     host: host.to_string(),
                     path,
@@ -215,21 +333,186 @@ async fn handle_https_request(
     }
 }
 
-/// Forward an HTTPS request to the upstream server
+/// Forward request to a specific target (handles protocol conversion)
+async fn forward_to_target(
+    method: hyper::Method,
+    target: &ForwardTarget,
+    headers: &HashMap<String, String>,
+    body: Bytes,
+) -> Result<(Response<()>, CapturedBody)> {
+    if target.is_https() {
+        forward_https_to_target(method, target, headers, body).await
+    } else {
+        forward_http_to_target(method, target, headers, body).await
+    }
+}
+
+/// Forward to HTTP target
+async fn forward_http_to_target(
+    method: hyper::Method,
+    target: &ForwardTarget,
+    headers: &HashMap<String, String>,
+    body: Bytes,
+) -> Result<(Response<()>, CapturedBody)> {
+    let addr = format!("{}:{}", target.host, target.port);
+    let stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("Failed to connect to {}: {}", addr, e)))?;
+
+    let io = TokioIo::new(stream);
+
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("HTTP handshake error: {}", e)))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing::debug!("HTTP connection error: {}", e);
+        }
+    });
+
+    let uri = target.build_path();
+    let mut builder = Request::builder().method(method).uri(&uri);
+
+    // Copy headers, updating Host header
+    for (key, value) in headers {
+        let key_lower = key.to_lowercase();
+        if key_lower == "host" {
+            let host_value = if target.port == 80 {
+                target.host.clone()
+            } else {
+                format!("{}:{}", target.host, target.port)
+            };
+            builder = builder.header("host", host_value);
+        } else {
+            if let (Ok(name), Ok(value)) = (
+                hyper::header::HeaderName::from_bytes(key.as_bytes()),
+                hyper::header::HeaderValue::from_str(value),
+            ) {
+                builder = builder.header(name, value);
+            }
+        }
+    }
+
+    // Ensure Host header exists
+    if !headers.contains_key("host") {
+        let host_value = if target.port == 80 {
+            target.host.clone()
+        } else {
+            format!("{}:{}", target.host, target.port)
+        };
+        builder = builder.header("host", host_value);
+    }
+
+    let req = builder
+        .body(Full::new(body))
+        .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
+
+    let resp = sender.send_request(req)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("HTTP request error: {}", e)))?;
+
+    let (parts, incoming) = resp.into_parts();
+    let response_body = collect_body(incoming, MAX_BODY_SIZE)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
+    
+    Ok((Response::from_parts(parts, ()), response_body))
+}
+
+/// Forward to HTTPS target
+async fn forward_https_to_target(
+    method: hyper::Method,
+    target: &ForwardTarget,
+    headers: &HashMap<String, String>,
+    body: Bytes,
+) -> Result<(Response<()>, CapturedBody)> {
+    let addr = format!("{}:{}", target.host, target.port);
+    let stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("Failed to connect to {}: {}", addr, e)))?;
+
+    let connector = create_tls_connector()?;
+    let server_name = parse_server_name(&target.host)?;
+
+    let tls_stream = connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("TLS connect error: {}", e)))?;
+
+    let io = TokioIo::new(tls_stream);
+
+    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("HTTPS handshake error: {}", e)))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing::debug!("HTTPS connection error: {}", e);
+        }
+    });
+
+    let uri = target.build_path();
+    let mut builder = Request::builder().method(method).uri(&uri);
+
+    // Copy headers, updating Host header
+    for (key, value) in headers {
+        let key_lower = key.to_lowercase();
+        if key_lower == "host" {
+            let host_value = if target.port == 443 {
+                target.host.clone()
+            } else {
+                format!("{}:{}", target.host, target.port)
+            };
+            builder = builder.header("host", host_value);
+        } else {
+            if let (Ok(name), Ok(value)) = (
+                hyper::header::HeaderName::from_bytes(key.as_bytes()),
+                hyper::header::HeaderValue::from_str(value),
+            ) {
+                builder = builder.header(name, value);
+            }
+        }
+    }
+
+    // Ensure Host header exists
+    if !headers.contains_key("host") {
+        let host_value = if target.port == 443 {
+            target.host.clone()
+        } else {
+            format!("{}:{}", target.host, target.port)
+        };
+        builder = builder.header("host", host_value);
+    }
+
+    let req = builder
+        .body(Full::new(body))
+        .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
+
+    let resp = sender.send_request(req)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("HTTPS request error: {}", e)))?;
+
+    let (parts, incoming) = resp.into_parts();
+    let response_body = collect_body(incoming, MAX_BODY_SIZE)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
+    
+    Ok((Response::from_parts(parts, ()), response_body))
+}
+
+/// Forward an HTTPS request to the original upstream server (no rule target)
 async fn forward_https_request(
     parts: hyper::http::request::Parts,
     body: Bytes,
     host: &str,
     port: u16,
-) -> Result<(Response<()>, crate::proxy::body::CapturedBody)> {
-
-    // Connect to upstream
+) -> Result<(Response<()>, CapturedBody)> {
     let addr = format!("{}:{}", host, port);
     let stream = TcpStream::connect(&addr)
         .await
         .map_err(|e| PostGateError::Proxy(format!("Failed to connect to {}: {}", addr, e)))?;
 
-    // TLS handshake with upstream
     let connector = create_tls_connector()?;
     let server_name = parse_server_name(host)?;
 
@@ -240,19 +523,16 @@ async fn forward_https_request(
 
     let io = TokioIo::new(tls_stream);
 
-    // Create HTTP connection with proper body type
     let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
         .await
         .map_err(|e| PostGateError::Proxy(format!("HTTP handshake error: {}", e)))?;
 
-    // Spawn connection driver
     tokio::spawn(async move {
         if let Err(e) = conn.await {
             tracing::debug!("Connection error: {}", e);
         }
     });
 
-    // Build the request with just path and query
     let uri = parts
         .uri
         .path_and_query()
@@ -261,7 +541,6 @@ async fn forward_https_request(
 
     let mut builder = Request::builder().method(parts.method).uri(uri);
 
-    // Copy headers
     for (key, value) in parts.headers.iter() {
         builder = builder.header(key, value);
     }
@@ -270,13 +549,11 @@ async fn forward_https_request(
         .body(Full::new(body))
         .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
 
-    // Send request
     let resp = sender
         .send_request(new_req)
         .await
         .map_err(|e| PostGateError::Proxy(format!("Failed to send request: {}", e)))?;
 
-    // Collect response body
     let (resp_parts, resp_body) = resp.into_parts();
     let captured_body = collect_body(resp_body, MAX_BODY_SIZE)
         .await

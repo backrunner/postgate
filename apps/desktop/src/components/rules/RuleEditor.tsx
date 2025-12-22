@@ -9,6 +9,7 @@ import {
   whistleLanguageConfig,
   whistleCompletions,
   whistleThemeRules,
+  whistleThemeRulesLight,
 } from '@/lib/editor/whistle-language';
 
 interface RuleEditorProps {
@@ -17,7 +18,7 @@ interface RuleEditorProps {
 
 export function RuleEditor({ className }: RuleEditorProps) {
   const { theme } = useThemeStore();
-  const { editorContent, setEditorContent, parseContent, parseResult } = useRulesStore();
+  const { editorContent, setEditorContent, parseContent, parseResult, saveCurrentGroup, isDirty } = useRulesStore();
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const parseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -73,15 +74,7 @@ export function RuleEditor({ className }: RuleEditorProps) {
     monaco.editor.defineTheme('whistle-light', {
       base: 'vs',
       inherit: true,
-      rules: whistleThemeRules.map(rule => ({
-        ...rule,
-        // Adjust colors for light theme
-        foreground: rule.foreground === '6A9955' ? '008000' : 
-                   rule.foreground === 'CE9178' ? 'A31515' :
-                   rule.foreground === '569CD6' ? '0000FF' :
-                   rule.foreground === 'B5CEA8' ? '098658' :
-                   rule.foreground,
-      })),
+      rules: whistleThemeRulesLight,
       colors: {
         'editor.background': '#ffffff',
         'editor.foreground': '#09090b',
@@ -99,11 +92,68 @@ export function RuleEditor({ className }: RuleEditorProps) {
     editorRef.current = editor;
     monacoRef.current = monaco;
     
+    // Register keyboard shortcuts
+    // Save: Cmd/Ctrl+S
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      if (isDirty) {
+        saveCurrentGroup();
+      }
+    });
+    
+    // Duplicate line: Cmd/Ctrl+D
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyD, () => {
+      editor.getAction('editor.action.copyLinesDownAction')?.run();
+    });
+    
+    // Toggle comment: Cmd/Ctrl+/
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, () => {
+      editor.getAction('editor.action.commentLine')?.run();
+    });
+    
+    // Delete line: Cmd/Ctrl+Shift+K
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyK, () => {
+      editor.getAction('editor.action.deleteLines')?.run();
+    });
+    
+    // Move line up: Alt+Up
+    editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.UpArrow, () => {
+      editor.getAction('editor.action.moveLinesUpAction')?.run();
+    });
+    
+    // Move line down: Alt+Down
+    editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.DownArrow, () => {
+      editor.getAction('editor.action.moveLinesDownAction')?.run();
+    });
+    
+    // Select all occurrences: Cmd/Ctrl+Shift+L
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyL, () => {
+      editor.getAction('editor.action.selectHighlights')?.run();
+    });
+    
+    // Add cursor above: Cmd/Ctrl+Alt+Up
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.UpArrow, () => {
+      editor.getAction('editor.action.insertCursorAbove')?.run();
+    });
+    
+    // Add cursor below: Cmd/Ctrl+Alt+Down
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.DownArrow, () => {
+      editor.getAction('editor.action.insertCursorBelow')?.run();
+    });
+    
+    // Format document: Cmd/Ctrl+Shift+F (disabled for whistle - no formatter)
+    // Jump to line: Cmd/Ctrl+G
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyG, () => {
+      editor.getAction('editor.action.gotoLine')?.run();
+    });
+    
+    // Find: Cmd/Ctrl+F (built-in, but ensure it works)
+    // Replace: Cmd/Ctrl+H (built-in, but ensure it works)
+    
     // Set initial decorations based on parse result
     if (parseResult) {
       updateDecorations(editor, monaco, parseResult.errors);
     }
-  }, [parseResult]);
+  }, [parseResult, isDirty, saveCurrentGroup]);
 
   // Update decorations for errors
   const updateDecorations = useCallback((

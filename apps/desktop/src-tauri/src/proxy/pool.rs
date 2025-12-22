@@ -57,6 +57,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_creation() {
+        // Install the default crypto provider for rustls
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        
         let pool = ConnectionPool::new(PoolConfig::default());
         assert!(pool.is_ok());
     }

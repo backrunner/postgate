@@ -118,8 +118,8 @@ async fn handle_http2_request(
     // Match rules
     let matched_rules = ctx
         .rule_engine
-        .match_request(&method, host, &path, &request_headers);
-    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.id.clone()).collect();
+        .match_request(&method, host, &path, "https", port, &request_headers);
+    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.rule.raw_line.clone()).collect();
 
     // Collect request body from H2 stream
     let (parts, body) = request.into_parts();

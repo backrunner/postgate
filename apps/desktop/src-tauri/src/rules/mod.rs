@@ -4,6 +4,8 @@ mod parser;
 mod types;
 
 pub use applicator::{apply_request_rules, apply_response_rules};
-pub use engine::RuleEngine;
+#[allow(unused_imports)]
+pub use engine::{RuleEngine, MatchedRule};
 pub use parser::parse_rules;
-pub use types::{Rule, RuleGroup};
+#[allow(unused_imports)]
+pub use types::{Rule, RuleGroup, RuleAction};

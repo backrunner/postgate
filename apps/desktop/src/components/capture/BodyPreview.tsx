@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Copy, Download, Image, FileText, Code, Eye, EyeOff } from 'lucide-react';
+import { useMemo, useState, useCallback } from 'react';
+import { Copy, Download, Image, FileText, Code, Eye, EyeOff, ChevronRight, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn, formatBytes } from '@/lib/utils';
@@ -172,17 +172,17 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
         <BinaryPreview body={body} />
       ) : (
         <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)} className="flex-1 flex flex-col">
-          <TabsList className="mx-3 mt-2 w-fit h-7">
-            <TabsTrigger value="pretty" className="text-xs h-6 px-2">
+          <TabsList className="mx-3 mt-2 w-fit">
+            <TabsTrigger value="pretty" className="text-xs px-2">
               <Code className="h-3 w-3 mr-1" />
               Pretty
             </TabsTrigger>
-            <TabsTrigger value="raw" className="text-xs h-6 px-2">
+            <TabsTrigger value="raw" className="text-xs px-2">
               <FileText className="h-3 w-3 mr-1" />
               Raw
             </TabsTrigger>
             {contentInfo.type === 'html' && (
-              <TabsTrigger value="preview" className="text-xs h-6 px-2">
+              <TabsTrigger value="preview" className="text-xs px-2">
                 <Eye className="h-3 w-3 mr-1" />
                 Preview
               </TabsTrigger>
@@ -191,7 +191,7 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
 
           <TabsContent value="pretty" className="flex-1 overflow-auto mt-2 mx-3 mb-3">
             {contentInfo.parsed ? (
-              <JsonHighlight data={contentInfo.parsed} />
+              <JsonTreeView data={contentInfo.parsed} />
             ) : contentInfo.type === 'html' ? (
               <HtmlHighlight code={contentInfo.text || ''} wordWrap={wordWrap} />
             ) : contentInfo.type === 'xml' ? (
@@ -220,61 +220,248 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
   );
 }
 
-// JSON syntax highlighting component
-function JsonHighlight({ data }: { data: unknown }) {
-  const highlighted = useMemo(() => highlightJson(data, 0), [data]);
-  
+// JSON Tree View component with expandable/collapsible nodes
+interface JsonTreeViewProps {
+  data: unknown;
+}
+
+function JsonTreeView({ data }: JsonTreeViewProps) {
   return (
-    <pre className="text-xs font-mono p-3 bg-muted/30 rounded overflow-auto">
-      <code dangerouslySetInnerHTML={{ __html: highlighted }} />
-    </pre>
+    <div className="text-xs font-mono p-3 bg-muted/30 rounded overflow-auto">
+      <JsonNode value={data} name={null} depth={0} defaultExpanded />
+    </div>
   );
 }
 
-function highlightJson(value: unknown, indent: number): string {
-  const spaces = '  '.repeat(indent);
+interface JsonNodeProps {
+  value: unknown;
+  name: string | null;
+  depth: number;
+  defaultExpanded?: boolean;
+}
+
+function JsonNode({ value, name, depth, defaultExpanded = false }: JsonNodeProps) {
+  // Auto-expand first 2 levels by default
+  const [expanded, setExpanded] = useState(defaultExpanded || depth < 2);
   
+  const toggleExpand = useCallback(() => {
+    setExpanded(prev => !prev);
+  }, []);
+
+  const indent = depth * 16;
+
+  // Render null
   if (value === null) {
-    return `<span class="text-orange-500">null</span>`;
+    return (
+      <div className="flex items-center" style={{ paddingLeft: indent }}>
+        {name !== null && (
+          <>
+            <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+            <span className="text-muted-foreground mx-1">:</span>
+          </>
+        )}
+        <span className="text-orange-500">null</span>
+      </div>
+    );
   }
-  
+
+  // Render boolean
   if (typeof value === 'boolean') {
-    return `<span class="text-orange-500">${value}</span>`;
+    return (
+      <div className="flex items-center" style={{ paddingLeft: indent }}>
+        {name !== null && (
+          <>
+            <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+            <span className="text-muted-foreground mx-1">:</span>
+          </>
+        )}
+        <span className="text-orange-500">{String(value)}</span>
+      </div>
+    );
   }
-  
+
+  // Render number
   if (typeof value === 'number') {
-    return `<span class="text-emerald-500">${value}</span>`;
+    return (
+      <div className="flex items-center" style={{ paddingLeft: indent }}>
+        {name !== null && (
+          <>
+            <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+            <span className="text-muted-foreground mx-1">:</span>
+          </>
+        )}
+        <span className="text-emerald-600 dark:text-emerald-400">{value}</span>
+      </div>
+    );
   }
-  
+
+  // Render string
   if (typeof value === 'string') {
-    const escaped = escapeHtml(value);
     // Check if it looks like a URL
-    if (value.match(/^https?:\/\//)) {
-      return `<span class="text-sky-500">"${escaped}"</span>`;
-    }
-    return `<span class="text-amber-500">"${escaped}"</span>`;
+    const isUrl = value.match(/^https?:\/\//);
+    return (
+      <div className="flex items-start" style={{ paddingLeft: indent }}>
+        {name !== null && (
+          <>
+            <span className="text-purple-600 dark:text-purple-400 shrink-0">&quot;{name}&quot;</span>
+            <span className="text-muted-foreground mx-1 shrink-0">:</span>
+          </>
+        )}
+        <span className={cn(
+          "break-all",
+          isUrl ? "text-sky-600 dark:text-sky-400" : "text-amber-600 dark:text-amber-400"
+        )}>
+          &quot;{escapeString(value)}&quot;
+        </span>
+      </div>
+    );
   }
-  
+
+  // Render array
   if (Array.isArray(value)) {
-    if (value.length === 0) {
-      return '[]';
+    const isEmpty = value.length === 0;
+    
+    if (isEmpty) {
+      return (
+        <div className="flex items-center" style={{ paddingLeft: indent }}>
+          {name !== null && (
+            <>
+              <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+              <span className="text-muted-foreground mx-1">:</span>
+            </>
+          )}
+          <span className="text-muted-foreground">[]</span>
+        </div>
+      );
     }
-    const items = value.map(item => `${spaces}  ${highlightJson(item, indent + 1)}`);
-    return `[\n${items.join(',\n')}\n${spaces}]`;
+
+    return (
+      <div>
+        <div 
+          className="flex items-center cursor-pointer hover:bg-muted/50 rounded -ml-4 pl-4"
+          style={{ paddingLeft: indent }}
+          onClick={toggleExpand}
+        >
+          <span className="w-4 h-4 flex items-center justify-center mr-1 text-muted-foreground">
+            {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          </span>
+          {name !== null && (
+            <>
+              <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+              <span className="text-muted-foreground mx-1">:</span>
+            </>
+          )}
+          <span className="text-muted-foreground">[</span>
+          {!expanded && (
+            <span className="text-muted-foreground ml-1">
+              {value.length} {value.length === 1 ? 'item' : 'items'}
+            </span>
+          )}
+          {!expanded && <span className="text-muted-foreground">]</span>}
+        </div>
+        {expanded && (
+          <>
+            {value.map((item, index) => (
+              <div key={index} className="relative">
+                <JsonNode value={item} name={null} depth={depth + 1} />
+                {index < value.length - 1 && (
+                  <span className="text-muted-foreground" style={{ paddingLeft: (depth + 1) * 16 }}>,</span>
+                )}
+              </div>
+            ))}
+            <div style={{ paddingLeft: indent }}>
+              <span className="text-muted-foreground">]</span>
+            </div>
+          </>
+        )}
+      </div>
+    );
   }
-  
+
+  // Render object
   if (typeof value === 'object') {
     const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) {
-      return '{}';
+    const isEmpty = entries.length === 0;
+    
+    if (isEmpty) {
+      return (
+        <div className="flex items-center" style={{ paddingLeft: indent }}>
+          {name !== null && (
+            <>
+              <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+              <span className="text-muted-foreground mx-1">:</span>
+            </>
+          )}
+          <span className="text-muted-foreground">{'{}'}</span>
+        </div>
+      );
     }
-    const items = entries.map(([key, val]) => {
-      return `${spaces}  <span class="text-purple-500">"${escapeHtml(key)}"</span>: ${highlightJson(val, indent + 1)}`;
-    });
-    return `{\n${items.join(',\n')}\n${spaces}}`;
+
+    return (
+      <div>
+        <div 
+          className="flex items-center cursor-pointer hover:bg-muted/50 rounded -ml-4 pl-4"
+          style={{ paddingLeft: indent }}
+          onClick={toggleExpand}
+        >
+          <span className="w-4 h-4 flex items-center justify-center mr-1 text-muted-foreground">
+            {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          </span>
+          {name !== null && (
+            <>
+              <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+              <span className="text-muted-foreground mx-1">:</span>
+            </>
+          )}
+          <span className="text-muted-foreground">{'{'}</span>
+          {!expanded && (
+            <span className="text-muted-foreground ml-1">
+              {entries.length} {entries.length === 1 ? 'key' : 'keys'}
+            </span>
+          )}
+          {!expanded && <span className="text-muted-foreground">{'}'}</span>}
+        </div>
+        {expanded && (
+          <>
+            {entries.map(([key, val], index) => (
+              <div key={key}>
+                <JsonNode value={val} name={key} depth={depth + 1} />
+                {index < entries.length - 1 && (
+                  <span className="text-muted-foreground">,</span>
+                )}
+              </div>
+            ))}
+            <div style={{ paddingLeft: indent }}>
+              <span className="text-muted-foreground">{'}'}</span>
+            </div>
+          </>
+        )}
+      </div>
+    );
   }
-  
-  return String(value);
+
+  // Fallback
+  return (
+    <div style={{ paddingLeft: indent }}>
+      {name !== null && (
+        <>
+          <span className="text-purple-600 dark:text-purple-400">&quot;{name}&quot;</span>
+          <span className="text-muted-foreground mx-1">:</span>
+        </>
+      )}
+      <span>{String(value)}</span>
+    </div>
+  );
+}
+
+// Helper to escape string for display
+function escapeString(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
 }
 
 // HTML syntax highlighting

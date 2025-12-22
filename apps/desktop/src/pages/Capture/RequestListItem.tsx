@@ -2,6 +2,7 @@ import { memo, CSSProperties, useMemo } from "react";
 import { CapturedRequest } from "@/stores/capture";
 import { ColumnConfig } from "@/stores/columns";
 import { useStreamStore } from "@/stores/stream";
+import { Zap } from "lucide-react";
 
 // Pre-computed class mappings for zero runtime lookup
 const METHOD_CLASSES: Record<string, string> = {
@@ -104,21 +105,28 @@ export const RequestListItem = memo(function RequestListItem({
   const hasMatchedRules = request.matchedRules.length > 0;
   
   // Build class name: selected state takes priority, then matched rules style
-  let baseClass = "flex cursor-pointer items-center h-full select-none text-xs font-mono";
+  let baseClass = "flex cursor-pointer items-center h-full select-none text-xs font-mono relative";
   
   if (isSelected) {
     baseClass += " bg-accent";
+  } else if (hasMatchedRules) {
+    // Matched rules get a subtle indigo/blue tinted background
+    baseClass += " bg-indigo-50/50 dark:bg-indigo-950/30 hover:bg-indigo-100/50 dark:hover:bg-indigo-900/30";
   } else {
     baseClass += " hover:bg-accent/50";
   }
   
-  // Add blue-gray bold style for matched rules
+  // Add font weight for matched rules
   if (hasMatchedRules) {
-    baseClass += " font-semibold text-slate-600 dark:text-slate-400";
+    baseClass += " font-semibold";
   }
 
   return (
     <div style={style} onClick={onClick} className={baseClass}>
+      {/* Left border indicator for matched rules */}
+      {hasMatchedRules && (
+        <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-indigo-500 dark:bg-indigo-400" />
+      )}
       {visibleColumns.map((col) => (
         <CellContent key={col.id} column={col} request={request} hasMatchedRules={hasMatchedRules} />
       ))}
@@ -146,17 +154,20 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
     : { width: column.width, flexShrink: 0 };
 
   const baseClasses = "truncate";
-  // For rows with matched rules, use inherited color (blue-gray from parent)
-  // Only override colors for specific columns when NOT matched
-  const mutedClass = hasMatchedRules ? "" : "text-muted-foreground";
+  // For rows with matched rules, use indigo color scheme
+  const matchedColor = "text-indigo-700 dark:text-indigo-300";
+  const mutedClass = hasMatchedRules ? matchedColor : "text-muted-foreground";
   
   switch (column.id) {
     case "method":
       return (
         <span
-          className={`${baseClasses} pl-2 ${hasMatchedRules ? "" : "font-semibold"} ${hasMatchedRules ? "" : getMethodClass(request.method)}`}
+          className={`${baseClasses} pl-2.5 font-semibold ${hasMatchedRules ? matchedColor : getMethodClass(request.method)}`}
           style={style}
         >
+          {request.matchedRules.length > 0 && column.id === "method" && (
+            <Zap className="inline-block h-3 w-3 mr-1 text-indigo-500" />
+          )}
           {request.method}
         </span>
       );
@@ -164,7 +175,7 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
     case "status":
       return (
         <span
-          className={`${baseClasses} text-center ${hasMatchedRules ? "" : getStatusClass(request.responseStatus)}`}
+          className={`${baseClasses} text-center ${hasMatchedRules ? matchedColor : getStatusClass(request.responseStatus)}`}
           style={style}
         >
           {request.responseStatus ?? "-"}
@@ -194,10 +205,10 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
 
     case "host": {
       // Use different colors: green for HTTPS (TLS), default for HTTP
-      // But if matched rules, inherit the blue-gray color from parent
+      // But if matched rules, use indigo color scheme
       const isSecure = !!request.tlsInfo;
       const hostClass = hasMatchedRules 
-        ? "" 
+        ? matchedColor 
         : (isSecure ? "text-emerald-500" : "text-muted-foreground");
       return (
         <span
@@ -213,7 +224,7 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
     case "path":
       return (
         <span
-          className={`${baseClasses} pr-2`}
+          className={`${baseClasses} pr-2 ${hasMatchedRules ? matchedColor : ""}`}
           style={style}
           title={request.path}
         >

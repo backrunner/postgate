@@ -121,8 +121,11 @@ async fn handle_request(
     });
 
     // Match rules for this request
-    let matched_rules = ctx.rule_engine.match_request(&method, &host, &path, &request_headers);
-    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.id.clone()).collect();
+    // Extract protocol and port for filter matching
+    let protocol = req.uri().scheme_str().unwrap_or("http").to_string();
+    let port = req.uri().port_u16().unwrap_or(if protocol == "https" { 443 } else { 80 });
+    let matched_rules = ctx.rule_engine.match_request(&method, &host, &path, &protocol, port, &request_headers);
+    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.rule.raw_line.clone()).collect();
 
     // Collect request body first (needed for rule application)
     let (parts, body) = req.into_parts();
@@ -206,12 +209,36 @@ async fn handle_request(
 
     // Use modified headers and body for the forwarded request
     let modified_body = request_modification.body.unwrap_or(request_body.data.clone());
-    let _target_host = request_modification.target_host.as_ref().unwrap_or(&host);
+    
+    // Build the target URI using ForwardTarget for whistle-compatible path forwarding
+    let target_uri = if let Some(target) = &request_modification.target_host {
+        let remaining_path = request_modification.remaining_path.as_deref().unwrap_or("");
+        
+        // Parse target and build final URL with remaining path
+        match super::forward::ForwardTarget::parse(target, remaining_path, &protocol) {
+            Ok(ft) => {
+                tracing::debug!(
+                    "Forwarding {} to {} (remaining: {})", 
+                    uri, 
+                    ft.build_url(),
+                    remaining_path
+                );
+                ft.build_url()
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse target {}: {}", target, e);
+                parts.uri.to_string()
+            }
+        }
+    } else {
+        // No target_host override - use original URI
+        parts.uri.to_string()
+    };
 
     // Rebuild request with modified body and headers
     let mut new_req = Request::builder()
         .method(parts.method.clone())
-        .uri(parts.uri.clone());
+        .uri(&target_uri);
 
     // Apply modified headers
     for (k, v) in &request_modification.headers {
@@ -562,8 +589,16 @@ async fn forward_http_request_check_sse(
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
+    // Create HTTPS connector with rustls
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+
     let client: Client<_, BoxBody<Bytes, hyper::Error>> = Client::builder(TokioExecutor::new())
-        .build_http();
+        .build(https);
 
     let resp = client.request(req).await?;
     

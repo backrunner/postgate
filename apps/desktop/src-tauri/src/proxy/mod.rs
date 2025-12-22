@@ -1,4 +1,5 @@
 mod body;
+mod forward;
 mod http2;
 mod pool;
 mod server;
@@ -10,4 +11,6 @@ mod tunnel;
 mod websocket;
 
 pub use body::BodyStorage;
+#[allow(unused_imports)]
+pub use forward::ForwardTarget;
 pub use server::{ProxyServer, ProxyConfig, ProxyStatus};

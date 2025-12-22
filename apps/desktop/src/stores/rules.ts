@@ -74,6 +74,7 @@ interface RulesState {
   createGroup: (name: string) => Promise<RuleGroup>;
   updateGroup: (group: RuleGroup) => Promise<void>;
   deleteGroup: (id: string) => Promise<void>;
+  renameGroup: (id: string, newName: string) => Promise<void>;
   toggleGroup: (id: string, enabled: boolean) => Promise<void>;
   selectGroup: (id: string | null) => void;
   
@@ -141,6 +142,16 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     await get().loadGroups();
     // Sync debug server with rule changes
     useDebugStore.getState().syncWithRules();
+  },
+  
+  renameGroup: async (id: string, newName: string) => {
+    const { groups } = get();
+    const group = groups.find(g => g.id === id);
+    if (!group) return;
+    
+    const updatedGroup = { ...group, name: newName, updatedAt: Date.now() };
+    await invoke('save_rule_group', { group: updatedGroup });
+    await get().loadGroups();
   },
   
   toggleGroup: async (id: string, enabled: boolean) => {

@@ -15,12 +15,17 @@
       })();
     </script>
     <style>
-      /* 预设背景色避免白屏 */
+      /* 预设背景色避免白屏闪烁 */
       html {
-        background-color: #ffffff;
+        background-color: hsl(0 0% 100%);
       }
       html.dark {
-        background-color: #09090b;
+        background-color: hsl(240 10% 3.9%);
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
       }
       /* 隐藏内容直到 React 加载完成 */
       #root {

@@ -3,8 +3,9 @@
 //! This module handles the actual application of rule actions to HTTP
 //! requests and responses, supporting the full whistle-compatible action set.
 
+use super::engine::MatchedRule;
 use super::types::{
-    BodyContent, CookieOptions, HeaderModifications, Rule, RuleAction, UrlParamModifications,
+    BodyContent, CookieOptions, HeaderModifications, RuleAction, UrlParamModifications,
 };
 use bytes::Bytes;
 use std::collections::HashMap;
@@ -29,8 +30,10 @@ pub struct RequestModification {
     pub delay_ms: Option<u64>,
     /// Request speed limit in kbps
     pub speed_kbps: Option<u64>,
-    /// Target host override
+    /// Target host override (full URL like http://127.0.0.1:3000/browser)
     pub target_host: Option<String>,
+    /// Remaining path to append to target (whistle compatible)
+    pub remaining_path: Option<String>,
     /// Whether to ignore/skip this request
     pub ignore: bool,
     /// Debug name for logging
@@ -77,7 +80,7 @@ pub struct ResponseModification {
 
 /// Apply rules to a request and return modifications
 pub fn apply_request_rules(
-    rules: &[Rule],
+    matched_rules: &[MatchedRule],
     url: &str,
     method: &str,
     headers: &HashMap<String, String>,
@@ -92,7 +95,8 @@ pub fn apply_request_rules(
     // Parse URL for query parameter modifications
     let parsed_url = Url::parse(url).ok();
 
-    for rule in rules {
+    for matched in matched_rules {
+        let rule = &matched.rule;
         if !rule.enabled {
             continue;
         }
@@ -117,6 +121,8 @@ pub fn apply_request_rules(
             match action {
                 RuleAction::Host { target } => {
                     modification.target_host = Some(target.clone());
+                    // Store the remaining path for whistle-compatible forwarding
+                    modification.remaining_path = Some(matched.remaining_path.clone());
                 }
 
                 RuleAction::RequestHeaders { modifications } => {
@@ -331,7 +337,7 @@ pub fn apply_request_rules(
 
 /// Apply rules to a response and return modifications
 pub fn apply_response_rules(
-    rules: &[Rule],
+    matched_rules: &[MatchedRule],
     url: &str,
     method: &str,
     request_headers: &HashMap<String, String>,
@@ -347,7 +353,8 @@ pub fn apply_response_rules(
 
     let parsed_url = Url::parse(url).ok();
 
-    for rule in rules {
+    for matched in matched_rules {
+        let rule = &matched.rule;
         if !rule.enabled {
             continue;
         }

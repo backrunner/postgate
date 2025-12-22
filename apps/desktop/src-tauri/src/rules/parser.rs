@@ -175,6 +175,12 @@ fn parse_actions_and_filters(s: &str) -> Result<(Vec<RuleAction>, RuleFilters)> 
 
 /// Parse filter operators, returns true if it was a filter
 fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
+    // IMPORTANT: Skip if this looks like an action (protocol://value format)
+    // This prevents "host://..." from being matched as "host:" filter
+    if s.contains("://") {
+        return Ok(false);
+    }
+
     // Method filter: m:GET,POST or method:GET
     if let Some(value) = s.strip_prefix("m:").or_else(|| s.strip_prefix("method:")) {
         filters.methods = value.split(',').map(|s| s.trim().to_uppercase()).collect();
@@ -196,16 +202,50 @@ fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
         return Ok(true);
     }
 
-    // Content type filter: ct:application/json
+    // Content type filter: ct:application/json or contentType:
     if let Some(value) = s
         .strip_prefix("ct:")
         .or_else(|| s.strip_prefix("contentType:"))
+        .or_else(|| s.strip_prefix("reqContentType:"))
+        .or_else(|| s.strip_prefix("resContentType:"))
     {
         filters.content_types = value.split(',').map(|s| s.trim().to_string()).collect();
         return Ok(true);
     }
 
-    // Exclude filter: excludeFilter:pattern
+    // IP filter: i:, ip:, clientIp:
+    if let Some(value) = s
+        .strip_prefix("i:")
+        .or_else(|| s.strip_prefix("ip:"))
+        .or_else(|| s.strip_prefix("clientIp:"))
+    {
+        filters.client_ips = value.split(',').map(|s| s.trim().to_string()).collect();
+        return Ok(true);
+    }
+
+    // Host filter: h:, host:, hostname:
+    if let Some(value) = s
+        .strip_prefix("h:")
+        .or_else(|| s.strip_prefix("host:"))
+        .or_else(|| s.strip_prefix("hostname:"))
+    {
+        filters.hosts = value.split(',').map(|s| s.trim().to_string()).collect();
+        return Ok(true);
+    }
+
+    // Status code filter: s:, statusCode:
+    if let Some(value) = s
+        .strip_prefix("s:")
+        .or_else(|| s.strip_prefix("statusCode:"))
+    {
+        filters.status_codes = value
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        return Ok(true);
+    }
+
+    // Exclude filter: excludeFilter:pattern (supports regex)
     if let Some(value) = s
         .strip_prefix("excludeFilter://")
         .or_else(|| s.strip_prefix("excludeFilter:"))
@@ -214,7 +254,7 @@ fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
         return Ok(true);
     }
 
-    // Include filter: includeFilter:pattern
+    // Include filter: includeFilter:pattern (supports regex)
     if let Some(value) = s
         .strip_prefix("includeFilter://")
         .or_else(|| s.strip_prefix("includeFilter:"))
@@ -283,7 +323,16 @@ fn split_action_string(s: &str) -> Vec<String> {
 
 /// Parse a single action
 fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
-    // Parse protocol://value format
+    // IMPORTANT: Check for bare URLs FIRST before protocol://value parsing
+    // This handles whistle syntax like: pattern http://target.com
+    // where http://target.com should be treated as a host redirect, not as protocol "http"
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return Ok(Some(RuleAction::Host {
+            target: s.to_string(),
+        }));
+    }
+
+    // Parse protocol://value format (for whistle actions like host://, file://, etc.)
     if let Some(idx) = s.find("://") {
         let protocol = &s[..idx].to_lowercase();
         let value = &s[idx + 3..];
@@ -584,6 +633,55 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 }
             }
 
+            // === ADDITIONAL WHISTLE ACTIONS ===
+            "jsonbody" => {
+                let json_value = serde_json::from_str(value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value.to_string()));
+                RuleAction::JsonBody { value: json_value }
+            }
+
+            "timeout" => {
+                let ms: u64 = value.parse().map_err(|_| {
+                    PostGateError::RuleParse(format!("Invalid timeout: {}", value))
+                })?;
+                RuleAction::Timeout { ms }
+            }
+
+            "delete" => {
+                let headers: Vec<String> = value.split(',').map(|s| s.trim().to_string()).collect();
+                RuleAction::DeleteHeaders { headers }
+            }
+
+            "echo" => RuleAction::Echo,
+
+            "mock" => RuleAction::Mock { path: value.into() },
+
+            "htmlreplace" => {
+                let (pattern, replacement) = parse_replace_pair(value)?;
+                let is_regex = pattern.starts_with('/') || pattern.starts_with('^');
+                RuleAction::HtmlReplace { pattern, replacement, regex: is_regex }
+            }
+
+            "jsreplace" => {
+                let (pattern, replacement) = parse_replace_pair(value)?;
+                let is_regex = pattern.starts_with('/') || pattern.starts_with('^');
+                RuleAction::JsReplace { pattern, replacement, regex: is_regex }
+            }
+
+            "cssreplace" => {
+                let (pattern, replacement) = parse_replace_pair(value)?;
+                let is_regex = pattern.starts_with('/') || pattern.starts_with('^');
+                RuleAction::CssReplace { pattern, replacement, regex: is_regex }
+            }
+
+            "reqprepend" => RuleAction::RequestPrepend { content: value.to_string() },
+
+            "reqappend" => RuleAction::RequestAppend { content: value.to_string() },
+
+            "resprepend" => RuleAction::ResponsePrepend { content: value.to_string() },
+
+            "resappend" => RuleAction::ResponseAppend { content: value.to_string() },
+
             _ => {
                 tracing::warn!("Unknown action protocol: {}", protocol);
                 return Ok(None);
@@ -593,14 +691,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
         return Ok(Some(action));
     }
 
-    // Handle bare URLs as host redirect
-    if s.starts_with("http://") || s.starts_with("https://") {
-        return Ok(Some(RuleAction::Host {
-            target: s.to_string(),
-        }));
-    }
-
-    // Handle IP:port as host redirect
+    // Handle IP:port as host redirect (e.g., 127.0.0.1:8080)
     if s.contains(':') && s.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
         return Ok(Some(RuleAction::Host {
             target: s.to_string(),
@@ -1045,6 +1136,29 @@ example.com host://127.0.0.1
             assert!(modifications.remove.contains(&"cache".to_string()));
         } else {
             panic!("Expected UrlParams action");
+        }
+    }
+
+    #[test]
+    fn test_parse_url_to_url_proxy() {
+        // Whistle syntax: source URL -> target URL (bare URL as host redirect)
+        let rules = parse_rules("https://v.qq.com/biu/u/history/ http://127.0.0.1:3000/browser").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let RuleAction::Host { target } = &rules[0].actions[0] {
+            assert_eq!(target, "http://127.0.0.1:3000/browser");
+        } else {
+            panic!("Expected Host action, got {:?}", rules[0].actions[0]);
+        }
+    }
+
+    #[test]
+    fn test_parse_bare_https_url() {
+        let rules = parse_rules("example.com https://proxy.example.com/api").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let RuleAction::Host { target } = &rules[0].actions[0] {
+            assert_eq!(target, "https://proxy.example.com/api");
+        } else {
+            panic!("Expected Host action");
         }
     }
 }

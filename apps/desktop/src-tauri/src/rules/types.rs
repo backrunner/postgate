@@ -54,12 +54,21 @@ pub struct RuleFilters {
     /// Match requests with specific content types
     #[serde(default)]
     pub content_types: Vec<String>,
-    /// Exclude patterns (for excludeFilter)
+    /// Exclude patterns (for excludeFilter) - supports regex
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// Include only patterns (for includeFilter)
+    /// Include only patterns (for includeFilter) - supports regex
     #[serde(default)]
     pub include: Vec<String>,
+    /// Match specific client IPs (i:, ip:, clientIp:)
+    #[serde(default)]
+    pub client_ips: Vec<String>,
+    /// Match specific hosts (h:, host:, hostname:)
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// Match specific status codes (s:, statusCode:) - for response matching
+    #[serde(default)]
+    pub status_codes: Vec<u16>,
 }
 
 impl RuleFilters {
@@ -71,6 +80,9 @@ impl RuleFilters {
             && self.content_types.is_empty()
             && self.exclude.is_empty()
             && self.include.is_empty()
+            && self.client_ips.is_empty()
+            && self.hosts.is_empty()
+            && self.status_codes.is_empty()
     }
 
     /// Check if filters match a request
@@ -113,26 +125,41 @@ impl RuleFilters {
         }
 
         // Check content type filter
+        // Note: Don't reject if Content-Type header is missing (many GET requests have no body)
         if !self.content_types.is_empty() {
             if let Some(ct) = headers.get("content-type") {
-                if !self.content_types.iter().any(|t| ct.contains(t)) {
+                if !self.content_types.iter().any(|t| ct.to_lowercase().contains(&t.to_lowercase())) {
                     return false;
                 }
-            } else {
-                return false;
+            }
+            // If no content-type header, allow the request to pass through
+        }
+
+        // Check host filter
+        if !self.hosts.is_empty() {
+            // Extract host from URL
+            let host = url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_string()));
+            if let Some(h) = host {
+                if !self.hosts.iter().any(|pattern| {
+                    h == *pattern || h.ends_with(&format!(".{}", pattern)) || wildcard_match(pattern, &h)
+                }) {
+                    return false;
+                }
             }
         }
 
-        // Check exclude patterns
+        // Check exclude patterns (supports regex)
         for pattern in &self.exclude {
-            if url.contains(pattern) {
+            if pattern_matches(pattern, url) {
                 return false;
             }
         }
 
-        // Check include patterns
+        // Check include patterns (supports regex)
         if !self.include.is_empty() {
-            if !self.include.iter().any(|p| url.contains(p)) {
+            if !self.include.iter().any(|p| pattern_matches(p, url)) {
                 return false;
             }
         }
@@ -162,27 +189,173 @@ pub enum Pattern {
     Url { protocol: Option<String>, host: String, path: Option<String> },
 }
 
+/// Result of pattern matching, containing match info and remaining path
+#[derive(Debug, Clone)]
+pub struct PatternMatchResult {
+    /// Whether the pattern matched
+    pub matched: bool,
+    /// The remaining path after the matched prefix (for path appending)
+    pub remaining_path: String,
+}
+
 impl Pattern {
     /// Check if this pattern matches a URL
+    #[allow(dead_code)]
     pub fn matches(&self, url: &str) -> bool {
+        self.match_with_remainder(url).matched
+    }
+
+    /// Match pattern and return remaining path for whistle-compatible path forwarding
+    /// 
+    /// For example:
+    /// - Pattern: `https://v.qq.com/biu/u/history/`
+    /// - URL: `https://v.qq.com/biu/u/history/page/1?id=123`
+    /// - Result: matched=true, remaining_path="/page/1?id=123"
+    pub fn match_with_remainder(&self, url: &str) -> PatternMatchResult {
         match self {
-            Pattern::Exact(s) => url == s,
-            Pattern::Wildcard(pattern) => wildcard_match(pattern, url),
-            Pattern::Regex(re) => re.is_match(url),
-            Pattern::PathPrefix(prefix) => url.contains(prefix) || url.starts_with(prefix),
-            Pattern::All => true,
-            Pattern::Domain(domain) => {
-                url.contains(domain) || url.contains(&format!(".{}", domain))
+            Pattern::Exact(s) => {
+                if url == s {
+                    PatternMatchResult { matched: true, remaining_path: String::new() }
+                } else {
+                    PatternMatchResult { matched: false, remaining_path: String::new() }
+                }
             }
-            Pattern::Url { protocol, host, path } => {
-                let mut matches = url.contains(host);
-                if let Some(proto) = protocol {
-                    matches = matches && url.starts_with(&format!("{}://", proto));
+            Pattern::Wildcard(pattern) => {
+                PatternMatchResult {
+                    matched: wildcard_match(pattern, url),
+                    remaining_path: String::new(),
                 }
-                if let Some(p) = path {
-                    matches = matches && url.contains(p);
+            }
+            Pattern::Regex(re) => {
+                PatternMatchResult {
+                    matched: re.is_match(url),
+                    remaining_path: String::new(),
                 }
-                matches
+            }
+            Pattern::PathPrefix(prefix) => {
+                // PathPrefix uses contains-style matching (as per original implementation)
+                // It works on both full URLs and bare paths
+                let path = if let Ok(parsed) = url::Url::parse(url) {
+                    parsed.path().to_string()
+                } else {
+                    // For bare paths, use directly
+                    url.to_string()
+                };
+                
+                // Check if path contains the prefix
+                if path.contains(prefix) {
+                    // Calculate remaining path after the prefix match
+                    if let Some(idx) = path.find(prefix) {
+                        let after_prefix = &path[idx + prefix.len()..];
+                        let query = if let Ok(parsed) = url::Url::parse(url) {
+                            parsed.query().map(|q| format!("?{}", q)).unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        PatternMatchResult {
+                            matched: true,
+                            remaining_path: format!("{}{}", after_prefix, query),
+                        }
+                    } else {
+                        PatternMatchResult { matched: true, remaining_path: String::new() }
+                    }
+                } else {
+                    PatternMatchResult { matched: false, remaining_path: String::new() }
+                }
+            }
+            Pattern::All => {
+                // For "All" pattern, keep the full path
+                if let Ok(parsed) = url::Url::parse(url) {
+                    let path = parsed.path();
+                    let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                    PatternMatchResult {
+                        matched: true,
+                        remaining_path: format!("{}{}", path, query),
+                    }
+                } else {
+                    PatternMatchResult { matched: true, remaining_path: String::new() }
+                }
+            }
+            Pattern::Domain(domain) => {
+                // Domain match: host must match, keep full path
+                if let Ok(parsed) = url::Url::parse(url) {
+                    let host = parsed.host_str().unwrap_or("");
+                    if host == domain || host.ends_with(&format!(".{}", domain)) {
+                        let path = parsed.path();
+                        let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                        PatternMatchResult {
+                            matched: true,
+                            remaining_path: format!("{}{}", path, query),
+                        }
+                    } else {
+                        PatternMatchResult { matched: false, remaining_path: String::new() }
+                    }
+                } else {
+                    PatternMatchResult {
+                        matched: url.contains(domain),
+                        remaining_path: String::new(),
+                    }
+                }
+            }
+            Pattern::Url { protocol, host, path: pattern_path } => {
+                // URL pattern match with prefix behavior (whistle compatible)
+                if let Ok(parsed) = url::Url::parse(url) {
+                    // Check protocol
+                    if let Some(proto) = protocol {
+                        if parsed.scheme() != proto {
+                            return PatternMatchResult { matched: false, remaining_path: String::new() };
+                        }
+                    }
+                    
+                    // Check host
+                    let url_host = parsed.host_str().unwrap_or("");
+                    if url_host != host && !wildcard_match(host, url_host) {
+                        return PatternMatchResult { matched: false, remaining_path: String::new() };
+                    }
+                    
+                    // Check path prefix and calculate remaining
+                    let url_path = parsed.path();
+                    let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                    
+                    if let Some(p) = pattern_path {
+                        // Pattern has a path - do prefix matching
+                        let p_normalized = if p.ends_with('/') { p.clone() } else { format!("{}/", p) };
+                        let url_path_normalized = if url_path.ends_with('/') || url_path == p { 
+                            url_path.to_string() 
+                        } else { 
+                            format!("{}/", url_path) 
+                        };
+                        
+                        // Check if URL path starts with pattern path
+                        if url_path.starts_with(p) || url_path_normalized.starts_with(&p_normalized) || url_path == p {
+                            let remaining = if url_path.len() > p.len() {
+                                &url_path[p.len()..]
+                            } else {
+                                ""
+                            };
+                            // Clean up leading slash if present (will be added during join)
+                            let remaining = remaining.trim_start_matches('/');
+                            let remaining = if remaining.is_empty() && query.is_empty() {
+                                String::new()
+                            } else if remaining.is_empty() {
+                                query
+                            } else {
+                                format!("/{}{}", remaining, query)
+                            };
+                            PatternMatchResult { matched: true, remaining_path: remaining }
+                        } else {
+                            PatternMatchResult { matched: false, remaining_path: String::new() }
+                        }
+                    } else {
+                        // No path in pattern - match host only, keep full path
+                        PatternMatchResult {
+                            matched: true,
+                            remaining_path: format!("{}{}", url_path, query),
+                        }
+                    }
+                } else {
+                    PatternMatchResult { matched: false, remaining_path: String::new() }
+                }
             }
         }
     }
@@ -193,12 +366,17 @@ impl Pattern {
             Pattern::Exact(s) => host == s || s.contains(host),
             Pattern::Wildcard(pattern) => wildcard_match(pattern, host),
             Pattern::Regex(re) => re.is_match(host),
-            Pattern::PathPrefix(prefix) => host.starts_with(prefix),
+            Pattern::PathPrefix(_) => false, // PathPrefix doesn't match hosts
             Pattern::All => true,
             Pattern::Domain(domain) => {
                 host == domain || host.ends_with(&format!(".{}", domain))
             }
-            Pattern::Url { host: pattern_host, .. } => {
+            Pattern::Url { host: pattern_host, path, .. } => {
+                // Only do host-only match if pattern has no path specified
+                // If pattern has a path, we should not fallback to host-only matching
+                if path.is_some() {
+                    return false;
+                }
                 host == pattern_host || wildcard_match(pattern_host, host)
             }
         }
@@ -226,6 +404,19 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
     }
 
     match_helper(&pattern_chars, &text_chars)
+}
+
+/// Match pattern against text, supporting both substring and regex
+fn pattern_matches(pattern: &str, text: &str) -> bool {
+    // Try as regex first if it looks like a regex pattern
+    if pattern.starts_with('^') || pattern.starts_with('/') || pattern.contains(".*") || pattern.ends_with('$') {
+        // Try to compile as regex
+        if let Ok(re) = Regex::new(pattern.trim_matches('/')) {
+            return re.is_match(text);
+        }
+    }
+    // Fallback to substring match
+    text.contains(pattern)
 }
 
 /// Action to perform when a rule matches (whistle compatible)
@@ -391,6 +582,44 @@ pub enum RuleAction {
 
     /// Use SOCKS proxy (socks://)
     SocksProxy { host: String, port: u16, version: u8, auth: Option<ProxyAuth> },
+
+    // === ADDITIONAL WHISTLE ACTIONS ===
+
+    /// JSON body response (jsonBody://)
+    JsonBody { value: serde_json::Value },
+
+    /// Request timeout in milliseconds (timeout://)
+    Timeout { ms: u64 },
+
+    /// Delete specific headers (delete://)
+    DeleteHeaders { headers: Vec<String> },
+
+    /// Echo request back as response (echo://)
+    Echo,
+
+    /// Mock response from file (mock://)
+    Mock { path: PathBuf },
+
+    /// Replace content in HTML (htmlReplace://)
+    HtmlReplace { pattern: String, replacement: String, regex: bool },
+
+    /// Replace content in JavaScript (jsReplace://)
+    JsReplace { pattern: String, replacement: String, regex: bool },
+
+    /// Replace content in CSS (cssReplace://)
+    CssReplace { pattern: String, replacement: String, regex: bool },
+
+    /// Prepend to request body (reqPrepend://)
+    RequestPrepend { content: String },
+
+    /// Append to request body (reqAppend://)
+    RequestAppend { content: String },
+
+    /// Prepend to response body (resPrepend://)
+    ResponsePrepend { content: String },
+
+    /// Append to response body (resAppend://)
+    ResponseAppend { content: String },
 }
 
 /// Proxy authentication

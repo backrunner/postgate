@@ -91,7 +91,8 @@ interface CaptureState {
   addRequest: (request: CapturedRequest) => void;
   addRequests: (requests: CapturedRequest[]) => void;
   updateRequest: (id: string, update: Partial<CapturedRequest>) => void;
-  setSelected: (id: string | null) => void;
+  batchUpdateRequests: (updates: Array<{ id: string; update: Partial<CapturedRequest> }>) => void;
+  setSelected: (idOrFn: string | null | ((prev: string | null) => string | null)) => void;
   togglePause: () => void;
   clearRequests: () => void;
   setFilter: (filter: Partial<FilterOptions>) => void;
@@ -101,6 +102,13 @@ interface CaptureState {
   // History management
   loadHistory: () => Promise<void>;
   clearHistory: () => Promise<void>;
+  // Batching helpers for high-frequency updates
+  _pendingRequests: CapturedRequest[];
+  _pendingUpdates: Array<{ id: string; update: Partial<CapturedRequest> }>;
+  _flushTimer: ReturnType<typeof setTimeout> | null;
+  queueRequest: (request: CapturedRequest) => void;
+  queueUpdate: (id: string, update: Partial<CapturedRequest>) => void;
+  flushPending: () => void;
 }
 
 const defaultFilter: FilterOptions = {
@@ -173,6 +181,11 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   isLoadingHistory: false,
   historyLoaded: false,
   historyTotal: 0,
+  
+  // Batching state
+  _pendingRequests: [],
+  _pendingUpdates: [],
+  _flushTimer: null,
 
   addRequest: (request) => {
     if (get().isPaused) return;
@@ -243,7 +256,114 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
     });
   },
 
-  setSelected: (id) => set({ selectedId: id }),
+  batchUpdateRequests: (updates) => {
+    set((state) => {
+      const newMap = new Map(state.requestMap);
+      let changed = false;
+      
+      for (const { id, update } of updates) {
+        const existing = newMap.get(id);
+        if (existing) {
+          newMap.set(id, { ...existing, ...update });
+          changed = true;
+        }
+      }
+
+      return changed ? { requestMap: newMap } : state;
+    });
+  },
+
+  // Queue a request for batched addition (used for high-frequency events)
+  queueRequest: (request) => {
+    if (get().isPaused) return;
+    
+    const state = get();
+    state._pendingRequests.push(request);
+    
+    // Schedule flush if not already scheduled
+    if (!state._flushTimer) {
+      const timer = setTimeout(() => {
+        get().flushPending();
+      }, 16); // ~1 frame at 60fps
+      
+      set({ _flushTimer: timer });
+    }
+  },
+
+  // Queue an update for batched processing
+  queueUpdate: (id, update) => {
+    const state = get();
+    state._pendingUpdates.push({ id, update });
+    
+    // Schedule flush if not already scheduled
+    if (!state._flushTimer) {
+      const timer = setTimeout(() => {
+        get().flushPending();
+      }, 16);
+      
+      set({ _flushTimer: timer });
+    }
+  },
+
+  // Flush all pending requests and updates in one batch
+  flushPending: () => {
+    const state = get();
+    const pendingRequests = [...state._pendingRequests];
+    const pendingUpdates = [...state._pendingUpdates];
+    
+    // Clear pending arrays and timer
+    state._pendingRequests.length = 0;
+    state._pendingUpdates.length = 0;
+    if (state._flushTimer) {
+      clearTimeout(state._flushTimer);
+    }
+    
+    if (pendingRequests.length === 0 && pendingUpdates.length === 0) {
+      set({ _flushTimer: null });
+      return;
+    }
+    
+    set((currentState) => {
+      const newMap = new Map(currentState.requestMap);
+      let newIds = [...currentState.requestIds];
+      
+      // Process new requests (sorted by timestamp, newest first)
+      if (pendingRequests.length > 0) {
+        const sortedRequests = pendingRequests.sort((a, b) => b.timestamp - a.timestamp);
+        
+        for (const request of sortedRequests) {
+          if (!newMap.has(request.id)) {
+            newMap.set(request.id, request);
+            newIds.unshift(request.id);
+          }
+        }
+      }
+      
+      // Process updates
+      for (const { id, update } of pendingUpdates) {
+        const existing = newMap.get(id);
+        if (existing) {
+          newMap.set(id, { ...existing, ...update });
+        }
+      }
+      
+      // Trim if exceeds max
+      while (newIds.length > currentState.maxRequests) {
+        const removedId = newIds.pop()!;
+        newMap.delete(removedId);
+      }
+      
+      return {
+        requestMap: newMap,
+        requestIds: newIds,
+        _flushTimer: null,
+      };
+    });
+  },
+
+  setSelected: (idOrFn) => set((state) => ({
+    selectedId: typeof idOrFn === 'function' ? idOrFn(state.selectedId) : idOrFn
+  })),
 
   togglePause: () => set((state) => ({ isPaused: !state.isPaused })),
 
@@ -325,6 +445,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
 }));
 
 // Selector for requests array with stable reference
+// Use shallow comparison to avoid unnecessary re-renders
 export const useRequests = () => {
   const requestMap = useCaptureStore((state) => state.requestMap);
   const requestIds = useCaptureStore((state) => state.requestIds);
@@ -336,9 +457,15 @@ export const useRequests = () => {
   }, [requestMap, requestIds]);
 };
 
-// Optimized filtered requests selector
+// Optimized: Get request count without triggering re-renders on content changes
+export const useRequestCount = () => {
+  return useCaptureStore((state) => state.requestIds.length);
+};
+
+// Optimized filtered requests selector with memoized filter check
 export const useFilteredRequests = () => {
-  const requests = useRequests();
+  const requestMap = useCaptureStore((state) => state.requestMap);
+  const requestIds = useCaptureStore((state) => state.requestIds);
   const filter = useCaptureStore((state) => state.filter);
 
   return useMemo(() => {
@@ -351,6 +478,11 @@ export const useFilteredRequests = () => {
       filter.hosts.length === 0 &&
       filter.hasRules === null &&
       filter.protocols.length === 0;
+
+    // Build requests array
+    const requests = requestIds
+      .map((id) => requestMap.get(id))
+      .filter((r): r is CapturedRequest => r !== undefined);
 
     if (isEmptyFilter) {
       return requests;
@@ -414,5 +546,5 @@ export const useFilteredRequests = () => {
 
       return true;
     });
-  }, [requests, filter]);
+  }, [requestMap, requestIds, filter]);
 };

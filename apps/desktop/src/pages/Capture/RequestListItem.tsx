@@ -1,8 +1,7 @@
-import { memo, CSSProperties, useMemo } from "react";
+import { memo, CSSProperties } from "react";
 import { CapturedRequest } from "@/stores/capture";
 import { ColumnConfig } from "@/stores/columns";
-import { useStreamStore } from "@/stores/stream";
-import { Zap } from "lucide-react";
+import { StreamConnection } from "@/stores/stream";
 
 // Pre-computed class mappings for zero runtime lookup
 const METHOD_CLASSES: Record<string, string> = {
@@ -15,23 +14,15 @@ const METHOD_CLASSES: Record<string, string> = {
   HEAD: "text-zinc-500",
 };
 
-const STATUS_CLASSES = {
-  success: "text-emerald-500",
-  redirect: "text-blue-500",
-  clientError: "text-amber-500",
-  serverError: "text-red-500",
-  pending: "text-zinc-400",
-} as const;
-
 const getMethodClass = (method: string): string =>
   METHOD_CLASSES[method] || "text-zinc-500";
 
 const getStatusClass = (status: number | null): string => {
-  if (status === null) return STATUS_CLASSES.pending;
-  if (status < 300) return STATUS_CLASSES.success;
-  if (status < 400) return STATUS_CLASSES.redirect;
-  if (status < 500) return STATUS_CLASSES.clientError;
-  return STATUS_CLASSES.serverError;
+  if (status === null) return "text-zinc-400";
+  if (status < 300) return "text-emerald-500";
+  if (status < 400) return "text-blue-500";
+  if (status < 500) return "text-amber-500";
+  return "text-red-500";
 };
 
 const SIZE_UNITS = ["B", "K", "M", "G"];
@@ -60,19 +51,55 @@ const PROTOCOL_DISPLAY: Record<string, string> = {
   sse: "SSE",
 };
 
+// Pre-computed base styles - avoid object creation during render
+const BASE_ROW_STYLE: CSSProperties = {
+  position: "absolute",
+  top: 0,
+  left: 0,
+  width: "100%",
+  contain: "layout style paint",
+  willChange: "transform",
+};
+
+// Pre-computed class strings to avoid runtime concatenation
+const ROW_BASE = "flex cursor-pointer items-center h-full select-none text-xs font-mono relative";
+const ROW_SELECTED = `${ROW_BASE} bg-accent`;
+const ROW_MATCHED = `${ROW_BASE} bg-indigo-50/50 dark:bg-indigo-950/30 hover:bg-indigo-100/50 dark:hover:bg-indigo-900/30 font-semibold`;
+const ROW_NORMAL = `${ROW_BASE} hover:bg-accent/50`;
+
+const CELL_BASE = "truncate";
+const MATCHED_COLOR = "text-indigo-700 dark:text-indigo-300";
+const MUTED_COLOR = "text-muted-foreground";
+
 interface RequestListItemProps {
   request: CapturedRequest;
   isSelected: boolean;
-  onClick: () => void;
-  style: CSSProperties;
+  onSelect: (id: string) => void;
+  translateY: number;
+  height: number;
   columns: ColumnConfig[];
+  streamConnection?: StreamConnection;
 }
 
-// Custom comparison function to prevent unnecessary re-renders
+// Optimized comparison - check primitives first, skip deep object comparisons
 const areEqual = (prev: RequestListItemProps, next: RequestListItemProps): boolean => {
+  // Fast primitive checks first
   if (prev.isSelected !== next.isSelected) return false;
-  if (prev.style !== next.style) return false;
+  if (prev.translateY !== next.translateY) return false;
+  if (prev.height !== next.height) return false;
   if (prev.columns !== next.columns) return false;
+  if (prev.onSelect !== next.onSelect) return false;
+  
+  // Stream connection check (shallow)
+  if (prev.streamConnection !== next.streamConnection) {
+    // Only re-render if relevant fields changed
+    const p = prev.streamConnection;
+    const n = next.streamConnection;
+    if (!p || !n) return false;
+    if (p.isEnded !== n.isEnded || p.messageCount !== n.messageCount) return false;
+  }
+  
+  // Request comparison - only fields that affect display
   const p = prev.request;
   const n = next.request;
   return (
@@ -93,80 +120,79 @@ const areEqual = (prev: RequestListItemProps, next: RequestListItemProps): boole
 export const RequestListItem = memo(function RequestListItem({
   request,
   isSelected,
-  onClick,
-  style,
+  onSelect,
+  translateY,
+  height,
   columns,
+  streamConnection,
 }: RequestListItemProps) {
-  const visibleColumns = useMemo(
-    () => columns.filter((col) => col.visible),
-    [columns]
-  );
-
   const hasMatchedRules = request.matchedRules.length > 0;
   
-  // Build class name: selected state takes priority, then matched rules style
-  let baseClass = "flex cursor-pointer items-center h-full select-none text-xs font-mono relative";
+  // Use pre-computed class strings
+  const rowClass = isSelected ? ROW_SELECTED : hasMatchedRules ? ROW_MATCHED : ROW_NORMAL;
   
-  if (isSelected) {
-    baseClass += " bg-accent";
-  } else if (hasMatchedRules) {
-    // Matched rules get a subtle indigo/blue tinted background
-    baseClass += " bg-indigo-50/50 dark:bg-indigo-950/30 hover:bg-indigo-100/50 dark:hover:bg-indigo-900/30";
-  } else {
-    baseClass += " hover:bg-accent/50";
-  }
-  
-  // Add font weight for matched rules
-  if (hasMatchedRules) {
-    baseClass += " font-semibold";
-  }
+  // Merge style with transform - minimal object creation
+  const style: CSSProperties = {
+    ...BASE_ROW_STYLE,
+    height,
+    transform: `translate3d(0, ${translateY}px, 0)`,
+  };
 
   return (
-    <div style={style} onClick={onClick} className={baseClass}>
-      {/* Left border indicator for matched rules */}
+    <div
+      style={style}
+      onClick={() => onSelect(request.id)}
+      className={rowClass}
+    >
       {hasMatchedRules && (
         <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-indigo-500 dark:bg-indigo-400" />
       )}
-      {visibleColumns.map((col) => (
-        <CellContent key={col.id} column={col} request={request} hasMatchedRules={hasMatchedRules} />
-      ))}
+      {columns.map((col) => 
+        col.visible ? (
+          <Cell
+            key={col.id}
+            columnId={col.id}
+            width={col.width}
+            minWidth={col.minWidth}
+            request={request}
+            hasMatchedRules={hasMatchedRules}
+            streamConnection={streamConnection}
+          />
+        ) : null
+      )}
     </div>
   );
 }, areEqual);
 
-interface CellContentProps {
-  column: ColumnConfig;
+// Inline cell component - no memo needed since parent handles it
+interface CellProps {
+  columnId: string;
+  width: number;
+  minWidth?: number;
   request: CapturedRequest;
   hasMatchedRules: boolean;
+  streamConnection?: StreamConnection;
 }
 
-function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
-  // Get stream connection status for SSE/WebSocket requests
-  const streamConnection = useStreamStore((state) => 
-    (request.protocol === "websocket" || request.protocol === "sse") 
-      ? state.connections.get(request.id) 
-      : undefined
-  );
-  
-  const isFlex = column.width === 0;
-  const style: React.CSSProperties = isFlex
-    ? { flex: 1, minWidth: column.minWidth }
-    : { width: column.width, flexShrink: 0 };
+function Cell({ columnId, width, minWidth, request, hasMatchedRules, streamConnection }: CellProps) {
+  const isFlex = width === 0;
+  const style: CSSProperties = isFlex
+    ? { flex: 1, minWidth }
+    : { width, flexShrink: 0 };
 
-  const baseClasses = "truncate";
-  // For rows with matched rules, use indigo color scheme
-  const matchedColor = "text-indigo-700 dark:text-indigo-300";
-  const mutedClass = hasMatchedRules ? matchedColor : "text-muted-foreground";
+  const colorClass = hasMatchedRules ? MATCHED_COLOR : MUTED_COLOR;
   
-  switch (column.id) {
+  switch (columnId) {
     case "method":
       return (
         <span
-          className={`${baseClasses} pl-2.5 font-semibold ${hasMatchedRules ? matchedColor : getMethodClass(request.method)}`}
+          className={`${CELL_BASE} pl-2.5 font-semibold ${hasMatchedRules ? MATCHED_COLOR : getMethodClass(request.method)}`}
           style={style}
         >
-          {request.matchedRules.length > 0 && column.id === "method" && (
-            <Zap className="inline-block h-3 w-3 mr-1 text-indigo-500" />
+          {hasMatchedRules && (
+            <svg className="inline-block h-3 w-3 mr-1 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+            </svg>
           )}
           {request.method}
         </span>
@@ -175,7 +201,7 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
     case "status":
       return (
         <span
-          className={`${baseClasses} text-center ${hasMatchedRules ? matchedColor : getStatusClass(request.responseStatus)}`}
+          className={`${CELL_BASE} text-center ${hasMatchedRules ? MATCHED_COLOR : getStatusClass(request.responseStatus)}`}
           style={style}
         >
           {request.responseStatus ?? "-"}
@@ -186,10 +212,7 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
       const isStreaming = request.protocol === "websocket" || request.protocol === "sse";
       const isLive = streamConnection && !streamConnection.isEnded;
       return (
-        <span
-          className={`${baseClasses} ${mutedClass} flex items-center gap-1`}
-          style={style}
-        >
+        <span className={`${CELL_BASE} ${colorClass} flex items-center gap-1`} style={style}>
           {PROTOCOL_DISPLAY[request.protocol] || request.protocol.toUpperCase()}
           {isStreaming && isLive && (
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
@@ -204,18 +227,12 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
     }
 
     case "host": {
-      // Use different colors: green for HTTPS (TLS), default for HTTP
-      // But if matched rules, use indigo color scheme
       const isSecure = !!request.tlsInfo;
       const hostClass = hasMatchedRules 
-        ? matchedColor 
-        : (isSecure ? "text-emerald-500" : "text-muted-foreground");
+        ? MATCHED_COLOR 
+        : (isSecure ? "text-emerald-500" : MUTED_COLOR);
       return (
-        <span
-          className={`${baseClasses} ${hostClass}`}
-          style={style}
-          title={`${isSecure ? "HTTPS" : "HTTP"}: ${request.host}${hasMatchedRules ? " (matched rules)" : ""}`}
-        >
+        <span className={`${CELL_BASE} ${hostClass}`} style={style}>
           {request.host}
         </span>
       );
@@ -224,9 +241,8 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
     case "path":
       return (
         <span
-          className={`${baseClasses} pr-2 ${hasMatchedRules ? matchedColor : ""}`}
+          className={`${CELL_BASE} pr-2 ${hasMatchedRules ? MATCHED_COLOR : ""}`}
           style={style}
-          title={request.path}
         >
           {request.path}
         </span>
@@ -234,31 +250,21 @@ function CellContent({ column, request, hasMatchedRules }: CellContentProps) {
 
     case "remoteAddr":
       return (
-        <span
-          className={`${baseClasses} ${mutedClass}`}
-          style={style}
-          title={request.remoteAddr || undefined}
-        >
+        <span className={`${CELL_BASE} ${colorClass}`} style={style}>
           {request.remoteAddr || "-"}
         </span>
       );
 
     case "duration":
       return (
-        <span
-          className={`${baseClasses} text-right ${mutedClass}`}
-          style={style}
-        >
+        <span className={`${CELL_BASE} text-right ${colorClass}`} style={style}>
           {formatDuration(request.durationMs)}
         </span>
       );
 
     case "size":
       return (
-        <span
-          className={`${baseClasses} text-right ${mutedClass} pr-2`}
-          style={style}
-        >
+        <span className={`${CELL_BASE} text-right ${colorClass} pr-2`} style={style}>
           {formatSize(request.responseSize)}
         </span>
       );

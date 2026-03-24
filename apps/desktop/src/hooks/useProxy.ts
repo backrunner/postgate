@@ -72,7 +72,9 @@ interface StreamEndedEventPayload {
  */
 export function useProxy() {
   const { setStatus, setError, config } = useProxyStore();
-  const { addRequest, updateRequest, isPaused } = useCaptureStore();
+  const queueRequest = useCaptureStore((state) => state.queueRequest);
+  const queueUpdate = useCaptureStore((state) => state.queueUpdate);
+  const isPaused = useCaptureStore((state) => state.isPaused);
   const { addMessage, endStream } = useStreamStore();
 
   // Start proxy
@@ -147,7 +149,7 @@ export function useProxy() {
         const { id, eventType, data } = event.payload;
 
         if (eventType === "started") {
-          // Add new request
+          // Add new request (queued for batching)
           const request: CapturedRequest = {
             id: data.id,
             timestamp: data.timestamp,
@@ -171,10 +173,10 @@ export function useProxy() {
             responseSize: null,
             remoteAddr: data.remoteAddr || null,
           };
-          addRequest(request);
+          queueRequest(request);
         } else if (eventType === "completed" || eventType === "response_received") {
-          // Update existing request
-          updateRequest(id, {
+          // Update existing request (queued for batching)
+          queueUpdate(id, {
             responseStatus: data.responseStatus,
             responseHeaders: data.responseHeaders,
             durationMs: data.durationMs,
@@ -183,8 +185,8 @@ export function useProxy() {
             responseSize: data.responseSize,
           });
         } else if (eventType === "error") {
-          // Update with error
-          updateRequest(id, {
+          // Update with error (queued for batching)
+          queueUpdate(id, {
             durationMs: data.durationMs,
           });
         }
@@ -229,7 +231,7 @@ export function useProxy() {
       if (unlistenStreamMessage) unlistenStreamMessage();
       if (unlistenStreamEnded) unlistenStreamEnded();
     };
-  }, [addRequest, updateRequest, addMessage, endStream, isPaused]);
+  }, [queueRequest, queueUpdate, addMessage, endStream, isPaused]);
 
   // Get initial status on mount
   useEffect(() => {

@@ -155,3 +155,29 @@
 .method-head {
   @apply text-zinc-500;
 }
+
+/* High-performance virtual list optimizations */
+.virtual-list-container {
+  contain: strict;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.virtual-list-item {
+  contain: layout style paint;
+  will-change: transform;
+  backface-visibility: hidden;
+}
+
+/* Reduce paint during scroll */
+@media (prefers-reduced-motion: no-preference) {
+  .virtual-list-container {
+    scroll-behavior: auto;
+  }
+}
+
+/* Optimize text rendering for lists */
+.font-mono {
+  text-rendering: optimizeSpeed;
+  -webkit-font-smoothing: antialiased;
+}

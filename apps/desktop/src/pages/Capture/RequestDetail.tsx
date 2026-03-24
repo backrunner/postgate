@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { CapturedRequest } from "@/stores/capture";
 import { useStreamConnection, formatMessageType } from "@/stores/stream";
@@ -18,6 +18,7 @@ import { useReplayStore } from "@/stores/replay";
 import { useRequestBody } from "@/hooks/useProxy";
 import { BodyPreview } from "@/components/capture/BodyPreview";
 import { MatchedRulesDisplay } from "@/components/capture/MatchedRulesDisplay";
+import { CookieDisplay } from "@/components/capture/CookieDisplay";
 import { SimpleTimingDisplay } from "@/components/capture/TimingWaterfall";
 import { copyAsCurl, requestToFetch, exportToHar } from "@/lib/export";
 import {
@@ -112,33 +113,65 @@ export function RequestDetail({ request }: RequestDetailProps) {
     exportToHar([request], bodies, resBodies);
   };
 
-  const formatHeaders = (headers: Record<string, string>) => {
-    return Object.entries(headers).map(([key, value]) => {
-      // Determine header type for coloring
-      const keyLower = key.toLowerCase();
-      let valueClass = "break-all";
-      
-      // Color-code values based on header type
-      if (keyLower === "content-type" || keyLower === "accept") {
-        valueClass += " text-amber-600 dark:text-amber-400";
-      } else if (keyLower === "authorization" || keyLower === "cookie" || keyLower === "set-cookie") {
-        valueClass += " text-rose-600 dark:text-rose-400";
-      } else if (keyLower.startsWith("x-") || keyLower.startsWith("sec-")) {
-        valueClass += " text-purple-600 dark:text-purple-400";
-      } else if (keyLower === "cache-control" || keyLower === "expires" || keyLower === "etag") {
-        valueClass += " text-sky-600 dark:text-sky-400";
-      } else if (keyLower === "location" || keyLower === "referer" || keyLower === "origin") {
-        valueClass += " text-emerald-600 dark:text-emerald-400";
-      }
-      
-      return (
-        <div key={key} className="flex gap-2 py-0.5 text-xs border-b border-border/30 last:border-0 font-mono">
-          <span className="font-semibold text-indigo-600 dark:text-indigo-400 min-w-[140px] shrink-0">{key}:</span>
-          <span className={valueClass}>{value}</span>
-        </div>
-      );
-    });
+  // Format header name like Chrome DevTools: "content-type" → "Content-Type"
+  const formatHeaderName = (name: string): string => {
+    return name
+      .split("-")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join("-");
   };
+
+  const formatHeaders = (headers: Record<string, string>, options?: { skipCookies?: boolean }) => {
+    return Object.entries(headers)
+      .filter(([key]) => {
+        if (options?.skipCookies) {
+          const k = key.toLowerCase();
+          return k !== "cookie" && k !== "set-cookie";
+        }
+        return true;
+      })
+      .map(([key, value]) => {
+        // Determine header type for coloring
+        const keyLower = key.toLowerCase();
+        let valueClass = "break-all";
+
+        // Color-code values based on header type
+        if (keyLower === "content-type" || keyLower === "accept") {
+          valueClass += " text-amber-600 dark:text-amber-400";
+        } else if (keyLower === "authorization") {
+          valueClass += " text-rose-600 dark:text-rose-400";
+        } else if (keyLower.startsWith("x-") || keyLower.startsWith("sec-")) {
+          valueClass += " text-purple-600 dark:text-purple-400";
+        } else if (keyLower === "cache-control" || keyLower === "expires" || keyLower === "etag") {
+          valueClass += " text-sky-600 dark:text-sky-400";
+        } else if (keyLower === "location" || keyLower === "referer" || keyLower === "origin") {
+          valueClass += " text-emerald-600 dark:text-emerald-400";
+        }
+
+        return (
+          <div key={key} className="flex gap-2 py-0.5 text-xs border-b border-border/30 last:border-0 font-mono">
+            <span className="font-semibold text-indigo-600 dark:text-indigo-400 min-w-[140px] shrink-0">{formatHeaderName(key)}:</span>
+            <span className={valueClass}>{value}</span>
+          </div>
+        );
+      });
+  };
+
+  // Extract cookie values from headers
+  const requestCookie = useMemo(() => {
+    const entry = Object.entries(request.requestHeaders).find(
+      ([k]) => k.toLowerCase() === "cookie"
+    );
+    return entry?.[1] || null;
+  }, [request.requestHeaders]);
+
+  const responseCookies = useMemo(() => {
+    if (!request.responseHeaders) return null;
+    const entry = Object.entries(request.responseHeaders).find(
+      ([k]) => k.toLowerCase() === "set-cookie"
+    );
+    return entry?.[1] || null;
+  }, [request.responseHeaders]);
 
   return (
     <div className="flex h-full flex-col">
@@ -335,12 +368,22 @@ export function RequestDetail({ request }: RequestDetailProps) {
                 </h3>
                 <div className="rounded border p-2 bg-muted/30">
                   {Object.keys(request.requestHeaders).length > 0 ? (
-                    formatHeaders(request.requestHeaders)
+                    formatHeaders(request.requestHeaders, { skipCookies: true })
                   ) : (
                     <span className="text-muted-foreground italic text-xs">No headers</span>
                   )}
                 </div>
               </section>
+
+              {/* Request Cookies */}
+              {requestCookie && (
+                <section>
+                  <h3 className="font-semibold mb-1.5 text-xs uppercase text-muted-foreground">
+                    Cookies
+                  </h3>
+                  <CookieDisplay cookies={requestCookie} type="cookie" />
+                </section>
+              )}
 
               <section>
                 <h3 className="font-semibold mb-1.5 text-xs uppercase text-muted-foreground">Body</h3>
@@ -367,7 +410,7 @@ export function RequestDetail({ request }: RequestDetailProps) {
                 <div className="rounded border p-2 bg-muted/30">
                   {request.responseHeaders ? (
                     Object.keys(request.responseHeaders).length > 0 ? (
-                      formatHeaders(request.responseHeaders)
+                      formatHeaders(request.responseHeaders, { skipCookies: true })
                     ) : (
                       <span className="text-muted-foreground italic text-xs">No headers</span>
                     )
@@ -376,6 +419,16 @@ export function RequestDetail({ request }: RequestDetailProps) {
                   )}
                 </div>
               </section>
+
+              {/* Response Set-Cookies */}
+              {responseCookies && (
+                <section>
+                  <h3 className="font-semibold mb-1.5 text-xs uppercase text-muted-foreground">
+                    Set-Cookie
+                  </h3>
+                  <CookieDisplay cookies={responseCookies} type="set-cookie" />
+                </section>
+              )}
 
               <section>
                 <h3 className="font-semibold mb-1.5 text-xs uppercase text-muted-foreground">Body</h3>

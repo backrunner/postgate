@@ -130,7 +130,7 @@ const defaultRequest: SavedRequest = {
   name: 'New Request',
   collection_id: null,
   method: 'GET',
-  url: 'https://api.example.com',
+  url: '',
   headers: [{ key: 'Content-Type', value: 'application/json', enabled: true }],
   query_params: [],
   body: { type: 'none' },

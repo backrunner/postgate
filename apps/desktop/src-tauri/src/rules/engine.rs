@@ -75,7 +75,6 @@ impl RuleEngine {
     fn rebuild_cache(&self) {
         let mut compiled = Vec::new();
 
-        // Collect all groups and sort by priority
         let mut groups: Vec<_> = self.groups.iter().map(|r| r.value().clone()).collect();
         groups.sort_by(|a, b| b.priority.cmp(&a.priority));
 
@@ -88,24 +87,20 @@ impl RuleEngine {
             }
         }
 
-        // Sort compiled rules by priority
         compiled.sort_by(|a, b| b.rule.priority.cmp(&a.rule.priority));
 
         *self.compiled_rules.write() = compiled;
     }
 
     /// Match a request against all rules
-    /// 
+    ///
     /// # Arguments
     /// * `method` - HTTP method (GET, POST, etc.)
-    /// * `host` - Request host
-    /// * `path` - Request path
+    /// * `host` - Request host (without port)
+    /// * `path` - Request path (including leading /)
     /// * `protocol` - Protocol (http, https, ws, wss)
     /// * `port` - Request port
     /// * `headers` - Request headers
-    /// 
-    /// # Returns
-    /// Vector of matched rules with their remaining paths for whistle-compatible forwarding
     pub fn match_request(
         &self,
         method: &str,
@@ -116,8 +111,23 @@ impl RuleEngine {
         headers: &HashMap<String, String>,
     ) -> Vec<MatchedRule> {
         let compiled = self.compiled_rules.read();
-        let url = format!("{}://{}{}", protocol, host, path);
-        
+
+        // Whistle URL normalization: ensure trailing / after bare hostname
+        let normalized_path = if path.is_empty() { "/" } else { path };
+        let url = format!("{}://{}{}", protocol, host, normalized_path);
+
+        // Strip port from host for domain matching (whistle isDomain behavior)
+        let host_no_port = if let Some(colon_idx) = host.rfind(':') {
+            let maybe_port = &host[colon_idx + 1..];
+            if maybe_port.chars().all(|c| c.is_ascii_digit()) {
+                &host[..colon_idx]
+            } else {
+                host
+            }
+        } else {
+            host
+        };
+
         tracing::debug!(
             "RuleEngine::match_request - url: {}, total_rules: {}",
             url,
@@ -127,41 +137,34 @@ impl RuleEngine {
         compiled
             .iter()
             .filter_map(|cr| {
-                // Check if group and rule are enabled
                 if !cr.group_enabled || !cr.rule.enabled {
-                    tracing::trace!(
-                        "Rule skipped (disabled) - group_enabled: {}, rule_enabled: {}, pattern: {:?}",
-                        cr.group_enabled,
-                        cr.rule.enabled,
-                        cr.rule.pattern
-                    );
                     return None;
                 }
 
                 // Check pattern match and get remaining path
-                let match_result = cr.rule.pattern.match_with_remainder(&url);
+                let match_result = cr.rule.pattern.match_with_remainder(&url, port);
                 let host_match = if !match_result.matched {
-                    // Try host-only match
-                    cr.rule.pattern.matches_host(host)
+                    // Try host-only match (also try without port)
+                    cr.rule.pattern.matches_host(host_no_port)
+                        || (host != host_no_port && cr.rule.pattern.matches_host(host))
                 } else {
                     false
                 };
-                
-                tracing::trace!(
-                    "Rule check - pattern: {:?}, url_match: {}, host_match: {}",
-                    cr.rule.pattern,
-                    match_result.matched,
-                    host_match
-                );
-                
-                if !match_result.matched && !host_match {
+
+                let mut matched = match_result.matched || host_match;
+
+                // Apply negation (whistle ! prefix)
+                if cr.rule.negated {
+                    matched = !matched;
+                }
+
+                if !matched {
                     return None;
                 }
 
                 // Check filter conditions if present
                 if let Some(filters) = &cr.rule.filters {
                     if !filters.matches(method, protocol, port, headers, &url) {
-                        tracing::trace!("Rule skipped (filter mismatch) - pattern: {:?}", cr.rule.pattern);
                         return None;
                     }
                 }
@@ -172,12 +175,10 @@ impl RuleEngine {
                     match_result.remaining_path
                 );
 
-                // Use the remaining path from pattern match, or full path if host-only match
                 let remaining_path = if match_result.matched {
                     match_result.remaining_path
                 } else {
-                    // Host-only match: keep the full path
-                    path.to_string()
+                    normalized_path.to_string()
                 };
 
                 Some(MatchedRule {
@@ -223,11 +224,23 @@ mod tests {
         }
     }
 
+    fn make_rule(pattern: Pattern, actions: Vec<RuleAction>) -> Rule {
+        Rule {
+            id: "test".to_string(),
+            pattern,
+            filters: None,
+            actions,
+            enabled: true,
+            priority: 0,
+            raw_line: String::new(),
+            negated: false,
+        }
+    }
+
     #[test]
     fn test_filter_method_matching() {
         let engine = RuleEngine::new();
-        
-        // Create a rule with method filter
+
         let rule = Rule {
             id: "test".to_string(),
             pattern: Pattern::Domain("example.com".to_string()),
@@ -239,17 +252,16 @@ mod tests {
             enabled: true,
             priority: 0,
             raw_line: "example.com m:POST statusCode://200".to_string(),
+            negated: false,
         };
 
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
-        // POST should match
         let matches = engine.match_request(
             "POST", "example.com", "/", "https", 443, &HashMap::new()
         );
         assert_eq!(matches.len(), 1);
 
-        // GET should NOT match
         let matches = engine.match_request(
             "GET", "example.com", "/", "https", 443, &HashMap::new()
         );
@@ -259,8 +271,7 @@ mod tests {
     #[test]
     fn test_filter_protocol_matching() {
         let engine = RuleEngine::new();
-        
-        // Create a rule with protocol filter
+
         let rule = Rule {
             id: "test".to_string(),
             pattern: Pattern::Domain("example.com".to_string()),
@@ -272,17 +283,16 @@ mod tests {
             enabled: true,
             priority: 0,
             raw_line: "example.com p:https statusCode://200".to_string(),
+            negated: false,
         };
 
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
-        // HTTPS should match
         let matches = engine.match_request(
             "GET", "example.com", "/", "https", 443, &HashMap::new()
         );
         assert_eq!(matches.len(), 1);
 
-        // HTTP should NOT match
         let matches = engine.match_request(
             "GET", "example.com", "/", "http", 80, &HashMap::new()
         );
@@ -292,21 +302,14 @@ mod tests {
     #[test]
     fn test_no_filter_matches_all() {
         let engine = RuleEngine::new();
-        
-        // Create a rule without filters
-        let rule = Rule {
-            id: "test".to_string(),
-            pattern: Pattern::Domain("example.com".to_string()),
-            filters: None,
-            actions: vec![RuleAction::StatusCode { code: 200 }],
-            enabled: true,
-            priority: 0,
-            raw_line: "example.com statusCode://200".to_string(),
-        };
+
+        let rule = make_rule(
+            Pattern::Domain("example.com".to_string()),
+            vec![RuleAction::StatusCode { code: 200 }],
+        );
 
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
-        // All methods/protocols should match
         let matches = engine.match_request(
             "GET", "example.com", "/", "https", 443, &HashMap::new()
         );
@@ -321,45 +324,97 @@ mod tests {
     #[test]
     fn test_url_pattern_matching() {
         use crate::rules::parser::parse_rules;
-        
+
         let engine = RuleEngine::new();
-        
-        // Parse the actual whistle rule format
+
         let rules = parse_rules("https://v.qq.com/biu/u/history/ http://127.0.0.1:3000/browser").unwrap();
-        assert_eq!(rules.len(), 1, "Should parse 1 rule");
-        
-        // Debug: print pattern info
-        eprintln!("Parsed pattern: {:?}", rules[0].pattern);
-        eprintln!("Parsed actions: {:?}", rules[0].actions);
-        
+        assert_eq!(rules.len(), 1);
+
         engine.upsert_group(create_test_group("test-group", rules));
-        
-        // Test 1: Exact path match
+
+        // Exact path match
         let matches = engine.match_request(
             "GET", "v.qq.com", "/biu/u/history/", "https", 443, &HashMap::new()
         );
-        eprintln!("Test 1 - exact path: {} matches", matches.len());
         assert_eq!(matches.len(), 1, "Should match exact path");
-        
-        // Test 2: Path with query string (like the real case)
-        let matches = engine.match_request(
-            "GET", "v.qq.com", "/biu/u/history/?selectTab=history&subTabId=all", "https", 443, &HashMap::new()
-        );
-        eprintln!("Test 2 - path with query: {} matches", matches.len());
-        assert_eq!(matches.len(), 1, "Should match path with query");
-        
-        // Test 3: Subpath
+
+        // Subpath
         let matches = engine.match_request(
             "GET", "v.qq.com", "/biu/u/history/page/1", "https", 443, &HashMap::new()
         );
-        eprintln!("Test 3 - subpath: {} matches", matches.len());
         assert_eq!(matches.len(), 1, "Should match subpath");
-        
-        // Test 4: Non-matching path
+
+        // Non-matching path
         let matches = engine.match_request(
             "GET", "v.qq.com", "/other/path", "https", 443, &HashMap::new()
         );
-        eprintln!("Test 4 - non-matching: {} matches", matches.len());
         assert_eq!(matches.len(), 0, "Should not match different path");
+    }
+
+    #[test]
+    fn test_url_normalization_empty_path() {
+        let engine = RuleEngine::new();
+
+        let rule = make_rule(
+            Pattern::Domain("example.com".to_string()),
+            vec![RuleAction::StatusCode { code: 200 }],
+        );
+
+        engine.upsert_group(create_test_group("test-group", vec![rule]));
+
+        // Empty path should be normalized to /
+        let matches = engine.match_request(
+            "GET", "example.com", "", "https", 443, &HashMap::new()
+        );
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_negated_rule() {
+        let engine = RuleEngine::new();
+
+        let rule = Rule {
+            negated: true,
+            ..make_rule(
+                Pattern::Domain("example.com".to_string()),
+                vec![RuleAction::StatusCode { code: 200 }],
+            )
+        };
+
+        engine.upsert_group(create_test_group("test-group", vec![rule]));
+
+        // example.com should NOT match (negated)
+        let matches = engine.match_request(
+            "GET", "example.com", "/", "https", 443, &HashMap::new()
+        );
+        assert_eq!(matches.len(), 0);
+
+        // other.com SHOULD match (negated domain doesn't match → inverted → matches)
+        let matches = engine.match_request(
+            "GET", "other.com", "/", "https", 443, &HashMap::new()
+        );
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_port_pattern_matching() {
+        let engine = RuleEngine::new();
+
+        let rule = make_rule(
+            Pattern::Port(8080),
+            vec![RuleAction::StatusCode { code: 200 }],
+        );
+
+        engine.upsert_group(create_test_group("test-group", vec![rule]));
+
+        let matches = engine.match_request(
+            "GET", "example.com", "/", "http", 8080, &HashMap::new()
+        );
+        assert_eq!(matches.len(), 1);
+
+        let matches = engine.match_request(
+            "GET", "example.com", "/", "https", 443, &HashMap::new()
+        );
+        assert_eq!(matches.len(), 0);
     }
 }

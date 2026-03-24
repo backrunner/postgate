@@ -1,22 +1,28 @@
 //! Whistle-compatible rule parser
 //!
-//! Parses rules in whistle syntax format:
-//! pattern operatorURI
+//! Parses rules in whistle syntax format, supporting both normal and reverse syntax:
+//! - Normal: `pattern operatorURI [operatorURI2] [filter1] [filter2]`
+//! - Reverse: `operatorURI pattern [pattern2]`
 //!
 //! Examples:
 //! - example.com host://127.0.0.1:8080
 //! - /api/* resHeaders://{content-type: application/json}
 //! - ^https://.*\.example\.com$ resCors://* reqDelay://1000
+//! - host://127.0.0.1:8080 example.com (reverse syntax)
 
 use super::types::{
     BodyContent, CookieOptions, HeaderModifications, Pattern, ProxyAuth, Rule, RuleAction,
-    RuleFilters, UrlParamModifications,
+    RuleFilters, UrlParamModifications, parse_regex_with_flags,
 };
 use crate::error::{PostGateError, Result};
 use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
 use uuid::Uuid;
+
+// =============================================================================
+// Public API
+// =============================================================================
 
 /// Parse whistle-compatible rules from text
 pub fn parse_rules(content: &str) -> Result<Vec<Rule>> {
@@ -26,12 +32,13 @@ pub fn parse_rules(content: &str) -> Result<Vec<Rule>> {
         let line = line.trim();
 
         // Skip empty lines and comments
-        if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
+        // Whistle: only # starts a comment. // is NOT a comment (it's a no-schema pattern).
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
         match parse_rule_line(line) {
-            Ok(rule) => rules.push(rule),
+            Ok(mut parsed_rules) => rules.append(&mut parsed_rules),
             Err(e) => {
                 tracing::warn!(
                     "Failed to parse rule at line {}: {} - {}",
@@ -46,84 +53,561 @@ pub fn parse_rules(content: &str) -> Result<Vec<Rule>> {
     Ok(rules)
 }
 
-/// Parse a single rule line
-fn parse_rule_line(line: &str) -> Result<Rule> {
-    // Split into pattern and action parts
-    let parts: Vec<&str> = line.splitn(2, char::is_whitespace).collect();
+// =============================================================================
+// Line Parsing — Normal & Reverse Syntax
+// =============================================================================
 
-    if parts.len() < 2 {
+/// Parse a single rule line, returning one or more rules.
+/// Supports both normal syntax (pattern op1 op2 filter) and reverse syntax (op1 pattern1 pattern2).
+fn parse_rule_line(line: &str) -> Result<Vec<Rule>> {
+    let tokens = split_action_string(line);
+
+    if tokens.len() < 2 {
         return Err(PostGateError::RuleParse(format!(
-            "Invalid rule format: {}",
+            "Invalid rule format (need at least 2 tokens): {}",
             line
         )));
     }
 
-    let pattern_str = parts[0].trim();
-    let action_str = parts[1].trim();
+    // Apply shorthand expansions to each token
+    let tokens: Vec<String> = tokens.into_iter().map(|t| format_shorthand(&t)).collect();
 
-    let pattern = parse_pattern(pattern_str)?;
-    let (actions, filters) = parse_actions_and_filters(action_str)?;
+    // Find the pattern index using whistle's algorithm
+    let pattern_index = index_of_pattern(&tokens);
 
-    Ok(Rule {
+    if pattern_index == 0 {
+        // Normal syntax: pattern op1 op2 filter1 filter2
+        parse_normal_syntax(&tokens, line)
+    } else if pattern_index > 0 {
+        // Reverse syntax: op1 [op2] pattern1 [pattern2]
+        parse_reverse_syntax(&tokens, pattern_index, line)
+    } else {
+        // Couldn't determine pattern — treat first token as pattern (fallback)
+        parse_normal_syntax(&tokens, line)
+    }
+}
+
+/// Normal syntax: first token is pattern, rest are operators + filters
+fn parse_normal_syntax(tokens: &[String], raw_line: &str) -> Result<Vec<Rule>> {
+    let pattern_str = &tokens[0];
+    let rest = &tokens[1..];
+
+    let (negated, pattern) = parse_pattern(pattern_str)?;
+    let (actions, filters) = parse_actions_and_filters_from_tokens(rest)?;
+
+    if actions.is_empty() {
+        return Err(PostGateError::RuleParse(format!(
+            "No valid actions found in: {}",
+            raw_line
+        )));
+    }
+
+    Ok(vec![Rule {
         id: Uuid::new_v4().to_string(),
         pattern,
-        filters: if filters.is_empty() {
-            None
-        } else {
-            Some(filters)
-        },
+        filters: if filters.is_empty() { None } else { Some(filters) },
         actions,
         enabled: true,
         priority: 0,
-        raw_line: line.to_string(),
-    })
+        raw_line: raw_line.to_string(),
+        negated,
+    }])
 }
 
-/// Parse a pattern string into a Pattern
-fn parse_pattern(s: &str) -> Result<Pattern> {
-    // Check for regex pattern (starts with ^)
+/// Reverse syntax: tokens before pattern_index are operators, tokens at/after are patterns.
+/// Generate cross-product: each operator × each pattern.
+fn parse_reverse_syntax(tokens: &[String], pattern_index: usize, raw_line: &str) -> Result<Vec<Rule>> {
+    let mut operators = Vec::new();
+    let mut patterns = Vec::new();
+    let mut filters = RuleFilters::default();
+
+    // Tokens before pattern_index: could be operators or filters
+    for token in &tokens[..pattern_index] {
+        if parse_filter_token(token, &mut filters)? {
+            continue;
+        }
+        operators.push(token.as_str());
+    }
+
+    // Tokens at/after pattern_index: patterns, but some might still be operators or filters
+    for token in &tokens[pattern_index..] {
+        if parse_filter_token(token, &mut filters)? {
+            continue;
+        }
+        if is_pattern_token(token) || is_host_value(token).is_none() && !has_protocol(token) {
+            patterns.push(token.as_str());
+        } else {
+            operators.push(token);
+        }
+    }
+
+    if operators.is_empty() || patterns.is_empty() {
+        return Err(PostGateError::RuleParse(format!(
+            "Reverse syntax needs at least 1 operator and 1 pattern: {}",
+            raw_line
+        )));
+    }
+
+    // Generate cross-product
+    let mut rules = Vec::new();
+    for op_str in &operators {
+        let action = parse_single_action(op_str)?;
+        if let Some(action) = action {
+            for pat_str in &patterns {
+                let (negated, pattern) = parse_pattern(pat_str)?;
+                rules.push(Rule {
+                    id: Uuid::new_v4().to_string(),
+                    pattern,
+                    filters: if filters.is_empty() { None } else { Some(filters.clone()) },
+                    actions: vec![action.clone()],
+                    enabled: true,
+                    priority: 0,
+                    raw_line: raw_line.to_string(),
+                    negated,
+                });
+            }
+        }
+    }
+
+    if rules.is_empty() {
+        return Err(PostGateError::RuleParse(format!(
+            "No valid rules generated from reverse syntax: {}",
+            raw_line
+        )));
+    }
+
+    Ok(rules)
+}
+
+// =============================================================================
+// Pattern Detection (whistle's indexOfPattern / isPattern)
+// =============================================================================
+
+/// Find the index of the first pattern token in the list.
+/// Returns 0 if first token is a pattern (normal syntax), >0 for reverse syntax.
+fn index_of_pattern(tokens: &[String]) -> usize {
+    let mut ip_index: Option<usize> = None;
+
+    for (i, token) in tokens.iter().enumerate() {
+        if is_pattern_token(token) {
+            return i;
+        }
+        if !has_protocol(token) {
+            if is_host_value(token).is_none() {
+                // Not a protocol action, not a bare IP — must be a pattern
+                return i;
+            } else if ip_index.is_none() {
+                ip_index = Some(i);
+            }
+        }
+    }
+
+    // Fallback: first IP-like token is the pattern
+    ip_index.unwrap_or(0)
+}
+
+/// Check if a token looks like a pattern (not an operator).
+/// Whistle's isPattern() logic.
+fn is_pattern_token(token: &str) -> bool {
+    // Port pattern: :8080 or !:8080
+    if is_port_pattern(token) {
+        return true;
+    }
+    // Exact pattern: starts with $
+    if token.starts_with('$') {
+        return true;
+    }
+    // Regex URL: starts with ^
+    if token.starts_with('^') {
+        return true;
+    }
+    // No-schema pattern: starts with // (but not ///)
+    if token.starts_with("//") && !token.starts_with("///") {
+        return true;
+    }
+    // Negative pattern: starts with !
+    if token.starts_with('!') {
+        return true;
+    }
+    // Web protocol URL (http://, https://, ws://, wss://, tunnel://)
+    if token.starts_with("http://") || token.starts_with("https://")
+        || token.starts_with("ws://") || token.starts_with("wss://")
+        || token.starts_with("tunnel://")
+    {
+        return true;
+    }
+    // Regex: /pattern/ format
+    if is_regex_pattern(token) {
+        return true;
+    }
+    // Dot-suffix pattern: .json, .html$, etc.
+    if is_dot_suffix_pattern(token) {
+        return true;
+    }
+    // Wildcard in domain-like token (contains * but has dots)
+    if token.contains('*') && token.contains('.') && !token.contains("://") {
+        return true;
+    }
+    false
+}
+
+/// Check if token is a regex pattern: /something/[flags]
+fn is_regex_pattern(s: &str) -> bool {
+    if !s.starts_with('/') || s.len() < 3 {
+        return false;
+    }
+    // Must have a closing /
+    if let Some(end) = s[1..].rfind('/') {
+        let end = end + 1;
+        // After closing /, only valid flags
+        let flags = &s[end + 1..];
+        return flags.chars().all(|c| matches!(c, 'i' | 'u' | 'g' | 'm' | 's'));
+    }
+    false
+}
+
+/// Check if token is a port pattern: :1234 or !:1234
+fn is_port_pattern(s: &str) -> bool {
+    let s = s.strip_prefix('!').unwrap_or(s);
+    if let Some(rest) = s.strip_prefix(':') {
+        rest.len() <= 5 && !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+/// Check if token is a dot-suffix pattern: .json, .html$, etc.
+fn is_dot_suffix_pattern(s: &str) -> bool {
+    let s = s.strip_prefix('!').unwrap_or(s);
+    if !s.starts_with('.') || s.len() < 2 {
+        return false;
+    }
+    let rest = s.strip_suffix('$').unwrap_or(s);
+    rest[1..].chars().all(|c| c.is_alphanumeric() || c == '-')
+}
+
+/// Check if a token has a known protocol (action format like host://...)
+fn has_protocol(token: &str) -> bool {
+    if let Some(idx) = token.find("://") {
+        let proto = &token[..idx].to_lowercase();
+        // Check if it's a known action protocol (not a web URL protocol)
+        matches!(
+            proto.as_str(),
+            "host" | "file" | "redirect" | "statuscode" | "status" | "replacestatus"
+            | "reqheaders" | "reqheader" | "reqbody" | "urlparams" | "pathreplace" | "urlreplace"
+            | "method" | "ua" | "useragent" | "referer" | "referrer" | "auth"
+            | "reqcookies" | "reqcookie" | "forwardedfor" | "xff" | "reqreplace"
+            | "resheaders" | "resheader" | "resbody" | "htmlbody" | "cssbody" | "jsbody"
+            | "resreplace" | "rescookies" | "rescookie" | "restype" | "contenttype"
+            | "rescharset" | "charset" | "attachment" | "download"
+            | "htmlappend" | "htmlprepend" | "jsappend" | "jsprepend"
+            | "cssappend" | "cssprepend" | "html" | "js" | "css"
+            | "reqcors" | "rescors" | "cors"
+            | "reqdelay" | "delay" | "resdelay" | "reqspeed" | "resspeed" | "speed"
+            | "debug" | "weinre" | "plugin" | "log" | "ignore" | "filter" | "skip"
+            | "enable" | "disable"
+            | "proxy" | "http-proxy" | "httpproxy" | "https-proxy" | "httpsproxy"
+            | "socks" | "socks5" | "socks4"
+            | "jsonbody" | "timeout" | "delete" | "echo" | "mock"
+            | "htmlreplace" | "jsreplace" | "cssreplace"
+            | "reqprepend" | "reqappend" | "resprepend" | "resappend"
+            | "301" | "302" | "307" | "308"
+            | "includefilter" | "excludefilter"
+        )
+    } else {
+        false
+    }
+}
+
+/// Check if token is a bare IP address (with optional port).
+/// Returns Some((host, port)) if it's an IP, None otherwise.
+fn is_host_value(token: &str) -> Option<(String, Option<u16>)> {
+    // IPv6 bracket format: [::1]:8080 or [::1]
+    if token.starts_with('[') {
+        if let Some(bracket_end) = token.find(']') {
+            let ip = &token[1..bracket_end];
+            let rest = &token[bracket_end + 1..];
+            if rest.is_empty() {
+                return Some((ip.to_string(), None));
+            }
+            if let Some(port_str) = rest.strip_prefix(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return Some((ip.to_string(), Some(port)));
+                }
+            }
+        }
+        return None;
+    }
+
+    // IPv4 or numeric IP with optional port: 127.0.0.1:8080
+    if token.chars().next().map_or(false, |c| c.is_ascii_digit()) && token.contains('.') {
+        if let Some(colon_idx) = token.rfind(':') {
+            let ip = &token[..colon_idx];
+            let port_str = &token[colon_idx + 1..];
+            if port_str.chars().all(|c| c.is_ascii_digit()) && !port_str.is_empty() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return Some((ip.to_string(), Some(port)));
+                }
+            }
+        }
+        // IP without port
+        return Some((token.to_string(), None));
+    }
+
+    None
+}
+
+// =============================================================================
+// Pattern Parsing
+// =============================================================================
+
+/// Parse a pattern string into a Pattern, returning (negated, Pattern).
+fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
+    let (negated, s) = if s.starts_with('!') {
+        (true, &s[1..])
+    } else {
+        (false, s)
+    };
+
+    // Exact match: $pattern
+    if let Some(rest) = s.strip_prefix('$') {
+        if rest.is_empty() {
+            return Err(PostGateError::RuleParse("Empty exact pattern".into()));
+        }
+        return Ok((negated, Pattern::Exact(rest.to_string())));
+    }
+
+    // Port pattern: :8080
+    if let Some(rest) = s.strip_prefix(':') {
+        if let Ok(port) = rest.parse::<u16>() {
+            return Ok((negated, Pattern::Port(port)));
+        }
+    }
+
+    // No-schema pattern: //host/path (but not ///)
+    if s.starts_with("//") && !s.starts_with("///") {
+        let rest = &s[2..];
+        if let Some(slash_idx) = rest.find('/') {
+            let host = rest[..slash_idx].to_string();
+            let path = rest[slash_idx..].to_string();
+            return Ok((negated, Pattern::NoSchema {
+                host,
+                path: Some(path),
+            }));
+        } else {
+            return Ok((negated, Pattern::NoSchema {
+                host: rest.to_string(),
+                path: None,
+            }));
+        }
+    }
+
+    // Dot-suffix pattern: .json, .html$
+    if is_dot_suffix_pattern(s) {
+        let anchored = s.ends_with('$');
+        let suffix = if anchored { &s[..s.len() - 1] } else { s };
+        let regex_str = if anchored {
+            format!("{}$", regex::escape(suffix))
+        } else {
+            format!("{}([?#/]|$)", regex::escape(suffix))
+        };
+        let regex = Regex::new(&regex_str)
+            .map_err(|e| PostGateError::RuleParse(format!("Invalid dot-suffix regex: {}", e)))?;
+        return Ok((negated, Pattern::Regex(regex)));
+    }
+
+    // Regex URL pattern: ^ prefix with wildcard expansion
+    // Whistle: ^ = case-insensitive, ^^ = case-sensitive
     if s.starts_with('^') {
-        let regex = Regex::new(s)
-            .map_err(|e| PostGateError::RuleParse(format!("Invalid regex: {}", e)))?;
-        return Ok(Pattern::Regex(regex));
-    }
+        let caret_count = s.chars().take_while(|&c| c == '^').count();
+        let rest = &s[caret_count..];
+        let case_insensitive = caret_count == 1;
 
-    // Check for regex pattern (enclosed in /)
-    if s.starts_with('/') && s.len() > 1 {
-        if let Some(end) = s[1..].rfind('/') {
-            let regex_str = &s[1..=end];
-            let regex = Regex::new(regex_str)
+        // Check if this is a simple regex (contains typical regex metacharacters after ^)
+        // vs a whistle regex URL (domain-like with wildcards)
+        if rest.contains("://") || rest.contains('.') || rest.contains('*') {
+            // Whistle regex URL pattern — compile with wildcard expansion
+            let regex_str = compile_regex_url_pattern(rest, case_insensitive, s.ends_with('$'));
+            let regex = Regex::new(&regex_str)
+                .map_err(|e| PostGateError::RuleParse(format!("Invalid regex URL: {}", e)))?;
+            return Ok((negated, Pattern::Regex(regex)));
+        } else {
+            // Simple regex: ^pattern$
+            let full = format!("^{}", rest);
+            let regex = Regex::new(&full)
                 .map_err(|e| PostGateError::RuleParse(format!("Invalid regex: {}", e)))?;
-            return Ok(Pattern::Regex(regex));
+            return Ok((negated, Pattern::Regex(regex)));
         }
     }
 
-    // Check for URL pattern with protocol
+    // Regex pattern (enclosed in /regex/flags)
+    if is_regex_pattern(s) {
+        if let Some(regex_str) = parse_regex_with_flags(s) {
+            let regex = Regex::new(&regex_str)
+                .map_err(|e| PostGateError::RuleParse(format!("Invalid regex: {}", e)))?;
+            return Ok((negated, Pattern::Regex(regex)));
+        }
+    }
+
+    // URL pattern with protocol
     if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("ws://") || s.starts_with("wss://") {
-        return parse_url_pattern(s);
+        return Ok((negated, parse_url_pattern(s)?));
     }
 
-    // Check for wildcard pattern
+    // Wildcard pattern
     if s.contains('*') || s.contains('?') {
-        // Check if it's a domain wildcard (e.g., *.example.com)
-        if s.starts_with("*.") || s.starts_with("**") {
-            return Ok(Pattern::Wildcard(s.to_string()));
-        }
-        return Ok(Pattern::Wildcard(s.to_string()));
+        return Ok((negated, Pattern::Wildcard(s.to_string())));
     }
 
-    // Check for path prefix (starts with /)
+    // Path prefix (starts with /)
     if s.starts_with('/') {
-        return Ok(Pattern::PathPrefix(s.to_string()));
+        return Ok((negated, Pattern::PathPrefix(s.to_string())));
     }
 
-    // Check for domain pattern (contains dots but not a full URL)
+    // Domain pattern (contains dots but no /)
     if s.contains('.') && !s.contains('/') {
-        return Ok(Pattern::Domain(s.to_string()));
+        return Ok((negated, Pattern::Domain(s.to_string())));
     }
 
     // Default to exact match
-    Ok(Pattern::Exact(s.to_string()))
+    Ok((negated, Pattern::Exact(s.to_string())))
+}
+
+/// Compile a whistle ^ prefix regex URL pattern.
+/// Handles domain/path/query wildcard expansion.
+fn compile_regex_url_pattern(pattern: &str, case_insensitive: bool, end_anchored: bool) -> String {
+    let mut result = String::new();
+
+    if case_insensitive {
+        result.push_str("(?i)");
+    }
+
+    // Split into protocol, domain, path, query
+    let (proto, rest) = if let Some(idx) = pattern.find("://") {
+        (&pattern[..idx + 3], &pattern[idx + 3..])
+    } else {
+        ("", pattern)
+    };
+
+    let (domain_path, query) = if let Some(idx) = rest.find('?') {
+        (&rest[..idx], Some(&rest[idx..]))
+    } else {
+        (rest, None)
+    };
+
+    let (domain, path) = if let Some(idx) = domain_path.find('/') {
+        (&domain_path[..idx], Some(&domain_path[idx..]))
+    } else {
+        (domain_path, None)
+    };
+
+    // Protocol
+    if proto.is_empty() {
+        result.push_str("[a-z]+://");
+    } else {
+        result.push_str(&regex::escape(proto));
+    }
+
+    // Domain — expand wildcards
+    result.push_str(&expand_wildcards_domain(domain));
+
+    // Optional port
+    if !domain.contains(':') {
+        result.push_str("(?::\\d+)?");
+    }
+
+    // Path
+    if let Some(p) = path {
+        result.push_str(&expand_wildcards_path(p));
+    }
+
+    // Query
+    if let Some(q) = query {
+        result.push_str(&expand_wildcards_query(q));
+    }
+
+    if end_anchored {
+        result.push('$');
+    }
+
+    result
+}
+
+/// Expand wildcards in domain part for regex URL patterns
+fn expand_wildcards_domain(domain: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = domain.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '*' {
+            let count = chars[i..].iter().take_while(|&&c| c == '*').count();
+            i += count;
+            if count >= 3 && i < chars.len() && chars[i] == '.' {
+                result.push_str("(?:[^/?]*\\.)?");
+                i += 1;
+            } else if count >= 2 {
+                result.push_str("[^/?]*");
+            } else {
+                result.push_str("[^/?.]*");
+            }
+        } else {
+            result.push_str(&regex::escape(&chars[i].to_string()));
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// Expand wildcards in path part for regex URL patterns
+fn expand_wildcards_path(path: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = path.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '*' {
+            let count = chars[i..].iter().take_while(|&&c| c == '*').count();
+            i += count;
+            if count >= 3 {
+                result.push_str(".*");
+            } else if count >= 2 {
+                result.push_str("[^?]*");
+            } else {
+                result.push_str("[^?/]*");
+            }
+        } else {
+            result.push_str(&regex::escape(&chars[i].to_string()));
+            i += 1;
+        }
+    }
+
+    result
+}
+
+/// Expand wildcards in query part for regex URL patterns
+fn expand_wildcards_query(query: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '*' {
+            let count = chars[i..].iter().take_while(|&&c| c == '*').count();
+            i += count;
+            if count >= 2 {
+                result.push_str(".*");
+            } else {
+                result.push_str("[^&]*");
+            }
+        } else {
+            result.push_str(&regex::escape(&chars[i].to_string()));
+            i += 1;
+        }
+    }
+
+    result
 }
 
 /// Parse a URL pattern into Pattern::Url
@@ -147,36 +631,82 @@ fn parse_url_pattern(s: &str) -> Result<Pattern> {
     })
 }
 
-/// Parse action string into RuleActions and optional filters
-fn parse_actions_and_filters(s: &str) -> Result<(Vec<RuleAction>, RuleFilters)> {
+// =============================================================================
+// Shorthand Expansion
+// =============================================================================
+
+/// Apply whistle shorthand expansions to a token
+fn format_shorthand(token: &str) -> String {
+    // File path shorthand: /absolute/path → file:///absolute/path
+    // (but NOT /regex/ patterns or /path patterns that start the rule)
+    // We handle this carefully: only in action context, not pattern context
+    // The caller context determines if this is useful.
+
+    // <path> → file://<path>
+    if token.starts_with('<') && token.ends_with('>') {
+        return format!("file://{}", token);
+    }
+
+    // (value) → file://(value)
+    if token.starts_with('(') && token.ends_with(')') {
+        return format!("file://{}", token);
+    }
+
+    // No changes for most tokens
+    token.to_string()
+}
+
+// =============================================================================
+// Actions & Filters Parsing
+// =============================================================================
+
+/// Parse actions and filters from a slice of tokens
+fn parse_actions_and_filters_from_tokens(tokens: &[String]) -> Result<(Vec<RuleAction>, RuleFilters)> {
     let mut actions = Vec::new();
     let mut filters = RuleFilters::default();
 
-    // Split by whitespace, but respect quoted strings and JSON objects
-    let action_parts = split_action_string(s);
-
-    for part in action_parts {
-        // Check for filter operators
-        if parse_filter(&part, &mut filters)? {
+    for token in tokens {
+        if parse_filter_token(token, &mut filters)? {
             continue;
         }
-
-        if let Some(action) = parse_single_action(&part)? {
+        if let Some(action) = parse_single_action(token)? {
             actions.push(action);
         }
-    }
-
-    if actions.is_empty() {
-        return Err(PostGateError::RuleParse("No valid actions found".into()));
     }
 
     Ok((actions, filters))
 }
 
-/// Parse filter operators, returns true if it was a filter
-fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
+/// Try to parse a token as a filter. Returns true if it was a filter.
+fn parse_filter_token(s: &str, filters: &mut RuleFilters) -> Result<bool> {
+    // Check includeFilter/excludeFilter BEFORE the :// guard,
+    // because these use :// as part of their prefix
+    if let Some(value) = s
+        .strip_prefix("excludeFilter://")
+        .or_else(|| s.strip_prefix("excludeFilter:"))
+    {
+        filters.exclude.push(value.to_string());
+        return Ok(true);
+    }
+
+    if let Some(value) = s
+        .strip_prefix("includeFilter://")
+        .or_else(|| s.strip_prefix("includeFilter:"))
+    {
+        filters.include.push(value.to_string());
+        return Ok(true);
+    }
+
+    // filter:// protocol format (whistle unified filter syntax)
+    // filter:///regex/i → pattern filter (include)
+    // filter://m:GET → method filter
+    // filter://s:404 → status filter
+    // filter://h:content-type=json → header filter
+    if let Some(value) = s.strip_prefix("filter://") {
+        return parse_filter_value(value, filters, false);
+    }
+
     // IMPORTANT: Skip if this looks like an action (protocol://value format)
-    // This prevents "host://..." from being matched as "host:" filter
     if s.contains("://") {
         return Ok(false);
     }
@@ -202,7 +732,7 @@ fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
         return Ok(true);
     }
 
-    // Content type filter: ct:application/json or contentType:
+    // Content type filter
     if let Some(value) = s
         .strip_prefix("ct:")
         .or_else(|| s.strip_prefix("contentType:"))
@@ -213,7 +743,7 @@ fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
         return Ok(true);
     }
 
-    // IP filter: i:, ip:, clientIp:
+    // IP filter
     if let Some(value) = s
         .strip_prefix("i:")
         .or_else(|| s.strip_prefix("ip:"))
@@ -223,7 +753,7 @@ fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
         return Ok(true);
     }
 
-    // Host filter: h:, host:, hostname:
+    // Host filter
     if let Some(value) = s
         .strip_prefix("h:")
         .or_else(|| s.strip_prefix("host:"))
@@ -233,7 +763,7 @@ fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
         return Ok(true);
     }
 
-    // Status code filter: s:, statusCode:
+    // Status code filter
     if let Some(value) = s
         .strip_prefix("s:")
         .or_else(|| s.strip_prefix("statusCode:"))
@@ -245,101 +775,81 @@ fn parse_filter(s: &str, filters: &mut RuleFilters) -> Result<bool> {
         return Ok(true);
     }
 
-    // Exclude filter: excludeFilter:pattern (supports regex)
-    if let Some(value) = s
-        .strip_prefix("excludeFilter://")
-        .or_else(|| s.strip_prefix("excludeFilter:"))
-    {
-        filters.exclude.push(value.to_string());
+    Ok(false)
+}
+
+/// Parse filter:// value content into the appropriate filter field.
+/// Handles: m:, s:, h:, /regex/, etc.
+fn parse_filter_value(value: &str, filters: &mut RuleFilters, _is_exclude: bool) -> Result<bool> {
+    // Method sub-filter: filter://m:GET
+    if let Some(v) = value.strip_prefix("m:").or_else(|| value.strip_prefix("method:")) {
+        filters.methods = v.split(',').map(|s| s.trim().to_uppercase()).collect();
         return Ok(true);
     }
 
-    // Include filter: includeFilter:pattern (supports regex)
-    if let Some(value) = s
-        .strip_prefix("includeFilter://")
-        .or_else(|| s.strip_prefix("includeFilter:"))
-    {
+    // Status code sub-filter: filter://s:404
+    if let Some(v) = value.strip_prefix("s:").or_else(|| value.strip_prefix("statusCode:")) {
+        filters.status_codes = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        return Ok(true);
+    }
+
+    // Header sub-filter: filter://h:content-type=json
+    if let Some(v) = value.strip_prefix("h:").or_else(|| value.strip_prefix("header:")) {
+        if let Some(eq_idx) = v.find('=') {
+            let key = v[..eq_idx].to_string();
+            let val = v[eq_idx + 1..].to_string();
+            filters.headers.insert(key, val);
+        }
+        return Ok(true);
+    }
+
+    // IP sub-filter: filter://i:127.0.0.1
+    if let Some(v) = value.strip_prefix("i:").or_else(|| value.strip_prefix("ip:")) {
+        filters.client_ips = v.split(',').map(|s| s.trim().to_string()).collect();
+        return Ok(true);
+    }
+
+    // Protocol sub-filter: filter://p:https
+    if let Some(v) = value.strip_prefix("p:").or_else(|| value.strip_prefix("protocol:")) {
+        filters.protocols = v.split(',').map(|s| s.trim().to_lowercase()).collect();
+        return Ok(true);
+    }
+
+    // Port sub-filter: filter://port:443
+    if let Some(v) = value.strip_prefix("port:") {
+        filters.ports = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        return Ok(true);
+    }
+
+    // Regex pattern filter: filter:///regex/i
+    // Treated as include filter
+    if value.starts_with('/') || value.starts_with('^') || value.contains(".*") {
         filters.include.push(value.to_string());
         return Ok(true);
     }
 
-    Ok(false)
+    // Default: treat as include pattern
+    filters.include.push(value.to_string());
+    Ok(true)
 }
 
-/// Split action string respecting quotes and JSON braces
-fn split_action_string(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let mut quote_char = '"';
-    let mut brace_depth: u32 = 0;
-    let mut bracket_depth: u32 = 0;
-
-    for c in s.chars() {
-        match c {
-            '"' | '\'' if brace_depth == 0 && bracket_depth == 0 && !in_quotes => {
-                in_quotes = true;
-                quote_char = c;
-                current.push(c);
-            }
-            c if c == quote_char && in_quotes => {
-                in_quotes = false;
-                current.push(c);
-            }
-            '{' if !in_quotes => {
-                brace_depth += 1;
-                current.push(c);
-            }
-            '}' if !in_quotes => {
-                brace_depth = brace_depth.saturating_sub(1);
-                current.push(c);
-            }
-            '[' if !in_quotes => {
-                bracket_depth += 1;
-                current.push(c);
-            }
-            ']' if !in_quotes => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                current.push(c);
-            }
-            ' ' | '\t' if !in_quotes && brace_depth == 0 && bracket_depth == 0 => {
-                if !current.is_empty() {
-                    parts.push(current.clone());
-                    current.clear();
-                }
-            }
-            _ => {
-                current.push(c);
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        parts.push(current);
-    }
-
-    parts
-}
-
-/// Parse a single action
+/// Parse a single action token into a RuleAction
 fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
     // IMPORTANT: Check for bare URLs FIRST before protocol://value parsing
-    // This handles whistle syntax like: pattern http://target.com
-    // where http://target.com should be treated as a host redirect, not as protocol "http"
     if s.starts_with("http://") || s.starts_with("https://") {
         return Ok(Some(RuleAction::Host {
             target: s.to_string(),
         }));
     }
 
-    // Parse protocol://value format (for whistle actions like host://, file://, etc.)
+    // Parse protocol://value format
     if let Some(idx) = s.find("://") {
         let protocol = &s[..idx].to_lowercase();
         let value = &s[idx + 3..];
 
         let action = match protocol.as_str() {
             // === HOST/REDIRECT ACTIONS ===
-            "host" => RuleAction::Host {
+            "host" | "hosts" | "xhost" => RuleAction::Host {
                 target: value.to_string(),
             },
 
@@ -365,7 +875,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 status: 308,
             },
 
-            "statuscode" | "status" | "replaceStatus" => {
+            "statuscode" | "status" | "replacestatus" => {
                 let code: u16 = value.parse().map_err(|_| {
                     PostGateError::RuleParse(format!("Invalid status code: {}", value))
                 })?;
@@ -382,12 +892,12 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 content: parse_body_content(value)?,
             },
 
-            "urlparams" => {
+            "urlparams" | "params" | "reqmerge" => {
                 let modifications = parse_url_param_modifications(value)?;
                 RuleAction::UrlParams { modifications }
             }
 
-            "pathreplace" => {
+            "pathreplace" | "urlreplace" => {
                 let (pattern, replacement) = parse_replace_pair(value)?;
                 RuleAction::PathReplace {
                     pattern,
@@ -432,7 +942,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             }
 
             // === RESPONSE MODIFICATIONS ===
-            "resheaders" | "resheader" => {
+            "resheaders" | "resheader" | "headerreplace" => {
                 let modifications = parse_header_modifications(value)?;
                 RuleAction::ResponseHeaders { modifications }
             }
@@ -476,7 +986,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 charset: value.to_string(),
             },
 
-            "attachment" => RuleAction::Attachment {
+            "attachment" | "download" => RuleAction::Attachment {
                 filename: if value.is_empty() {
                     None
                 } else {
@@ -485,7 +995,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             },
 
             // === INJECTION ACTIONS ===
-            "htmlappend" => RuleAction::HtmlAppend {
+            "htmlappend" | "html" => RuleAction::HtmlAppend {
                 content: value.to_string(),
             },
 
@@ -592,7 +1102,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 },
             },
 
-            "ignore" | "filter" => RuleAction::Ignore,
+            "ignore" | "filter" | "skip" => RuleAction::Ignore,
 
             "enable" => RuleAction::Enable {
                 features: value.split(',').map(|s| s.trim().to_string()).collect(),
@@ -678,7 +1188,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
 
             "reqappend" => RuleAction::RequestAppend { content: value.to_string() },
 
-            "resprepend" => RuleAction::ResponsePrepend { content: value.to_string() },
+            "resprepend" | "resPrepend" => RuleAction::ResponsePrepend { content: value.to_string() },
 
             "resappend" => RuleAction::ResponseAppend { content: value.to_string() },
 
@@ -691,6 +1201,18 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
         return Ok(Some(action));
     }
 
+    // Handle IPv6 bracket format: [::1]:8080
+    if s.starts_with('[') {
+        if let Some((host, port)) = is_host_value(s) {
+            let target = if let Some(p) = port {
+                format!("[{}]:{}", host, p)
+            } else {
+                format!("[{}]", host)
+            };
+            return Ok(Some(RuleAction::Host { target }));
+        }
+    }
+
     // Handle IP:port as host redirect (e.g., 127.0.0.1:8080)
     if s.contains(':') && s.chars().next().map(|c| c.is_numeric()).unwrap_or(false) {
         return Ok(Some(RuleAction::Host {
@@ -698,12 +1220,89 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
         }));
     }
 
+    // Handle hostname:port as host redirect (e.g., localhost:8080)
+    if let Some(colon_idx) = s.rfind(':') {
+        let host_part = &s[..colon_idx];
+        let port_part = &s[colon_idx + 1..];
+        if !host_part.is_empty()
+            && port_part.chars().all(|c| c.is_ascii_digit())
+            && !port_part.is_empty()
+            && host_part.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+        {
+            return Ok(Some(RuleAction::Host {
+                target: s.to_string(),
+            }));
+        }
+    }
+
     Ok(None)
 }
 
+// =============================================================================
+// Tokenizer
+// =============================================================================
+
+/// Split action string respecting quotes and JSON braces
+fn split_action_string(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = '"';
+    let mut brace_depth: usize = 0;
+    let mut bracket_depth: usize = 0;
+
+    for ch in s.chars() {
+        match ch {
+            '"' | '\'' if brace_depth == 0 && bracket_depth == 0 => {
+                if in_quotes && ch == quote_char {
+                    in_quotes = false;
+                } else if !in_quotes {
+                    in_quotes = true;
+                    quote_char = ch;
+                }
+                current.push(ch);
+            }
+            '{' if !in_quotes => {
+                brace_depth += 1;
+                current.push(ch);
+            }
+            '}' if !in_quotes => {
+                brace_depth = brace_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '[' if !in_quotes => {
+                bracket_depth += 1;
+                current.push(ch);
+            }
+            ']' if !in_quotes => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ' ' | '\t' if !in_quotes && brace_depth == 0 && bracket_depth == 0 => {
+                if !current.is_empty() {
+                    parts.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    parts
+}
+
+// =============================================================================
+// Helper Parsers
+// =============================================================================
+
 /// Parse header modifications from JSON or key=value format
 fn parse_header_modifications(s: &str) -> Result<HeaderModifications> {
-    // Try JSON first
     if s.starts_with('{') {
         if let Ok(json) = serde_json::from_str::<HashMap<String, serde_json::Value>>(s) {
             let mut modifications = HeaderModifications::default();
@@ -724,16 +1323,13 @@ fn parse_header_modifications(s: &str) -> Result<HeaderModifications> {
         }
     }
 
-    // Parse key=value format or key:value format
     let mut modifications = HeaderModifications::default();
 
     for pair in s.split(',') {
         let pair = pair.trim();
         if pair.starts_with('-') {
-            // Remove header
             modifications.remove.push(pair[1..].to_string());
         } else if pair.starts_with('+') {
-            // Append header
             let rest = &pair[1..];
             if let Some(idx) = rest.find(['=', ':']) {
                 let key = rest[..idx].trim().to_string();
@@ -752,31 +1348,22 @@ fn parse_header_modifications(s: &str) -> Result<HeaderModifications> {
 
 /// Parse body content from string
 fn parse_body_content(s: &str) -> Result<BodyContent> {
-    // File reference
     if s.starts_with('/') || s.starts_with("./") || s.starts_with("~/") {
         return Ok(BodyContent::File { path: s.into() });
     }
-
-    // JSON object/array
     if s.starts_with('{') || s.starts_with('[') {
         if let Ok(value) = serde_json::from_str(s) {
             return Ok(BodyContent::Json { value });
         }
     }
-
-    // Base64 marker
     if s.starts_with("base64:") {
         return Ok(BodyContent::Base64 {
             data: s[7..].to_string(),
         });
     }
-
-    // Empty marker
     if s.is_empty() || s == "empty" {
         return Ok(BodyContent::Empty);
     }
-
-    // Default to text
     Ok(BodyContent::Text {
         content: s.to_string(),
         content_type: "text/plain".to_string(),
@@ -787,7 +1374,6 @@ fn parse_body_content(s: &str) -> Result<BodyContent> {
 fn parse_url_param_modifications(s: &str) -> Result<UrlParamModifications> {
     let mut modifications = UrlParamModifications::default();
 
-    // Try JSON first
     if s.starts_with('{') {
         if let Ok(json) = serde_json::from_str::<HashMap<String, serde_json::Value>>(s) {
             for (key, value) in json {
@@ -807,7 +1393,6 @@ fn parse_url_param_modifications(s: &str) -> Result<UrlParamModifications> {
         }
     }
 
-    // Parse key=value format
     for pair in s.split('&') {
         let pair = pair.trim();
         if pair.starts_with('-') {
@@ -831,7 +1416,6 @@ fn parse_url_param_modifications(s: &str) -> Result<UrlParamModifications> {
 
 /// Parse a replacement pair (pattern->replacement)
 fn parse_replace_pair(s: &str) -> Result<(String, String)> {
-    // Format: pattern->replacement or pattern|replacement
     let separator = if s.contains("->") {
         "->"
     } else if s.contains('|') {
@@ -870,14 +1454,12 @@ fn parse_auth(s: &str) -> Result<(String, String)> {
 fn parse_simple_cookies(s: &str) -> Result<HashMap<String, String>> {
     let mut cookies = HashMap::new();
 
-    // Try JSON first
     if s.starts_with('{') {
         if let Ok(json) = serde_json::from_str::<HashMap<String, String>>(s) {
             return Ok(json);
         }
     }
 
-    // Parse key=value; format
     for pair in s.split(';') {
         let pair = pair.trim();
         if let Some(idx) = pair.find('=') {
@@ -894,12 +1476,10 @@ fn parse_simple_cookies(s: &str) -> Result<HashMap<String, String>> {
 fn parse_response_cookies(s: &str) -> Result<HashMap<String, CookieOptions>> {
     let mut cookies = HashMap::new();
 
-    // Try JSON first for full options
     if s.starts_with('{') {
         if let Ok(json) = serde_json::from_str::<HashMap<String, CookieOptions>>(s) {
             return Ok(json);
         }
-        // Try simple JSON
         if let Ok(json) = serde_json::from_str::<HashMap<String, String>>(s) {
             for (key, value) in json {
                 cookies.insert(
@@ -919,7 +1499,6 @@ fn parse_response_cookies(s: &str) -> Result<HashMap<String, CookieOptions>> {
         }
     }
 
-    // Parse simple format
     for pair in s.split(';') {
         let pair = pair.trim();
         if let Some(idx) = pair.find('=') {
@@ -948,8 +1527,6 @@ fn parse_cors_value(s: &str) -> (Option<String>, bool) {
     if s == "*" || s.is_empty() {
         return (Some("*".to_string()), true);
     }
-
-    // Check for credentials flag
     if s.contains("credentials") {
         let origin = s.replace("credentials", "").trim().to_string();
         return (
@@ -961,13 +1538,11 @@ fn parse_cors_value(s: &str) -> (Option<String>, bool) {
             true,
         );
     }
-
     (Some(s.to_string()), false)
 }
 
 /// Parse response CORS options
 fn parse_response_cors(s: &str) -> Result<RuleAction> {
-    // Simple * means allow all
     if s == "*" || s.is_empty() {
         return Ok(RuleAction::ResponseCors {
             origin: Some("*".to_string()),
@@ -978,7 +1553,6 @@ fn parse_response_cors(s: &str) -> Result<RuleAction> {
         });
     }
 
-    // Try JSON
     if s.starts_with('{') {
         #[derive(Deserialize)]
         struct CorsOptions {
@@ -1001,7 +1575,6 @@ fn parse_response_cors(s: &str) -> Result<RuleAction> {
         }
     }
 
-    // Simple origin value
     Ok(RuleAction::ResponseCors {
         origin: Some(s.to_string()),
         methods: Some("GET,POST,PUT,DELETE,OPTIONS,PATCH".to_string()),
@@ -1037,6 +1610,10 @@ fn parse_proxy_address(s: &str) -> Result<(String, u16, Option<ProxyAuth>)> {
     Ok((parts[1].to_string(), port, auth))
 }
 
+// =============================================================================
+// Tests
+// =============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1071,14 +1648,17 @@ mod tests {
     }
 
     #[test]
-    fn test_skip_comments() {
+    fn test_comment_handling() {
         let content = r#"
 # This is a comment
-// This is also a comment
 example.com host://127.0.0.1
+//example.com/api host://localhost:3000
 "#;
         let rules = parse_rules(content).unwrap();
-        assert_eq!(rules.len(), 1);
+        // # comment is skipped, // is NOT a comment (it's a no-schema pattern)
+        assert_eq!(rules.len(), 2);
+        // Second rule should be a NoSchema pattern
+        assert!(matches!(rules[1].pattern, Pattern::NoSchema { .. }));
     }
 
     #[test]
@@ -1141,7 +1721,6 @@ example.com host://127.0.0.1
 
     #[test]
     fn test_parse_url_to_url_proxy() {
-        // Whistle syntax: source URL -> target URL (bare URL as host redirect)
         let rules = parse_rules("https://v.qq.com/biu/u/history/ http://127.0.0.1:3000/browser").unwrap();
         assert_eq!(rules.len(), 1);
         if let RuleAction::Host { target } = &rules[0].actions[0] {
@@ -1157,6 +1736,180 @@ example.com host://127.0.0.1
         assert_eq!(rules.len(), 1);
         if let RuleAction::Host { target } = &rules[0].actions[0] {
             assert_eq!(target, "https://proxy.example.com/api");
+        } else {
+            panic!("Expected Host action");
+        }
+    }
+
+    #[test]
+    fn test_include_filter_with_regex_flags() {
+        let rules = parse_rules(
+            r#"v.qq.com localhost:8080 includeFilter:///https?:\/\/v.qq.com\/(@|packages|common|node_modules|src|x\/(cover|page|skeleton)|__vite_hmr)/i"#
+        ).unwrap();
+        assert_eq!(rules.len(), 1);
+        let rule = &rules[0];
+
+        assert!(matches!(&rule.pattern, Pattern::Domain(d) if d == "v.qq.com"));
+
+        let filters = rule.filters.as_ref().expect("Filters should be present");
+        assert_eq!(filters.include.len(), 1);
+
+        let headers = HashMap::new();
+
+        assert!(
+            filters.matches("GET", "https", 443, &headers, "https://v.qq.com/x/cover/mzc00200rgazpwa/h4102454htt.html"),
+            "includeFilter should match /x/cover/ URL"
+        );
+        assert!(
+            filters.matches("GET", "https", 443, &headers, "https://v.qq.com/x/page/something"),
+            "includeFilter should match /x/page/ URL"
+        );
+        assert!(
+            !filters.matches("GET", "https", 443, &headers, "https://v.qq.com/other/stuff.html"),
+            "includeFilter should NOT match unrelated path"
+        );
+    }
+
+    #[test]
+    fn test_include_filter_case_insensitive() {
+        let rules = parse_rules(
+            r#"example.com host://localhost:3000 includeFilter:///api/i"#
+        ).unwrap();
+        assert_eq!(rules.len(), 1);
+        let filters = rules[0].filters.as_ref().expect("Filters should be present");
+
+        let headers = HashMap::new();
+
+        assert!(filters.matches("GET", "https", 443, &headers, "https://example.com/API/users"));
+        assert!(filters.matches("GET", "https", 443, &headers, "https://example.com/api/users"));
+    }
+
+    #[test]
+    fn test_regex_pattern_with_flags() {
+        let rules = parse_rules(r#"/example\.com/i host://localhost:3000"#).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(&rules[0].pattern, Pattern::Regex(_)));
+    }
+
+    // === New tests for whistle alignment ===
+
+    #[test]
+    fn test_exact_pattern_dollar_prefix() {
+        let rules = parse_rules("$https://example.com/exact statusCode://404").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(&rules[0].pattern, Pattern::Exact(s) if s == "https://example.com/exact"));
+    }
+
+    #[test]
+    fn test_negative_pattern() {
+        let rules = parse_rules("!example.com host://other.com").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].negated);
+        assert!(matches!(&rules[0].pattern, Pattern::Domain(d) if d == "example.com"));
+    }
+
+    #[test]
+    fn test_port_pattern() {
+        let rules = parse_rules(":8080 host://localhost:3000").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(&rules[0].pattern, Pattern::Port(8080)));
+    }
+
+    #[test]
+    fn test_no_schema_pattern() {
+        let rules = parse_rules("//example.com/api host://localhost").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(&rules[0].pattern, Pattern::NoSchema { .. }));
+    }
+
+    #[test]
+    fn test_dot_suffix_pattern() {
+        let rules = parse_rules(".json file:///mock.json").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(&rules[0].pattern, Pattern::Regex(_)));
+        // Should match URLs ending in .json
+        assert!(rules[0].pattern.matches("https://api.com/data.json"));
+        assert!(!rules[0].pattern.matches("https://api.com/data.jsonp"));
+    }
+
+    #[test]
+    fn test_reverse_syntax() {
+        let rules = parse_rules("host://127.0.0.1:8080 example.com").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(&rules[0].pattern, Pattern::Domain(d) if d == "example.com"));
+        if let RuleAction::Host { target } = &rules[0].actions[0] {
+            assert_eq!(target, "127.0.0.1:8080");
+        } else {
+            panic!("Expected Host action");
+        }
+    }
+
+    #[test]
+    fn test_reverse_syntax_multiple_patterns() {
+        let rules = parse_rules("host://127.0.0.1:8080 example.com test.com").unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(matches!(&rules[0].pattern, Pattern::Domain(d) if d == "example.com"));
+        assert!(matches!(&rules[1].pattern, Pattern::Domain(d) if d == "test.com"));
+    }
+
+    #[test]
+    fn test_filter_protocol_format() {
+        let rules = parse_rules("example.com filter://m:GET host://localhost").unwrap();
+        assert_eq!(rules.len(), 1);
+        let filters = rules[0].filters.as_ref().expect("Filters should be present");
+        assert_eq!(filters.methods, vec!["GET"]);
+    }
+
+    #[test]
+    fn test_filter_regex_protocol_format() {
+        let rules = parse_rules("example.com filter:///api/i host://localhost").unwrap();
+        assert_eq!(rules.len(), 1);
+        let filters = rules[0].filters.as_ref().expect("Filters should be present");
+        assert_eq!(filters.include.len(), 1);
+    }
+
+    #[test]
+    fn test_protocol_alias_skip() {
+        let rules = parse_rules("example.com skip://").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].actions[0], RuleAction::Ignore));
+    }
+
+    #[test]
+    fn test_protocol_alias_download() {
+        let rules = parse_rules("example.com/file.pdf download://report.pdf").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let RuleAction::Attachment { filename } = &rules[0].actions[0] {
+            assert_eq!(filename.as_deref(), Some("report.pdf"));
+        } else {
+            panic!("Expected Attachment action");
+        }
+    }
+
+    #[test]
+    fn test_protocol_alias_urlreplace() {
+        let rules = parse_rules("example.com urlReplace:///old->new").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(rules[0].actions[0], RuleAction::PathReplace { .. }));
+    }
+
+    #[test]
+    fn test_ipv6_host() {
+        let rules = parse_rules("example.com [::1]:8080").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let RuleAction::Host { target } = &rules[0].actions[0] {
+            assert_eq!(target, "[::1]:8080");
+        } else {
+            panic!("Expected Host action, got {:?}", rules[0].actions[0]);
+        }
+    }
+
+    #[test]
+    fn test_localhost_host_action() {
+        let rules = parse_rules("v.qq.com localhost:8080").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let RuleAction::Host { target } = &rules[0].actions[0] {
+            assert_eq!(target, "localhost:8080");
         } else {
             panic!("Expected Host action");
         }

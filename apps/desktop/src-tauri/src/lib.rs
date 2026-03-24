@@ -72,6 +72,7 @@ pub fn run() {
             commands::proxy::set_persistence_enabled,
             commands::proxy::get_persistence_enabled,
             commands::proxy::get_captured_history_count,
+            commands::proxy::get_local_ip,
             commands::cert::get_ca_certificate,
             commands::cert::install_ca_certificate,
             commands::cert::export_ca_certificate,

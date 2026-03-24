@@ -112,7 +112,7 @@ export function ReplayPage() {
     await createRequest({
       name: "New Request",
       method: "GET",
-      url: "https://",
+      url: "",
     }, collectionId || undefined);
   };
 
@@ -236,7 +236,7 @@ export function ReplayPage() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0">
-        {currentRequest.url ? (
+        {currentRequest.id || currentRequest.url ? (
           <>
             {/* URL Bar */}
             <div className="h-12 border-b flex items-center px-4 gap-3 bg-background">

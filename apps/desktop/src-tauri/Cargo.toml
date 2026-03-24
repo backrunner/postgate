@@ -72,6 +72,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2"
 urlencoding = "2"
+if-addrs = "0.13"
 
 # JavaScript Runtime (embedded V8 via Deno Core)
 deno_core = "0.372"

@@ -3,6 +3,7 @@ use crate::proxy::{ProxyConfig, ProxyServer, ProxyStatus};
 use crate::state::AppState;
 use crate::storage::{PaginatedResult, StoredCapturedRequest};
 use serde::Serialize;
+use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
 use tauri::State;
 
@@ -196,4 +197,52 @@ pub async fn get_persistence_enabled(state: State<'_, Arc<AppState>>) -> Result<
 pub async fn get_captured_history_count(state: State<'_, Arc<AppState>>) -> Result<i64> {
     let storage = state.get_captured_storage().await?;
     storage.count().await
+}
+
+/// Get all local network addresses for proxy configuration
+#[tauri::command]
+pub async fn get_local_ip() -> Result<Vec<NetworkAddress>> {
+    let mut addresses: Vec<NetworkAddress> = Vec::new();
+
+    // Always include localhost first
+    addresses.push(NetworkAddress {
+        ip: "127.0.0.1".to_string(),
+        name: "Localhost".to_string(),
+        is_default: false,
+    });
+
+    // Find the default route IP
+    let default_ip = UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("8.8.8.8:80")?;
+            s.local_addr()
+        })
+        .ok()
+        .map(|a| a.ip());
+
+    // Get all network interfaces
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in ifaces {
+            let ip = iface.ip();
+            // Skip loopback and IPv6
+            if ip.is_loopback() || matches!(ip, IpAddr::V6(_)) {
+                continue;
+            }
+            let is_default = default_ip.as_ref() == Some(&ip);
+            addresses.push(NetworkAddress {
+                ip: ip.to_string(),
+                name: iface.name.clone(),
+                is_default,
+            });
+        }
+    }
+
+    Ok(addresses)
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct NetworkAddress {
+    pub ip: String,
+    pub name: String,
+    pub is_default: bool,
 }

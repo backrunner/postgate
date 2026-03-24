@@ -233,10 +233,27 @@ export function useProxy() {
     };
   }, [queueRequest, queueUpdate, addMessage, endStream, isPaused]);
 
-  // Get initial status on mount
+  // Auto-start proxy on mount
   useEffect(() => {
-    getStatus();
-  }, [getStatus]);
+    const init = async () => {
+      try {
+        const result = await getStatus();
+        // Auto-start if not already running
+        if (result.status === "stopped") {
+          await startProxy();
+        }
+      } catch {
+        // If status check fails, try to start anyway
+        try {
+          await startProxy();
+        } catch (e) {
+          console.error("Failed to auto-start proxy:", e);
+        }
+      }
+    };
+    init();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return {
     startProxy,

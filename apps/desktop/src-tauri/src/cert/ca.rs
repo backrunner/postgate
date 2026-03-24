@@ -2,7 +2,7 @@ use crate::error::{PostGateError, Result};
 use moka::sync::Cache;
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+    ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::path::Path;
@@ -28,8 +28,8 @@ pub struct CertificateAuthority {
     ca_cert_pem: String,
     /// CA private key
     ca_key_pair: Arc<KeyPair>,
-    /// CA certificate for signing
-    ca_cert: Arc<Certificate>,
+    /// CA issuer for signing host certificates (rcgen 0.14+)
+    ca_issuer: Arc<Issuer<'static, KeyPair>>,
     /// Cache of generated host certificates (with TTL and max size)
     cert_cache: Cache<String, Arc<CertifiedKey>>,
 }
@@ -43,13 +43,23 @@ pub struct CertifiedKey {
 impl CertificateAuthority {
     /// Create a new Certificate Authority (generates fresh CA)
     pub fn new() -> Result<Self> {
-        let (ca_cert, ca_key_pair, ca_cert_der, ca_cert_pem) = Self::generate_ca()?;
+        let (_ca_cert, ca_key_pair, ca_cert_der, ca_cert_pem) = Self::generate_ca()?;
+
+        // Create a second KeyPair for the Issuer (KeyPair doesn't implement Clone in rcgen 0.14)
+        let key_pem = ca_key_pair.serialize_pem();
+        let issuer_key_pair = KeyPair::from_pem(&key_pem)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to re-parse CA key: {}", e)))?;
+
+        // Create issuer from the generated CA for signing host certs
+        let cert_der_ref = CertificateDer::from(ca_cert_der.as_slice());
+        let ca_issuer = Issuer::from_ca_cert_der(&cert_der_ref, issuer_key_pair)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to create CA issuer: {}", e)))?;
 
         Ok(Self {
             ca_cert_der,
             ca_cert_pem,
             ca_key_pair: Arc::new(ca_key_pair),
-            ca_cert: Arc::new(ca_cert),
+            ca_issuer: Arc::new(ca_issuer),
             cert_cache: Self::create_cache(),
         })
     }
@@ -108,12 +118,13 @@ impl CertificateAuthority {
         let (_, x509_cert) = x509_parser::parse_x509_certificate(&cert_der_bytes)
             .map_err(|e| PostGateError::Certificate(format!("Failed to parse X509 certificate: {}", e)))?;
 
-        // Create CertificateParams from the existing certificate using rcgen's from_ca_cert_der
-        // This extracts issuer info needed for signing host certificates
-        let ca_cert = CertificateParams::from_ca_cert_der(&cert_der_ref)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA cert params: {}", e)))?
-            .self_signed(&key_pair)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to create CA cert: {}", e)))?;
+        // Create a second KeyPair for the Issuer (KeyPair doesn't implement Clone in rcgen 0.14)
+        let issuer_key_pair = KeyPair::from_pem(&key_pem)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to re-parse CA key for issuer: {}", e)))?;
+
+        // Create Issuer from the existing CA certificate for signing host certs (rcgen 0.14+)
+        let ca_issuer = Issuer::from_ca_cert_der(&cert_der_ref, issuer_key_pair)
+            .map_err(|e| PostGateError::Certificate(format!("Failed to create CA issuer: {}", e)))?;
 
         // Verify the loaded certificate is a CA
         if !x509_cert.is_ca() {
@@ -126,7 +137,7 @@ impl CertificateAuthority {
             ca_cert_der: cert_der_bytes,
             ca_cert_pem: cert_pem,
             ca_key_pair: Arc::new(key_pair),
-            ca_cert: Arc::new(ca_cert),
+            ca_issuer: Arc::new(ca_issuer),
             cert_cache: Self::create_cache(),
         })
     }
@@ -254,9 +265,9 @@ impl CertificateAuthority {
         let key_pair = KeyPair::generate()
             .map_err(|e| PostGateError::Certificate(format!("Failed to generate host key: {}", e)))?;
 
-        // Sign with CA
+        // Sign with CA using the Issuer (rcgen 0.14+)
         let cert = params
-            .signed_by(&key_pair, &self.ca_cert, &self.ca_key_pair)
+            .signed_by(&key_pair, &self.ca_issuer)
             .map_err(|e| PostGateError::Certificate(format!("Failed to sign host cert: {}", e)))?;
 
         // Convert to rustls types

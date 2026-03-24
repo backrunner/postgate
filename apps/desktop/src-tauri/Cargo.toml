@@ -39,7 +39,7 @@ webpki-roots = "1"
 hyper-rustls = { version = "0.27", features = ["http1", "http2", "webpki-tokio"] }
 
 # Certificate Generation
-rcgen = { version = "0.13", features = ["x509-parser"] }
+rcgen = { version = "0.14", features = ["x509-parser"] }
 x509-parser = "0.18"
 pem = "3"
 time = "0.3"
@@ -72,17 +72,17 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2"
 urlencoding = "2"
-if-addrs = "0.13"
+if-addrs = "0.15"
 
 # JavaScript Runtime (embedded V8 via Deno Core)
-deno_core = "0.372"
+deno_core = "0.393"
 deno_error = "0.7"
 
 # Storage
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
 # WebSocket
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 
 [features]
@@ -98,4 +98,4 @@ opt-level = "s"
 strip = true
 
 [dev-dependencies]
-tempfile = "3.23.0"
+tempfile = "3.27.0"

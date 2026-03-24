@@ -99,7 +99,7 @@ fn op_log(
 // Storage Ops
 // ============================================================================
 
-#[op2(async)]
+#[op2]
 #[serde]
 async fn op_storage_get(
     state: Rc<RefCell<OpState>>,
@@ -117,7 +117,7 @@ async fn op_storage_get(
         .map_err(|e| PluginOpError::Storage(e.to_string()))
 }
 
-#[op2(async)]
+#[op2]
 async fn op_storage_set(
     state: Rc<RefCell<OpState>>,
     #[string] key: String,
@@ -135,7 +135,7 @@ async fn op_storage_set(
         .map_err(|e| PluginOpError::Storage(e.to_string()))
 }
 
-#[op2(async)]
+#[op2]
 async fn op_storage_delete(
     state: Rc<RefCell<OpState>>,
     #[string] key: String,
@@ -152,7 +152,7 @@ async fn op_storage_delete(
         .map_err(|e| PluginOpError::Storage(e.to_string()))
 }
 
-#[op2(async)]
+#[op2]
 async fn op_storage_has(
     state: Rc<RefCell<OpState>>,
     #[string] key: String,
@@ -169,7 +169,7 @@ async fn op_storage_has(
         .map_err(|e| PluginOpError::Storage(e.to_string()))
 }
 
-#[op2(async)]
+#[op2]
 #[serde]
 async fn op_storage_keys(
     state: Rc<RefCell<OpState>>,
@@ -186,7 +186,7 @@ async fn op_storage_keys(
         .map_err(|e| PluginOpError::Storage(e.to_string()))
 }
 
-#[op2(async)]
+#[op2]
 async fn op_storage_clear(
     state: Rc<RefCell<OpState>>,
 ) -> Result<(), PluginOpError> {

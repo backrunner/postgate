@@ -34,25 +34,20 @@ const TIMING_PHASES = [
 export function TimingWaterfall({ timing, className }: TimingWaterfallProps) {
   const phases = useMemo(() => {
     const total = timing.total || 1;
-    let offset = 0;
-    
-    return TIMING_PHASES.map(phase => {
+
+    const result: { key: string; label: string; color: string; description: string; value: number; width: number; left: number }[] = [];
+    let currentOffset = 0;
+    for (const phase of TIMING_PHASES) {
       const value = timing[phase.key as keyof TimingData] as number | undefined;
       if (value === undefined || value <= 0) {
-        return null;
+        continue;
       }
-      
       const width = (value / total) * 100;
-      const left = (offset / total) * 100;
-      offset += value;
-      
-      return {
-        ...phase,
-        value,
-        width,
-        left,
-      };
-    }).filter(Boolean);
+      const left = (currentOffset / total) * 100;
+      currentOffset += value;
+      result.push({ ...phase, value, width, left });
+    }
+    return result;
   }, [timing]);
 
   return (
@@ -65,24 +60,24 @@ export function TimingWaterfall({ timing, className }: TimingWaterfallProps) {
         </div>
         <div className="relative h-8 bg-muted/50 rounded overflow-hidden">
           {phases.map((phase) => (
-            <Tooltip key={phase!.key}>
+            <Tooltip key={phase.key}>
               <TooltipTrigger asChild>
                 <div
                   className={cn(
                     'absolute top-0 bottom-0 transition-opacity hover:opacity-80 cursor-pointer',
-                    phase!.color
+                    phase.color
                   )}
                   style={{
-                    left: `${phase!.left}%`,
-                    width: `${Math.max(phase!.width, 0.5)}%`,
+                    left: `${phase.left}%`,
+                    width: `${Math.max(phase.width, 0.5)}%`,
                   }}
                 />
               </TooltipTrigger>
               <TooltipContent>
                 <div className="text-xs">
-                  <div className="font-medium">{phase!.label}</div>
-                  <div className="text-muted-foreground">{phase!.description}</div>
-                  <div className="mt-1 font-mono">{formatDuration(phase!.value)}</div>
+                  <div className="font-medium">{phase.label}</div>
+                  <div className="text-muted-foreground">{phase.description}</div>
+                  <div className="mt-1 font-mono">{formatDuration(phase.value)}</div>
                 </div>
               </TooltipContent>
             </Tooltip>
@@ -93,10 +88,10 @@ export function TimingWaterfall({ timing, className }: TimingWaterfallProps) {
       {/* Legend */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {phases.map((phase) => (
-          <div key={phase!.key} className="flex items-center gap-2 text-xs">
-            <div className={cn('w-3 h-3 rounded-sm', phase!.color)} />
-            <span className="text-muted-foreground">{phase!.label}</span>
-            <span className="font-mono ml-auto">{formatDuration(phase!.value)}</span>
+          <div key={phase.key} className="flex items-center gap-2 text-xs">
+            <div className={cn('w-3 h-3 rounded-sm', phase.color)} />
+            <span className="text-muted-foreground">{phase.label}</span>
+            <span className="font-mono ml-auto">{formatDuration(phase.value)}</span>
           </div>
         ))}
       </div>

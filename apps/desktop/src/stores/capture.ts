@@ -201,7 +201,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
       newMap.set(request.id, request);
 
       // Add to beginning of IDs array
-      let newIds = [request.id, ...state.requestIds];
+      const newIds = [request.id, ...state.requestIds];
 
       // Trim if exceeds max
       if (newIds.length > state.maxRequests) {
@@ -325,7 +325,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
     
     set((currentState) => {
       const newMap = new Map(currentState.requestMap);
-      let newIds = [...currentState.requestIds];
+      const newIds = [...currentState.requestIds];
       
       // Process new requests (sorted by timestamp, newest first)
       if (pendingRequests.length > 0) {

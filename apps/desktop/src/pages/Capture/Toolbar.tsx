@@ -1,4 +1,4 @@
-import { Play, Trash2, Filter, Search, X, Download, Upload, Square, Copy, Check } from "lucide-react";
+import { Play, Trash2, Filter, Search, X, Download, Upload, Square, Copy, Check, AlertCircle, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -31,7 +31,7 @@ export function Toolbar() {
   const { isPaused, clearRequests, filter, setFilter, resetFilter, addRequests } =
     useCaptureStore();
   const requests = useRequests();
-  const { status, config } = useProxyStore();
+  const { status, config, error: proxyError, setError } = useProxyStore();
   const { startProxy, stopProxy } = useProxy();
   const [showFilters, setShowFilters] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -54,9 +54,9 @@ export function Toolbar() {
 
   const handleToggleProxy = async () => {
     if (isRunning) {
-      await stopProxy();
+      await stopProxy().catch(() => {});
     } else if (status === "stopped" || status === "error") {
-      await startProxy();
+      await startProxy().catch(() => {});
     }
   };
 
@@ -96,6 +96,21 @@ export function Toolbar() {
 
   return (
     <div className="flex flex-col border-b bg-muted/10">
+      {/* Proxy Error Banner */}
+      {status === "error" && proxyError && (
+        <div className="flex items-center gap-2 px-3 py-2 bg-destructive/10 border-b border-destructive/20 text-destructive animate-in slide-in-from-top-1 duration-200">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span className="text-xs font-medium flex-1 truncate">{proxyError}</span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5 shrink-0 text-destructive hover:text-destructive hover:bg-destructive/20"
+            onClick={() => setError(null)}
+          >
+            <XCircle className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
       <div className="flex h-10 items-center gap-2 px-3">
         {/* Proxy Start/Stop */}
         <Button

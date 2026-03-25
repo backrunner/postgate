@@ -501,7 +501,7 @@ function CssHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
   const highlighted = useMemo(() => {
     return escapeHtml(code)
       // Selectors
-      .replace(/([\w\-\.#\[\]="':,\s]+)\s*\{/g, '<span class="text-amber-500">$1</span>{')
+      .replace(/([\w\-.#[\]="':,\s]+)\s*\{/g, '<span class="text-amber-500">$1</span>{')
       // Properties
       .replace(/([\w-]+)\s*:/g, '<span class="text-sky-500">$1</span>:')
       // Values with units

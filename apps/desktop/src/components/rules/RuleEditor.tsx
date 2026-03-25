@@ -16,6 +16,27 @@ interface RuleEditorProps {
   className?: string;
 }
 
+function applyDecorations(
+  editorInstance: editor.IStandaloneCodeEditor,
+  monacoInstance: Monaco,
+  errors: { line: number; message: string }[]
+) {
+  const decorations = errors.map(error => ({
+    range: new monacoInstance.Range(error.line, 1, error.line, 1),
+    options: {
+      isWholeLine: true,
+      className: 'bg-red-500/10',
+      glyphMarginClassName: 'bg-red-500 rounded-full',
+      glyphMarginHoverMessage: { value: error.message },
+      overviewRuler: {
+        color: '#ef4444',
+        position: monacoInstance.editor.OverviewRulerLane.Right,
+      },
+    },
+  }));
+  editorInstance.createDecorationsCollection(decorations);
+}
+
 export function RuleEditor({ className }: RuleEditorProps) {
   const { theme } = useThemeStore();
   const { editorContent, setEditorContent, parseContent, parseResult, saveCurrentGroup, isDirty } = useRulesStore();
@@ -151,32 +172,9 @@ export function RuleEditor({ className }: RuleEditorProps) {
     
     // Set initial decorations based on parse result
     if (parseResult) {
-      updateDecorations(editor, monaco, parseResult.errors);
+      applyDecorations(editor, monaco, parseResult.errors);
     }
   }, [parseResult, isDirty, saveCurrentGroup]);
-
-  // Update decorations for errors
-  const updateDecorations = useCallback((
-    editor: editor.IStandaloneCodeEditor,
-    monaco: Monaco,
-    errors: { line: number; message: string }[]
-  ) => {
-    const decorations = errors.map(error => ({
-      range: new monaco.Range(error.line, 1, error.line, 1),
-      options: {
-        isWholeLine: true,
-        className: 'bg-red-500/10',
-        glyphMarginClassName: 'bg-red-500 rounded-full',
-        glyphMarginHoverMessage: { value: error.message },
-        overviewRuler: {
-          color: '#ef4444',
-          position: monaco.editor.OverviewRulerLane.Right,
-        },
-      },
-    }));
-    
-    editor.createDecorationsCollection(decorations);
-  }, []);
 
   // Handle content change with debounced parsing
   const handleEditorChange: OnChange = useCallback((value) => {
@@ -197,9 +195,9 @@ export function RuleEditor({ className }: RuleEditorProps) {
   // Update decorations when parse result changes
   useEffect(() => {
     if (editorRef.current && monacoRef.current && parseResult) {
-      updateDecorations(editorRef.current, monacoRef.current, parseResult.errors);
+      applyDecorations(editorRef.current, monacoRef.current, parseResult.errors);
     }
-  }, [parseResult, updateDecorations]);
+  }, [parseResult]);
 
   // Cleanup timeout on unmount
   useEffect(() => {

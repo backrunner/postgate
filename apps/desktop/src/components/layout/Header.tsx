@@ -1,4 +1,4 @@
-import { Play, Square, Moon, Sun, Monitor, Activity } from "lucide-react";
+import { Play, Square, Moon, Sun, Monitor, Activity, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -13,15 +13,15 @@ import { useProxy } from "@/hooks/useProxy";
 import { cn } from "@/lib/utils";
 
 export function Header() {
-  const { status, config } = useProxyStore();
+  const { status, config, error: proxyError } = useProxyStore();
   const { theme, setTheme } = useThemeStore();
   const { startProxy, stopProxy } = useProxy();
 
   const handleToggleProxy = async () => {
     if (status === "running") {
-      await stopProxy();
+      await stopProxy().catch(() => {});
     } else if (status === "stopped" || status === "error") {
-      await startProxy();
+      await startProxy().catch(() => {});
     }
   };
 
@@ -42,7 +42,12 @@ export function Header() {
       case "stopping":
         return <Badge variant="outline" className="border-yellow-500 text-yellow-500 bg-yellow-500/10">Stopping...</Badge>;
       case "error":
-        return <Badge variant="destructive">Error</Badge>;
+        return (
+          <Badge variant="destructive" className="gap-1" title={proxyError || "Unknown error"}>
+            <AlertCircle className="h-3 w-3" />
+            Error
+          </Badge>
+        );
       default:
         return <Badge variant="secondary" className="text-muted-foreground">Stopped</Badge>;
     }

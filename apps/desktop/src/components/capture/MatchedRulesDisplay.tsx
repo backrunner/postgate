@@ -42,7 +42,7 @@ function parseRule(ruleLine: string): ParsedRule {
     }
     
     // Action with :// (host://, file://, etc.)
-    const actionMatch = part.match(/^([a-zA-Z][a-zA-Z0-9\-]*):\/\/(.*)$/);
+    const actionMatch = part.match(/^([a-zA-Z][a-zA-Z0-9-]*):\/\/(.*)$/);
     if (actionMatch) {
       action = actionMatch[1];
       target = actionMatch[2] || null;

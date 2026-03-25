@@ -84,7 +84,7 @@ export function ReplayPage() {
   const currentHistory = useMemo(() => {
     if (!selectedRequest?.id) return history;
     return history.filter(h => h.saved_request_id === selectedRequest.id);
-  }, [history, selectedRequest?.id]);
+  }, [history, selectedRequest]);
 
   useEffect(() => {
     fetchTree();

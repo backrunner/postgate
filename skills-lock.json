@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "loki-mode": {
+      "source": "asklokesh/loki-mode",
+      "sourceType": "github",
+      "computedHash": "d66b8f24e9bfd56f671c2354d2f05813be777a1d2a04733194a31d73bfc8afaf"
+    }
+  }
+}

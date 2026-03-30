@@ -417,4 +417,37 @@ mod tests {
         );
         assert_eq!(matches.len(), 0);
     }
+
+    #[test]
+    fn test_vqq_include_filter_full_engine() {
+        use crate::rules::parser::parse_rules;
+
+        let engine = RuleEngine::new();
+
+        let raw = r#"v.qq.com localhost:8080 includeFilter:///https?:\/\/v.qq.com\/(@|packages|common|node_modules|src|x\/(cover|page|skeleton)|__vite_hmr)/i
+https://v.qq.com/assets/ http://localhost:8080/assets/"#;
+        let rules = parse_rules(raw).unwrap();
+
+        engine.upsert_group(create_test_group("vqq", rules));
+
+        let headers = HashMap::new();
+
+        // Should match rule 1 (v.qq.com domain + includeFilter matches x/cover)
+        let matches = engine.match_request(
+            "GET", "v.qq.com", "/x/cover/kcaoffbyy2l0b45/p4102qbmz2h.html", "https", 443, &headers
+        );
+        assert!(matches.len() >= 1, "Should match the v.qq.com rule with includeFilter for /x/cover/ path");
+
+        // Should NOT match rule 1 (includeFilter rejects), should NOT match rule 2 (path /other/)
+        let matches = engine.match_request(
+            "GET", "v.qq.com", "/other/stuff.html", "https", 443, &headers
+        );
+        assert_eq!(matches.len(), 0, "Should NOT match any rule for /other/ path");
+
+        // Should match rule 2 (https://v.qq.com/assets/ prefix)
+        let matches = engine.match_request(
+            "GET", "v.qq.com", "/assets/js/main.js", "https", 443, &headers
+        );
+        assert!(matches.len() >= 1, "Should match the assets rule");
+    }
 }

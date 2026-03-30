@@ -22,6 +22,38 @@ pub async fn start_proxy(
 ) -> Result<ProxyStatusResponse> {
     tracing::info!("Starting proxy with config: {:?}", config);
 
+    // Ensure rules are loaded from database before starting proxy
+    // (Rules page may not have been visited yet)
+    if state.rule_engine.get_all_groups().is_empty() {
+        if let Ok(db) = state.get_database().await {
+            match db.get_rule_groups().await {
+                Ok(groups) => {
+                    tracing::info!("Pre-loading {} rule groups from database", groups.len());
+                    for group in &groups {
+                        state.rule_engine.upsert_group(group.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to pre-load rules from database: {}", e);
+                }
+            }
+        }
+    }
+
+    // Check if proxy is already running (guard against concurrent starts)
+    {
+        let proxy_guard = state.proxy.read();
+        if let Some(ref proxy) = *proxy_guard {
+            if proxy.status() == ProxyStatus::Running {
+                return Ok(ProxyStatusResponse {
+                    status: ProxyStatus::Running,
+                    port: proxy.config().port,
+                    error: None,
+                });
+            }
+        }
+    }
+
     // Get or create CA
     let ca = state.get_or_init_ca()?;
 

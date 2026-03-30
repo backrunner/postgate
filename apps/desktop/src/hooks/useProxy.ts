@@ -67,8 +67,15 @@ interface StreamEndedEventPayload {
   closeReason: string | null;
 }
 
+// Module-level guard to prevent concurrent startProxy calls across multiple hook instances
+let _startingProxy = false;
+// Module-level flag to ensure auto-start only happens once
+let _autoStarted = false;
+
 /**
- * Hook to manage proxy state and listen for events
+ * Hook to manage proxy state and listen for events.
+ * Safe to call from multiple components - event listeners are set up per instance,
+ * but auto-start only happens once globally.
  */
 export function useProxy() {
   const { setStatus, setError, config } = useProxyStore();
@@ -77,9 +84,17 @@ export function useProxy() {
   const isPaused = useCaptureStore((state) => state.isPaused);
   const { addMessage, endStream } = useStreamStore();
 
-  // Start proxy
+  // Start proxy (with guard against concurrent calls)
   const startProxy = useCallback(async (proxyConfig?: Partial<ProxyConfig>) => {
+    // Guard against concurrent start attempts
+    if (_startingProxy) {
+      const result = await invoke<ProxyStatusResponse>("get_proxy_status");
+      setStatus(result.status);
+      return result;
+    }
+
     try {
+      _startingProxy = true;
       setStatus("starting");
       setError(null);
 
@@ -104,6 +119,8 @@ export function useProxy() {
       setStatus("error");
       setError(String(e));
       throw e;
+    } finally {
+      _startingProxy = false;
     }
   }, [config, setStatus, setError]);
 
@@ -233,8 +250,11 @@ export function useProxy() {
     };
   }, [queueRequest, queueUpdate, addMessage, endStream, isPaused]);
 
-  // Auto-start proxy on mount
+  // Auto-start proxy on first mount (only once globally)
   useEffect(() => {
+    if (_autoStarted) return;
+    _autoStarted = true;
+
     const init = async () => {
       try {
         const result = await getStatus();

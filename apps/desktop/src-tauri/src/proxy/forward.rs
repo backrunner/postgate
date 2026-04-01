@@ -59,19 +59,24 @@ impl ForwardTarget {
                 remaining_path: remaining_path.to_string(),
             })
         } else {
-            // Target is just host:port or host
-            let (host, port) = if target.contains(':') {
+            // Target is just host:port or host (no scheme specified)
+            // Whistle behavior: bare host:port defaults to HTTP, not the original scheme.
+            // Only when no port is specified AND original was HTTPS, keep HTTPS.
+            let (host, port, scheme) = if target.contains(':') {
                 let parts: Vec<&str> = target.rsplitn(2, ':').collect();
                 let port: u16 = parts[0].parse()
                     .map_err(|_| PostGateError::Proxy(format!("Invalid port in target: {}", target)))?;
-                (parts[1].to_string(), port)
+                // Bare host:port → default to HTTP (user explicitly specified a port,
+                // likely a local dev server). Use HTTPS only for port 443.
+                let scheme = if port == 443 { "https" } else { "http" };
+                (parts[1].to_string(), port, scheme.to_string())
             } else {
                 let port = if original_scheme == "https" { 443 } else { 80 };
-                (target.to_string(), port)
+                (target.to_string(), port, original_scheme.to_string())
             };
-            
+
             Ok(ForwardTarget {
-                scheme: original_scheme.to_string(),
+                scheme,
                 host,
                 port,
                 path: String::new(),
@@ -354,18 +359,59 @@ mod tests {
 
     #[test]
     fn test_forward_target_parse_host_only() {
+        // Bare host:port should default to HTTP, not inherit HTTPS
         let target = ForwardTarget::parse(
             "127.0.0.1:3000",
             "/api/users",
             "https"
         ).unwrap();
-        
-        assert_eq!(target.scheme, "https");
+
+        assert_eq!(target.scheme, "http");
         assert_eq!(target.host, "127.0.0.1");
         assert_eq!(target.port, 3000);
         assert_eq!(target.path, "");
         assert_eq!(target.remaining_path, "/api/users");
-        assert_eq!(target.build_url(), "https://127.0.0.1:3000/api/users");
+        assert_eq!(target.build_url(), "http://127.0.0.1:3000/api/users");
+    }
+
+    #[test]
+    fn test_forward_target_bare_host_port443_keeps_https() {
+        // Port 443 should use HTTPS
+        let target = ForwardTarget::parse(
+            "example.com:443",
+            "/api",
+            "https"
+        ).unwrap();
+
+        assert_eq!(target.scheme, "https");
+    }
+
+    #[test]
+    fn test_forward_target_bare_host_no_port_keeps_original() {
+        // No port → inherit original scheme
+        let target = ForwardTarget::parse(
+            "example.com",
+            "/api",
+            "https"
+        ).unwrap();
+
+        assert_eq!(target.scheme, "https");
+        assert_eq!(target.port, 443);
+    }
+
+    #[test]
+    fn test_forward_target_localhost_8080_uses_http() {
+        // localhost:8080 from HTTPS context should use HTTP (the TLS bug fix)
+        let target = ForwardTarget::parse(
+            "localhost:8080",
+            "/x/cover/page.html",
+            "https"
+        ).unwrap();
+
+        assert_eq!(target.scheme, "http");
+        assert_eq!(target.host, "localhost");
+        assert_eq!(target.port, 8080);
+        assert!(!target.is_https());
     }
 
     #[test]

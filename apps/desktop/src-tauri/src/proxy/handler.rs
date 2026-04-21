@@ -7,8 +7,11 @@ use crate::proxy::pool::ConnectionPool;
 use crate::proxy::sse;
 use crate::proxy::websocket;
 use crate::proxy::BodyStorage;
-use crate::rules::{apply_request_rules, apply_response_rules, RuleEngine};
+use crate::rules::{
+    apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx, RuleEngine,
+};
 use crate::state::{AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType};
+use crate::values::RequestCtx;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Incoming;
@@ -145,13 +148,36 @@ async fn handle_request(
     // Persist request body
     ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
 
+    // Ensure the in-memory values store is populated so `{name}` references
+    // in rule actions resolve on the first request after startup.
+    let _ = ctx.app_state.ensure_values_loaded().await;
+
+    // Build query + cookie maps for template interpolation.
+    let query_map = build_query_map(&uri);
+    let cookie_map = build_cookie_map(&request_headers);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let values_ctx = RequestCtx {
+        url: &uri,
+        method: &method,
+        client_ip: &peer_addr.ip().to_string(),
+        req_headers: &request_headers,
+        query: &query_map,
+        req_cookies: &cookie_map,
+        now_ms,
+    };
+    let resolve_ctx = ResolveCtx {
+        store: Some(&ctx.app_state.values_store),
+        ctx: Some(&values_ctx),
+    };
+
     // Apply request rules
-    let request_modification = apply_request_rules(
+    let request_modification = apply_request_rules_with_values(
         &matched_rules,
         &uri,
         &method,
         &request_headers,
         Some(&request_body.data),
+        &resolve_ctx,
     );
 
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
@@ -192,9 +218,19 @@ async fn handle_request(
             },
         });
 
-        // Build short-circuit response
+        // Build short-circuit response.
+        // Ensure Content-Length matches the body we're sending. Hyper's
+        // `Full::new` already sets it, but being explicit avoids any
+        // transfer-encoding confusion.
         let mut builder = Response::builder().status(short_circuit.status);
-        for (k, v) in &short_circuit.headers {
+        let mut sc_headers = short_circuit.headers.clone();
+        sc_headers.remove("content-encoding");
+        sc_headers.remove("transfer-encoding");
+        sc_headers.insert(
+            "content-length".to_string(),
+            short_circuit.body.len().to_string(),
+        );
+        for (k, v) in &sc_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
         return Ok(builder
@@ -322,7 +358,7 @@ async fn handle_request(
             let response_content_type = response_headers.get("content-type").cloned();
 
             // Apply response rules
-            let response_modification = apply_response_rules(
+            let response_modification = apply_response_rules_with_values(
                 &matched_rules,
                 &uri,
                 &method,
@@ -330,6 +366,7 @@ async fn handle_request(
                 &response_headers,
                 Some(&response_body.data),
                 response_content_type.as_deref(),
+                &resolve_ctx,
             );
 
             // Apply plugin handleResponse if a plugin was matched
@@ -410,6 +447,22 @@ async fn handle_request(
                 .unwrap_or(response_body.data.clone());
             let mut final_headers = plugin_modified_headers
                 .unwrap_or(response_modification.headers);
+
+            // If the body was replaced/modified relative to what upstream
+            // sent, the upstream's `content-length` / `content-encoding` /
+            // `transfer-encoding` headers no longer describe the new body.
+            // Leaving them in place results in ERR_EMPTY_RESPONSE in the
+            // browser (content-length mismatch) or decoding errors when
+            // upstream sent gzip/br and we replaced it with plain text.
+            let body_was_modified = final_body != response_body.data;
+            if body_was_modified {
+                final_headers.remove("content-encoding");
+                final_headers.remove("transfer-encoding");
+                final_headers.insert(
+                    "content-length".to_string(),
+                    final_body.len().to_string(),
+                );
+            }
 
             // Inject debug script if enabled
             if response_modification.inject_debug {
@@ -934,4 +987,64 @@ impl Body for SseCapturingBody {
     fn size_hint(&self) -> SizeHint {
         self.inner.size_hint()
     }
+}
+
+/// Helpers reused by `tunnel.rs` for whistle `{name}` reference resolution.
+pub mod tunnel_value_helpers {
+    use std::collections::HashMap;
+
+    /// Parse `?foo=bar&baz=qux` out of a URL into a flat map.
+    pub fn query_map(url: &str) -> HashMap<String, String> {
+        super::build_query_map(url)
+    }
+
+    /// Parse a `Cookie:` header into a flat map.
+    pub fn cookie_map(headers: &HashMap<String, String>) -> HashMap<String, String> {
+        super::build_cookie_map(headers)
+    }
+}
+
+/// Parse `?foo=bar&baz=qux` out of a URL into a flat map used by the values
+/// template interpolator (`${query.foo}`).
+fn build_query_map(url: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Some(qs) = url.split_once('?').map(|(_, q)| q) {
+        let qs = qs.split('#').next().unwrap_or(qs);
+        for pair in qs.split('&').filter(|s| !s.is_empty()) {
+            match pair.split_once('=') {
+                Some((k, v)) => {
+                    map.insert(
+                        urlencoding::decode(k).map(|s| s.into_owned()).unwrap_or_else(|_| k.to_string()),
+                        urlencoding::decode(v).map(|s| s.into_owned()).unwrap_or_else(|_| v.to_string()),
+                    );
+                }
+                None => {
+                    map.insert(pair.to_string(), String::new());
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Parse a `Cookie:` header into a flat map (`${reqCookie.session}`).
+fn build_cookie_map(headers: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if let Some(raw) = headers.get("cookie") {
+        for pair in raw.split(';') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            match pair.split_once('=') {
+                Some((k, v)) => {
+                    map.insert(k.trim().to_string(), v.trim().to_string());
+                }
+                None => {
+                    map.insert(pair.to_string(), String::new());
+                }
+            }
+        }
+    }
+    map
 }

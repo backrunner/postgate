@@ -44,6 +44,19 @@ export function RuleEditor({ className }: RuleEditorProps) {
   const monacoRef = useRef<Monaco | null>(null);
   const parseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Keep a live handle on isDirty + save fn so Monaco's addCommand closure
+  // (which is only registered once at mount) can always read the latest
+  // values. Without this the Cmd/Ctrl+S shortcut in the editor would only
+  // trigger when isDirty was true at mount time.
+  const isDirtyRef = useRef(isDirty);
+  const saveCurrentGroupRef = useRef(saveCurrentGroup);
+  useEffect(() => {
+    isDirtyRef.current = isDirty;
+  }, [isDirty]);
+  useEffect(() => {
+    saveCurrentGroupRef.current = saveCurrentGroup;
+  }, [saveCurrentGroup]);
+
   // Register whistle language
   const handleEditorWillMount = useCallback((monaco: Monaco) => {
     // Register the language
@@ -114,10 +127,10 @@ export function RuleEditor({ className }: RuleEditorProps) {
     monacoRef.current = monaco;
     
     // Register keyboard shortcuts
-    // Save: Cmd/Ctrl+S
+    // Save: Cmd/Ctrl+S — read via refs so the latest isDirty/save fn is used.
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      if (isDirty) {
-        saveCurrentGroup();
+      if (isDirtyRef.current) {
+        saveCurrentGroupRef.current();
       }
     });
     
@@ -174,7 +187,8 @@ export function RuleEditor({ className }: RuleEditorProps) {
     if (parseResult) {
       applyDecorations(editor, monaco, parseResult.errors);
     }
-  }, [parseResult, isDirty, saveCurrentGroup]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Handle content change with debounced parsing
   const handleEditorChange: OnChange = useCallback((value) => {

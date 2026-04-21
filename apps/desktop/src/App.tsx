@@ -7,6 +7,7 @@ import { usePluginsStore } from "@/stores/plugins";
 // 路由懒加载
 const CapturePage = lazy(() => import("@/pages/Capture").then(m => ({ default: m.CapturePage })));
 const RulesPage = lazy(() => import("@/pages/Rules").then(m => ({ default: m.RulesPage })));
+const ValuesPage = lazy(() => import("@/pages/Values").then(m => ({ default: m.ValuesPage })));
 const ReplayPage = lazy(() => import("@/pages/Replay").then(m => ({ default: m.ReplayPage })));
 const DebugPage = lazy(() => import("@/pages/Debug").then(m => ({ default: m.DebugPage })));
 const PluginsPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.PluginsPage })));
@@ -61,6 +62,7 @@ function App() {
         <Route index element={<Navigate to="/capture" replace />} />
         <Route path="capture" element={<Suspense fallback={<PageLoading />}><CapturePage /></Suspense>} />
         <Route path="rules" element={<Suspense fallback={<PageLoading />}><RulesPage /></Suspense>} />
+        <Route path="values" element={<Suspense fallback={<PageLoading />}><ValuesPage /></Suspense>} />
         <Route path="replay" element={<Suspense fallback={<PageLoading />}><ReplayPage /></Suspense>} />
         <Route path="debug" element={<Suspense fallback={<PageLoading />}><DebugPage /></Suspense>} />
         <Route path="plugins" element={<Suspense fallback={<PageLoading />}><PluginsPage /></Suspense>} />

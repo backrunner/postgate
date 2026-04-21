@@ -8,6 +8,7 @@ mod replay;
 mod rules;
 mod storage;
 mod state;
+mod values;
 
 use state::AppState;
 use std::sync::Arc;
@@ -117,6 +118,10 @@ pub fn run() {
             commands::debug::get_page_errors,
             commands::debug::clear_all_debug_data,
             commands::debug::remove_debug_session,
+            commands::values::list_values,
+            commands::values::save_value,
+            commands::values::delete_value,
+            commands::values::rename_value,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

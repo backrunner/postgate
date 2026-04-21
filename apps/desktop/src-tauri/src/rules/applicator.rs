@@ -7,9 +7,65 @@ use super::engine::MatchedRule;
 use super::types::{
     BodyContent, CookieOptions, HeaderModifications, RuleAction, UrlParamModifications,
 };
+use crate::values::{resolve_str, RequestCtx};
 use bytes::Bytes;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use url::Url;
+
+/// Handle to the shared values store + current request context, passed into
+/// the applicator so `{name}` and `` `{name}` `` references can be resolved
+/// against inline definitions and the global Values tab.
+///
+/// Supplying `None` (via [`ResolveCtx::disabled`]) turns reference resolution
+/// into a no-op — action arguments are used verbatim. This keeps the unit
+/// tests inside this module unchanged.
+pub struct ResolveCtx<'a> {
+    pub store: Option<&'a DashMap<String, String>>,
+    pub ctx: Option<&'a RequestCtx<'a>>,
+}
+
+impl<'a> ResolveCtx<'a> {
+    #[allow(dead_code)]
+    pub fn disabled() -> Self {
+        Self {
+            store: None,
+            ctx: None,
+        }
+    }
+}
+
+/// Resolve a whistle-style reference using the supplied inline+global maps.
+/// Returns the input unchanged when either the store or ctx is absent, or
+/// when the input contains no references.
+fn resolve_ref(
+    arg: &str,
+    inline: &HashMap<String, String>,
+    res: &ResolveCtx<'_>,
+) -> String {
+    match (res.store, res.ctx) {
+        (Some(store), Some(ctx)) => resolve_str(arg, inline, store, ctx, 0),
+        // No store but we still honor inline definitions so inline values
+        // work even on code paths that don't plumb the global store.
+        (None, Some(ctx)) => {
+            let empty = DashMap::new();
+            resolve_str(arg, inline, &empty, ctx, 0)
+        }
+        (Some(store), None) => {
+            let empty_ctx = RequestCtx::empty();
+            resolve_str(arg, inline, store, &empty_ctx, 0)
+        }
+        (None, None) => arg.to_string(),
+    }
+}
+
+fn resolve_bytes(
+    arg: &str,
+    inline: &HashMap<String, String>,
+    res: &ResolveCtx<'_>,
+) -> Bytes {
+    Bytes::from(resolve_ref(arg, inline, res))
+}
 
 /// Result of applying rules to a request
 #[derive(Debug, Default)]
@@ -79,12 +135,35 @@ pub struct ResponseModification {
 }
 
 /// Apply rules to a request and return modifications
+#[allow(dead_code)]
 pub fn apply_request_rules(
     matched_rules: &[MatchedRule],
     url: &str,
     method: &str,
     headers: &HashMap<String, String>,
     body: Option<&Bytes>,
+) -> RequestModification {
+    apply_request_rules_with_values(
+        matched_rules,
+        url,
+        method,
+        headers,
+        body,
+        &ResolveCtx::disabled(),
+    )
+}
+
+/// Apply rules to a request with whistle-compatible `{name}` reference
+/// resolution. Callers with access to the app state's values store should
+/// prefer this entry point; the older [`apply_request_rules`] is a
+/// convenience wrapper for tests and legacy callers.
+pub fn apply_request_rules_with_values(
+    matched_rules: &[MatchedRule],
+    url: &str,
+    method: &str,
+    headers: &HashMap<String, String>,
+    body: Option<&Bytes>,
+    res: &ResolveCtx<'_>,
 ) -> RequestModification {
     let mut modification = RequestModification {
         headers: headers.clone(),
@@ -100,6 +179,7 @@ pub fn apply_request_rules(
         if !rule.enabled {
             continue;
         }
+        let inline = matched.inline_values.as_ref();
 
         // Check filters if present
         if let Some(filters) = &rule.filters {
@@ -126,12 +206,17 @@ pub fn apply_request_rules(
                 }
 
                 RuleAction::RequestHeaders { modifications } => {
-                    apply_header_modifications(&mut modification.headers, modifications);
+                    apply_header_modifications_with_values(
+                        &mut modification.headers,
+                        modifications,
+                        inline,
+                        res,
+                    );
                     modification.headers_to_remove.extend(modifications.remove.clone());
                 }
 
                 RuleAction::RequestBody { content } => {
-                    modification.body = Some(resolve_body_content(content));
+                    modification.body = Some(resolve_body_content(content, inline, res));
                 }
 
                 RuleAction::UrlParams { modifications } => {
@@ -242,18 +327,41 @@ pub fn apply_request_rules(
                 }
 
                 RuleAction::File { path } => {
-                    if let Ok(content) = std::fs::read(path) {
-                        let content_type = mime_guess::from_path(path)
+                    // The action argument may be a `{name}` reference into the
+                    // values store (whistle `file://{name}`) OR a real disk
+                    // path. Try the values store first.
+                    let path_str = path.to_string_lossy().into_owned();
+                    let trimmed = path_str.trim();
+                    let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                        || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
+
+                    let (body, content_type) = if is_ref {
+                        let body = resolve_bytes(trimmed, inline, res);
+                        // Guess MIME from the referenced value's name if we
+                        // can (strip the braces and treat as a filename).
+                        let name_for_mime = trimmed
+                            .trim_matches('`')
+                            .trim_start_matches('{')
+                            .trim_end_matches('}');
+                        let ct = mime_guess::from_path(name_for_mime)
                             .first_or_octet_stream()
                             .to_string();
-                        let mut headers = HashMap::new();
-                        headers.insert("content-type".to_string(), content_type);
-                        modification.short_circuit = Some(ShortCircuitResponse {
-                            status: 200,
-                            headers,
-                            body: Bytes::from(content),
-                        });
-                    }
+                        (body, ct)
+                    } else {
+                        let body = std::fs::read(path).map(Bytes::from).unwrap_or_default();
+                        let ct = mime_guess::from_path(path)
+                            .first_or_octet_stream()
+                            .to_string();
+                        (body, ct)
+                    };
+
+                    let mut headers = HashMap::new();
+                    headers.insert("content-type".to_string(), content_type);
+                    modification.short_circuit = Some(ShortCircuitResponse {
+                        status: 200,
+                        headers,
+                        body,
+                    });
                 }
 
                 RuleAction::HtmlBody { content } => {
@@ -262,7 +370,7 @@ pub fn apply_request_rules(
                     modification.short_circuit = Some(ShortCircuitResponse {
                         status: 200,
                         headers,
-                        body: Bytes::from(content.clone()),
+                        body: resolve_bytes(content, inline, res),
                     });
                 }
 
@@ -272,7 +380,7 @@ pub fn apply_request_rules(
                     modification.short_circuit = Some(ShortCircuitResponse {
                         status: 200,
                         headers,
-                        body: Bytes::from(content.clone()),
+                        body: resolve_bytes(content, inline, res),
                     });
                 }
 
@@ -282,7 +390,7 @@ pub fn apply_request_rules(
                     modification.short_circuit = Some(ShortCircuitResponse {
                         status: 200,
                         headers,
-                        body: Bytes::from(content.clone()),
+                        body: resolve_bytes(content, inline, res),
                     });
                 }
 
@@ -336,6 +444,7 @@ pub fn apply_request_rules(
 }
 
 /// Apply rules to a response and return modifications
+#[allow(dead_code)]
 pub fn apply_response_rules(
     matched_rules: &[MatchedRule],
     url: &str,
@@ -344,6 +453,30 @@ pub fn apply_response_rules(
     response_headers: &HashMap<String, String>,
     body: Option<&Bytes>,
     content_type: Option<&str>,
+) -> ResponseModification {
+    apply_response_rules_with_values(
+        matched_rules,
+        url,
+        method,
+        request_headers,
+        response_headers,
+        body,
+        content_type,
+        &ResolveCtx::disabled(),
+    )
+}
+
+/// Apply rules to a response with whistle-compatible `{name}` reference
+/// resolution. See [`apply_request_rules_with_values`] for the rationale.
+pub fn apply_response_rules_with_values(
+    matched_rules: &[MatchedRule],
+    url: &str,
+    method: &str,
+    request_headers: &HashMap<String, String>,
+    response_headers: &HashMap<String, String>,
+    body: Option<&Bytes>,
+    content_type: Option<&str>,
+    res: &ResolveCtx<'_>,
 ) -> ResponseModification {
     let mut modification = ResponseModification {
         headers: response_headers.clone(),
@@ -358,6 +491,7 @@ pub fn apply_response_rules(
         if !rule.enabled {
             continue;
         }
+        let inline = matched.inline_values.as_ref();
 
         // Check filters if present
         if let Some(filters) = &rule.filters {
@@ -378,12 +512,17 @@ pub fn apply_response_rules(
         for action in &rule.actions {
             match action {
                 RuleAction::ResponseHeaders { modifications } => {
-                    apply_header_modifications(&mut modification.headers, modifications);
+                    apply_header_modifications_with_values(
+                        &mut modification.headers,
+                        modifications,
+                        inline,
+                        res,
+                    );
                     modification.headers_to_remove.extend(modifications.remove.clone());
                 }
 
                 RuleAction::ResponseBody { content } => {
-                    modification.body = Some(resolve_body_content(content));
+                    modification.body = Some(resolve_body_content(content, inline, res));
                 }
 
                 RuleAction::ResponseReplace { pattern, replacement, regex } => {
@@ -455,9 +594,10 @@ pub fn apply_response_rules(
 
                 RuleAction::HtmlAppend { content } => {
                     if is_html(content_type) {
+                        let resolved = resolve_ref(content, inline, res);
                         modification.body = Some(append_to_html(
                             modification.body.as_ref(),
-                            content,
+                            &resolved,
                             false,
                         ));
                     }
@@ -465,17 +605,19 @@ pub fn apply_response_rules(
 
                 RuleAction::HtmlPrepend { content } => {
                     if is_html(content_type) {
+                        let resolved = resolve_ref(content, inline, res);
                         modification.body = Some(append_to_html(
                             modification.body.as_ref(),
-                            content,
+                            &resolved,
                             true,
                         ));
                     }
                 }
 
                 RuleAction::JsAppend { content } => {
+                    let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
-                        let script = format!("<script>{}</script>", content);
+                        let script = format!("<script>{}</script>", resolved);
                         modification.body = Some(append_to_html(
                             modification.body.as_ref(),
                             &script,
@@ -485,15 +627,16 @@ pub fn apply_response_rules(
                         if let Some(ref body) = modification.body {
                             let mut new_body = body.to_vec();
                             new_body.extend_from_slice(b"\n");
-                            new_body.extend_from_slice(content.as_bytes());
+                            new_body.extend_from_slice(resolved.as_bytes());
                             modification.body = Some(Bytes::from(new_body));
                         }
                     }
                 }
 
                 RuleAction::JsPrepend { content } => {
+                    let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
-                        let script = format!("<script>{}</script>", content);
+                        let script = format!("<script>{}</script>", resolved);
                         modification.body = Some(append_to_html(
                             modification.body.as_ref(),
                             &script,
@@ -501,7 +644,7 @@ pub fn apply_response_rules(
                         ));
                     } else if is_js(content_type) {
                         if let Some(ref body) = modification.body {
-                            let mut new_body = content.as_bytes().to_vec();
+                            let mut new_body = resolved.as_bytes().to_vec();
                             new_body.extend_from_slice(b"\n");
                             new_body.extend_from_slice(body);
                             modification.body = Some(Bytes::from(new_body));
@@ -510,8 +653,9 @@ pub fn apply_response_rules(
                 }
 
                 RuleAction::CssAppend { content } => {
+                    let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
-                        let style = format!("<style>{}</style>", content);
+                        let style = format!("<style>{}</style>", resolved);
                         modification.body = Some(append_to_html(
                             modification.body.as_ref(),
                             &style,
@@ -521,15 +665,16 @@ pub fn apply_response_rules(
                         if let Some(ref body) = modification.body {
                             let mut new_body = body.to_vec();
                             new_body.extend_from_slice(b"\n");
-                            new_body.extend_from_slice(content.as_bytes());
+                            new_body.extend_from_slice(resolved.as_bytes());
                             modification.body = Some(Bytes::from(new_body));
                         }
                     }
                 }
 
                 RuleAction::CssPrepend { content } => {
+                    let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
-                        let style = format!("<style>{}</style>", content);
+                        let style = format!("<style>{}</style>", resolved);
                         modification.body = Some(append_to_html(
                             modification.body.as_ref(),
                             &style,
@@ -537,7 +682,7 @@ pub fn apply_response_rules(
                         ));
                     } else if is_css(content_type) {
                         if let Some(ref body) = modification.body {
-                            let mut new_body = content.as_bytes().to_vec();
+                            let mut new_body = resolved.as_bytes().to_vec();
                             new_body.extend_from_slice(b"\n");
                             new_body.extend_from_slice(body);
                             modification.body = Some(Bytes::from(new_body));
@@ -597,6 +742,7 @@ pub fn apply_response_rules(
 }
 
 /// Apply header modifications
+#[allow(dead_code)]
 fn apply_header_modifications(
     headers: &mut HashMap<String, String>,
     modifications: &HeaderModifications,
@@ -619,6 +765,33 @@ fn apply_header_modifications(
             existing.push_str(value);
         } else {
             headers.insert(key_lower, value.clone());
+        }
+    }
+}
+
+/// Like [`apply_header_modifications`] but runs header values through the
+/// values resolver so `{name}` references are expanded per whistle.
+fn apply_header_modifications_with_values(
+    headers: &mut HashMap<String, String>,
+    modifications: &HeaderModifications,
+    inline: &HashMap<String, String>,
+    res: &ResolveCtx<'_>,
+) {
+    for key in &modifications.remove {
+        headers.remove(&key.to_lowercase());
+    }
+    for (key, value) in &modifications.set {
+        let resolved = resolve_ref(value, inline, res);
+        headers.insert(key.to_lowercase(), resolved);
+    }
+    for (key, value) in &modifications.append {
+        let resolved = resolve_ref(value, inline, res);
+        let key_lower = key.to_lowercase();
+        if let Some(existing) = headers.get_mut(&key_lower) {
+            existing.push_str(", ");
+            existing.push_str(&resolved);
+        } else {
+            headers.insert(key_lower, resolved);
         }
     }
 }
@@ -690,15 +863,31 @@ fn format_set_cookie(name: &str, opts: &CookieOptions) -> String {
     cookie
 }
 
-/// Resolve body content to bytes
-fn resolve_body_content(content: &BodyContent) -> Bytes {
+/// Resolve body content to bytes, expanding whistle-style `{name}` references
+/// in text/JSON payloads and in file paths against the values store.
+fn resolve_body_content(
+    content: &BodyContent,
+    inline: &HashMap<String, String>,
+    res: &ResolveCtx<'_>,
+) -> Bytes {
     match content {
-        BodyContent::Text { content, .. } => Bytes::from(content.clone()),
+        BodyContent::Text { content, .. } => resolve_bytes(content, inline, res),
         BodyContent::Json { value } => {
-            Bytes::from(serde_json::to_string(value).unwrap_or_default())
+            let raw = serde_json::to_string(value).unwrap_or_default();
+            resolve_bytes(&raw, inline, res)
         }
         BodyContent::File { path } => {
-            std::fs::read(path).map(Bytes::from).unwrap_or_default()
+            // If the path is a `{name}` reference, resolve from the values
+            // store; otherwise read from disk (whistle file:// semantics).
+            let path_str = path.to_string_lossy();
+            let trimmed = path_str.trim();
+            let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
+            if is_ref {
+                resolve_bytes(trimmed, inline, res)
+            } else {
+                std::fs::read(path).map(Bytes::from).unwrap_or_default()
+            }
         }
         BodyContent::Base64 { data } => {
             use base64::Engine;

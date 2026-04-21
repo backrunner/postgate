@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   useDebugStore,
   DebugSession,
@@ -48,36 +49,29 @@ export function DebugPage() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Toolbar */}
-      <div className="flex h-12 items-center gap-3 border-b px-4 bg-muted/10">
-        {/* Status indicator */}
-        <div className="flex items-center gap-2">
-          <Bug className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm font-medium">DevTools</span>
-        </div>
-
-        <div className="h-4 w-px bg-border mx-1" />
-
-        {/* Stats */}
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
-          <div className="flex items-center gap-1.5">
-            <span className={cn("h-2 w-2 rounded-full", status.is_running ? "bg-green-500" : "bg-muted-foreground/30")} />
-            <span>{status.is_running ? `Running on port ${status.port}` : "Not running"}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="font-medium text-foreground">{status.session_count}</span>
-            <span>sessions</span>
-          </div>
-        </div>
-
-        <div className="flex-1" />
-
+      {/* Unified page header */}
+      <PageHeader
+        icon={Bug}
+        title="DevTools"
+        subtitle={
+          <>
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className={cn("h-2 w-2 rounded-full", status.is_running ? "bg-green-500" : "bg-muted-foreground/30")} />
+              <span>{status.is_running ? `Running on port ${status.port}` : "Not running"}</span>
+            </div>
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">{status.session_count}</span>
+              <span>sessions</span>
+            </div>
+          </>
+        }
+      >
         {!status.is_running && (
           <div className="text-xs text-muted-foreground">
             Add a <code className="px-1 py-0.5 bg-muted rounded font-mono">debug://</code> rule to enable
           </div>
         )}
-      </div>
+      </PageHeader>
 
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">

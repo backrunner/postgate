@@ -172,6 +172,23 @@ impl Database {
         .await
         .ok();
 
+        // Values store (whistle-compatible reusable content referenced by rules
+        // via `{name}` or `` `{name}` ``). Flat global namespace; `/` inside a
+        // name is treated purely as a UI folder separator.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS values_store (
+                name TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Migration failed (values_store): {}", e)))?;
+
         Ok(())
     }
 
@@ -218,7 +235,8 @@ impl Database {
         let groups = rows
             .into_iter()
             .map(|row| {
-                let rules = crate::rules::parse_rules(&row.raw_content).unwrap_or_default();
+                let (rules, inline_values) =
+                    crate::rules::parse_rules_with_inline(&row.raw_content).unwrap_or_default();
                 RuleGroup {
                     id: row.id,
                     name: row.name,
@@ -228,6 +246,7 @@ impl Database {
                     raw_content: row.raw_content,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
+                    inline_values,
                 }
             })
             .collect();
@@ -244,6 +263,122 @@ impl Database {
             .map_err(|e| PostGateError::Storage(format!("Failed to delete rule group: {}", e)))?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    // ==================== Values Store Methods ====================
+
+    /// List all stored values (ordered by name).
+    pub async fn list_values(&self) -> Result<Vec<crate::values::ValueEntry>> {
+        let rows = sqlx::query_as::<_, ValueRow>(
+            "SELECT name, content, created_at, updated_at FROM values_store ORDER BY name ASC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Failed to fetch values: {}", e)))?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Fetch a single value by name.
+    pub async fn get_value(&self, name: &str) -> Result<Option<crate::values::ValueEntry>> {
+        let row = sqlx::query_as::<_, ValueRow>(
+            "SELECT name, content, created_at, updated_at FROM values_store WHERE name = ?"
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Failed to fetch value: {}", e)))?;
+
+        Ok(row.map(Into::into))
+    }
+
+    /// Insert or replace a value; returns the persisted row.
+    pub async fn upsert_value(
+        &self,
+        name: &str,
+        content: &str,
+    ) -> Result<crate::values::ValueEntry> {
+        let now = chrono::Utc::now().timestamp_millis();
+
+        // Preserve created_at if the row already exists.
+        let created_at = match self.get_value(name).await? {
+            Some(existing) => existing.created_at,
+            None => now,
+        };
+
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO values_store (name, content, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            "#,
+        )
+        .bind(name)
+        .bind(content)
+        .bind(created_at)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Failed to save value: {}", e)))?;
+
+        Ok(crate::values::ValueEntry {
+            name: name.to_string(),
+            content: content.to_string(),
+            created_at,
+            updated_at: now,
+        })
+    }
+
+    /// Delete a value by name; returns true if a row was removed.
+    pub async fn delete_value(&self, name: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM values_store WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Failed to delete value: {}", e)))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Rename a value. Fails if `new_name` already exists.
+    pub async fn rename_value(
+        &self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<crate::values::ValueEntry> {
+        if old_name == new_name {
+            return self
+                .get_value(old_name)
+                .await?
+                .ok_or_else(|| PostGateError::Storage(format!("Value '{}' not found", old_name)));
+        }
+
+        if self.get_value(new_name).await?.is_some() {
+            return Err(PostGateError::Storage(format!(
+                "Value '{}' already exists",
+                new_name
+            )));
+        }
+
+        let existing = self
+            .get_value(old_name)
+            .await?
+            .ok_or_else(|| PostGateError::Storage(format!("Value '{}' not found", old_name)))?;
+
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query("UPDATE values_store SET name = ?, updated_at = ? WHERE name = ?")
+            .bind(new_name)
+            .bind(now)
+            .bind(old_name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Failed to rename value: {}", e)))?;
+
+        Ok(crate::values::ValueEntry {
+            name: new_name.to_string(),
+            content: existing.content,
+            created_at: existing.created_at,
+            updated_at: now,
+        })
     }
 
     // ==================== Collection Methods ====================
@@ -589,4 +724,23 @@ fn parse_saved_request(row: SavedRequestRow) -> Option<SavedRequest> {
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
+}
+
+#[derive(sqlx::FromRow)]
+struct ValueRow {
+    name: String,
+    content: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+impl From<ValueRow> for crate::values::ValueEntry {
+    fn from(row: ValueRow) -> Self {
+        crate::values::ValueEntry {
+            name: row.name,
+            content: row.content,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
 }

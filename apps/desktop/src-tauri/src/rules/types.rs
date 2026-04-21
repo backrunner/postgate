@@ -20,6 +20,12 @@ pub struct RuleGroup {
     pub raw_content: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Inline `{name}` value definitions declared inside this group's raw
+    /// content via fenced ```` ``` name\n…\n``` ```` blocks.
+    /// Whistle-compatible: inline definitions take precedence over the
+    /// global Values store during resolution.
+    #[serde(default)]
+    pub inline_values: HashMap<String, String>,
 }
 
 /// A single proxy rule

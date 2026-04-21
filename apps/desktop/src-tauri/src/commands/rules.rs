@@ -1,5 +1,5 @@
 use crate::error::Result;
-use crate::rules::{parse_rules as parse_rules_internal, Rule, RuleGroup};
+use crate::rules::{parse_rules as parse_rules_internal, parse_rules_with_inline, Rule, RuleGroup};
 use crate::state::AppState;
 use serde::Serialize;
 use std::sync::Arc;
@@ -51,8 +51,8 @@ pub async fn save_rule_group(
 ) -> Result<RuleGroup> {
     let now = chrono::Utc::now().timestamp_millis();
 
-    // Parse rules from raw content
-    let rules = parse_rules_internal(&group.raw_content)?;
+    // Parse rules + inline values from raw content.
+    let (rules, inline_values) = parse_rules_with_inline(&group.raw_content)?;
 
     let group = RuleGroup {
         id: if group.id.is_empty() {
@@ -71,6 +71,7 @@ pub async fn save_rule_group(
             group.created_at
         },
         updated_at: now,
+        inline_values,
     };
 
     // Update in-memory engine

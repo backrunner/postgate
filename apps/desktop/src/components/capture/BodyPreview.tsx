@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from 'react';
-import { Copy, Download, Image, FileText, Code, Eye, EyeOff, ChevronRight, ChevronDown } from 'lucide-react';
+import { Copy, Download, Image, FileText, Code, Eye, EyeOff, ChevronRight, ChevronDown, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn, formatBytes } from '@/lib/utils';
@@ -13,13 +13,32 @@ interface BodyPreviewProps {
 
 type ViewMode = 'pretty' | 'raw' | 'preview' | 'hex';
 
+/**
+ * Size ceilings for body rendering. Anything above these falls back to a
+ * "too large — download instead" placeholder so the UI thread doesn't lock
+ * up decoding / syntax-highlighting / JSON-parsing megabytes of text.
+ *
+ * - `TEXT_DECODE_LIMIT`: above this we don't even call TextDecoder.
+ * - `JSON_PARSE_LIMIT`: above this we don't JSON.parse (tree view is skipped
+ *   and the user sees a truncated Raw view instead).
+ * - `HIGHLIGHT_LIMIT`: above this we skip syntax highlighting and show a
+ *   truncated plain-text view.
+ * - `RENDER_LIMIT`: hard truncation point used by the plain-text view.
+ */
+const TEXT_DECODE_LIMIT = 10 * 1024 * 1024; // 10 MB
+const JSON_PARSE_LIMIT = 2 * 1024 * 1024; // 2 MB
+const HIGHLIGHT_LIMIT = 512 * 1024; // 512 KB
+const RENDER_LIMIT = 100 * 1024; // 100 KB visible at a time
+
 export function BodyPreview({ body, contentType, loading, className }: BodyPreviewProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('pretty');
   const [wordWrap, setWordWrap] = useState(true);
+  /** User override: render anyway even if the body is above the decode limit. */
+  const [forceRender, setForceRender] = useState(false);
 
   const contentInfo = useMemo(() => {
     if (!body || body.length === 0) {
-      return { type: 'empty', text: null, parsed: null };
+      return { type: 'empty' as const, text: null, parsed: null };
     }
 
     const isImage = contentType?.startsWith('image/');
@@ -30,6 +49,15 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
     const isJs = contentType?.includes('javascript') || contentType?.includes('ecmascript');
     const isText = contentType?.startsWith('text/') || isJson || isHtml || isXml || isCss || isJs;
 
+    // Too large to decode — bail out before touching the main thread.
+    const tooLargeToDecode = body.length > TEXT_DECODE_LIMIT && !forceRender;
+    if (tooLargeToDecode) {
+      if (isImage) {
+        return { type: 'image' as const, text: null, parsed: null, mimeType: contentType };
+      }
+      return { type: 'too-large' as const, text: null, parsed: null };
+    }
+
     // Try to decode as text
     let text: string | null = null;
     let parsed: unknown = null;
@@ -37,9 +65,11 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
     if (isText || !contentType) {
       try {
         text = new TextDecoder().decode(body);
-        
-        // Try to parse JSON
-        if (isJson || (!contentType && text.trim().startsWith('{'))) {
+
+        // Only JSON-parse if under the parse budget — big JSON blobs will
+        // be shown as raw text and the Pretty tree view is skipped.
+        const jsonBudget = body.length <= JSON_PARSE_LIMIT;
+        if (jsonBudget && (isJson || (!contentType && text.trim().startsWith('{')))) {
           try {
             parsed = JSON.parse(text);
           } catch {
@@ -52,35 +82,35 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
     }
 
     if (isImage) {
-      return { type: 'image', text: null, parsed: null, mimeType: contentType };
+      return { type: 'image' as const, text: null, parsed: null, mimeType: contentType };
     }
 
     if (parsed) {
-      return { type: 'json', text, parsed };
+      return { type: 'json' as const, text, parsed };
     }
 
     if (isHtml) {
-      return { type: 'html', text, parsed: null };
+      return { type: 'html' as const, text, parsed: null };
     }
 
     if (isXml) {
-      return { type: 'xml', text, parsed: null };
+      return { type: 'xml' as const, text, parsed: null };
     }
 
     if (isCss) {
-      return { type: 'css', text, parsed: null };
+      return { type: 'css' as const, text, parsed: null };
     }
 
     if (isJs) {
-      return { type: 'javascript', text, parsed: null };
+      return { type: 'javascript' as const, text, parsed: null };
     }
 
     if (text) {
-      return { type: 'text', text, parsed: null };
+      return { type: 'text' as const, text, parsed: null };
     }
 
-    return { type: 'binary', text: null, parsed: null };
-  }, [body, contentType]);
+    return { type: 'binary' as const, text: null, parsed: null };
+  }, [body, contentType, forceRender]);
 
   const copyToClipboard = () => {
     if (contentInfo.text) {
@@ -166,7 +196,13 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
       </div>
 
       {/* Content */}
-      {contentInfo.type === 'image' ? (
+      {contentInfo.type === 'too-large' ? (
+        <TooLargeNotice
+          size={body.length}
+          onDownload={downloadBody}
+          onForceRender={() => setForceRender(true)}
+        />
+      ) : contentInfo.type === 'image' ? (
         <ImagePreview body={body} mimeType={contentInfo.mimeType || undefined} />
       ) : contentInfo.type === 'binary' ? (
         <BinaryPreview body={body} />
@@ -466,8 +502,9 @@ function escapeString(str: string): string {
 
 // HTML syntax highlighting
 function HtmlHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
+  const { slice, truncated } = truncateForHighlight(code);
   const highlighted = useMemo(() => {
-    return code
+    return slice
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -479,7 +516,7 @@ function HtmlHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) 
       .replace(/"([^"]*)"/g, '<span class="text-emerald-500">"$1"</span>')
       // Comments
       .replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span class="text-zinc-500">$1</span>');
-  }, [code]);
+  }, [slice]);
 
   return (
     <pre className={cn(
@@ -487,6 +524,7 @@ function HtmlHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) 
       wordWrap && 'whitespace-pre-wrap break-all'
     )}>
       <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+      {truncated && <TruncationMarker originalSize={code.length} />}
     </pre>
   );
 }
@@ -498,8 +536,9 @@ function XmlHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
 
 // CSS syntax highlighting
 function CssHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
+  const { slice, truncated } = truncateForHighlight(code);
   const highlighted = useMemo(() => {
-    return escapeHtml(code)
+    return escapeHtml(slice)
       // Selectors
       .replace(/([\w\-.#[\]="':,\s]+)\s*\{/g, '<span class="text-amber-500">$1</span>{')
       // Properties
@@ -508,7 +547,7 @@ function CssHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
       .replace(/:\s*([^;{}]+)/g, ': <span class="text-emerald-500">$1</span>')
       // Comments
       .replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="text-zinc-500">$1</span>');
-  }, [code]);
+  }, [slice]);
 
   return (
     <pre className={cn(
@@ -516,34 +555,36 @@ function CssHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
       wordWrap && 'whitespace-pre-wrap break-all'
     )}>
       <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+      {truncated && <TruncationMarker originalSize={code.length} />}
     </pre>
   );
 }
 
 // JavaScript syntax highlighting
 function JsHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
+  const { slice, truncated } = truncateForHighlight(code);
   const highlighted = useMemo(() => {
     const keywords = ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'extends', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined'];
-    
-    let result = escapeHtml(code);
-    
+
+    let result = escapeHtml(slice);
+
     // Keywords
     keywords.forEach(kw => {
       result = result.replace(new RegExp(`\\b(${kw})\\b`, 'g'), '<span class="text-purple-500">$1</span>');
     });
-    
+
     // Strings
     result = result.replace(/(["'`])(?:(?!\1)[^\\]|\\.)*\1/g, '<span class="text-emerald-500">$&</span>');
-    
+
     // Numbers
     result = result.replace(/\b(\d+\.?\d*)\b/g, '<span class="text-amber-500">$1</span>');
-    
+
     // Comments
     result = result.replace(/(\/\/[^\n]*)/g, '<span class="text-zinc-500">$1</span>');
     result = result.replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="text-zinc-500">$1</span>');
 
     return result;
-  }, [code]);
+  }, [slice]);
 
   return (
     <pre className={cn(
@@ -551,14 +592,15 @@ function JsHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
       wordWrap && 'whitespace-pre-wrap break-all'
     )}>
       <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+      {truncated && <TruncationMarker originalSize={code.length} />}
     </pre>
   );
 }
 
 // Plain text display
 function PlainText({ text, wordWrap }: { text: string; wordWrap: boolean }) {
-  const truncated = text.length > 100000;
-  const displayText = truncated ? text.slice(0, 100000) : text;
+  const truncated = text.length > RENDER_LIMIT;
+  const displayText = truncated ? text.slice(0, RENDER_LIMIT) : text;
 
   return (
     <pre className={cn(
@@ -566,11 +608,7 @@ function PlainText({ text, wordWrap }: { text: string; wordWrap: boolean }) {
       wordWrap && 'whitespace-pre-wrap break-all'
     )}>
       {displayText}
-      {truncated && (
-        <span className="text-muted-foreground block mt-2">
-          ... (truncated, showing first 100KB)
-        </span>
-      )}
+      {truncated && <TruncationMarker originalSize={text.length} />}
     </pre>
   );
 }
@@ -675,6 +713,64 @@ function escapeHtml(text: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+/**
+ * Trim text before syntax highlighting to avoid running regex replacers
+ * across megabytes of input on the main thread.
+ */
+function truncateForHighlight(text: string): { slice: string; truncated: boolean } {
+  if (text.length <= HIGHLIGHT_LIMIT) {
+    return { slice: text, truncated: false };
+  }
+  return { slice: text.slice(0, HIGHLIGHT_LIMIT), truncated: true };
+}
+
+/** Tail marker shown at the bottom of a truncated preview. */
+function TruncationMarker({ originalSize }: { originalSize: number }) {
+  return (
+    <span className="text-muted-foreground block mt-2 pt-2 border-t border-border/50">
+      … truncated — full size {formatBytes(originalSize)}. Use the Download
+      button above to save the complete body.
+    </span>
+  );
+}
+
+/**
+ * Placeholder shown when the response body is too large to decode safely on
+ * the main thread. Offers a one-click download and an escape hatch to force
+ * render (at the user's own risk).
+ */
+function TooLargeNotice({
+  size,
+  onDownload,
+  onForceRender,
+}: {
+  size: number;
+  onDownload: () => void;
+  onForceRender: () => void;
+}) {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+      <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-amber-500/10 mb-4">
+        <AlertTriangle className="h-6 w-6 text-amber-500" />
+      </div>
+      <h3 className="font-medium text-sm mb-1">Response Too Large to Preview</h3>
+      <p className="text-xs text-muted-foreground max-w-sm mb-4">
+        This response is {formatBytes(size)}. Rendering it inline would freeze
+        the UI, so the preview is disabled.
+      </p>
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={onDownload} className="gap-1.5">
+          <Download className="h-3.5 w-3.5" />
+          Download
+        </Button>
+        <Button size="sm" variant="outline" onClick={onForceRender}>
+          Preview anyway
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function getExtension(contentType: string | null): string {

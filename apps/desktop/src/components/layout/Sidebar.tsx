@@ -2,6 +2,7 @@ import { NavLink, useLocation } from "react-router-dom";
 import {
   Activity,
   FileCode,
+  Database,
   Send,
   Bug,
   Puzzle,
@@ -24,6 +25,7 @@ interface NavItem {
 const mainNavItems: NavItem[] = [
   { to: "/capture", icon: Activity, label: "Capture" },
   { to: "/rules", icon: FileCode, label: "Rules" },
+  { to: "/values", icon: Database, label: "Values" },
   { to: "/replay", icon: Send, label: "Replay" },
   { to: "/debug", icon: Bug, label: "Debug" },
   { to: "/plugins", icon: Puzzle, label: "Plugins" },

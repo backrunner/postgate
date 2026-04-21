@@ -2,8 +2,8 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { FileCode, Plus, Save, Undo2, ChevronLeft, ChevronRight, Search, CheckCircle, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { PageHeader } from '@/components/layout/PageHeader';
 import {
   Dialog,
   DialogContent,
@@ -136,59 +136,56 @@ export function RulesPage() {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      {/* Toolbar */}
-      <div className="flex h-12 items-center justify-between border-b px-4">
-        <div className="flex items-center gap-3">
-          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Rules</h2>
-          {selectedGroup && (
+      {/* Unified page header */}
+      <PageHeader
+        icon={FileCode}
+        title="Rules"
+        subtitle={
+          selectedGroup && (
             <>
-              <Separator orientation="vertical" className="h-6" />
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium">{selectedGroup.name}</span>
-                {isDirty && (
-                  <span className="text-xs text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded font-medium">Unsaved</span>
-                )}
-              </div>
+              <span className="font-medium truncate">{selectedGroup.name}</span>
+              {isDirty && (
+                <span className="text-xs text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded font-medium">Unsaved</span>
+              )}
             </>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          {selectedGroupId && (
-            <>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                    onClick={discardChanges}
-                    disabled={!isDirty}
-                  >
-                    <Undo2 className="h-3.5 w-3.5" />
-                    Discard
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Discard changes</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={isDirty ? "default" : "outline"}
-                    size="sm"
-                    className={cn("h-8 px-3 gap-1.5 text-xs transition-all", isDirty ? "shadow-sm" : "text-muted-foreground")}
-                    onClick={handleSave}
-                    disabled={!isDirty}
-                  >
-                    <Save className="h-3.5 w-3.5" />
-                    Save
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Save changes (Cmd+S)</TooltipContent>
-              </Tooltip>
-            </>
-          )}
-        </div>
-      </div>
+          )
+        }
+      >
+        {selectedGroupId && (
+          <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={discardChanges}
+                  disabled={!isDirty}
+                >
+                  <Undo2 className="h-3.5 w-3.5" />
+                  Discard
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Discard changes</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant={isDirty ? "default" : "outline"}
+                  size="sm"
+                  className={cn("h-8 px-3 gap-1.5 text-xs transition-all", isDirty ? "shadow-sm" : "text-muted-foreground")}
+                  onClick={handleSave}
+                  disabled={!isDirty}
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  Save
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Save changes (Cmd+S)</TooltipContent>
+            </Tooltip>
+          </>
+        )}
+      </PageHeader>
 
       {/* Content */}
       <div className="flex flex-1 overflow-hidden">

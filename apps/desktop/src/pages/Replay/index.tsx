@@ -48,6 +48,7 @@ import {
   RequestBody,
   RequestHistory,
 } from "@/stores/replay";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { cn, getMethodClass, getStatusClass, formatDuration, formatBytes } from "@/lib/utils";
 
 export function ReplayPage() {
@@ -125,10 +126,14 @@ export function ReplayPage() {
   };
 
   return (
-    <div className="flex h-full bg-background">
+    <div className="flex h-full flex-col bg-background">
+      {/* Unified page header */}
+      <PageHeader icon={Send} title="Replay" />
+
+      <div className="flex flex-1 overflow-hidden">
       {/* Sidebar - Collections */}
       <div className="w-60 border-r flex flex-col bg-muted/10">
-        <div className="flex h-12 items-center justify-between border-b px-3 bg-muted/10">
+        <div className="flex h-10 items-center justify-between border-b px-3 bg-muted/10">
           <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Collections</h2>
           <div className="flex items-center gap-0.5">
             <Button 
@@ -503,6 +508,7 @@ export function ReplayPage() {
             </div>
           </div>
         )}
+      </div>
       </div>
     </div>
   );

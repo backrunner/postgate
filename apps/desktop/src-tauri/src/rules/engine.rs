@@ -2,6 +2,7 @@ use super::types::{Rule, RuleAction, RuleGroup};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Rule engine for matching and applying rules
 pub struct RuleEngine {
@@ -15,6 +16,9 @@ pub struct RuleEngine {
 struct CompiledRule {
     rule: Rule,
     group_enabled: bool,
+    /// Shared reference to the owning group's inline value definitions.
+    /// `Arc` so cloning into a `MatchedRule` is cheap.
+    inline_values: Arc<HashMap<String, String>>,
 }
 
 /// Result of matching a rule, includes the rule and match details
@@ -23,6 +27,10 @@ pub struct MatchedRule {
     pub rule: Rule,
     /// The remaining path after the matched prefix (for whistle-compatible path forwarding)
     pub remaining_path: String,
+    /// Inline `{name}` definitions from the matched rule's group, used by the
+    /// applicator to resolve value references. An empty map if the group has
+    /// no inline definitions.
+    pub inline_values: Arc<HashMap<String, String>>,
 }
 
 impl RuleEngine {
@@ -79,10 +87,12 @@ impl RuleEngine {
         groups.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         for group in groups {
+            let inline = Arc::new(group.inline_values.clone());
             for rule in &group.rules {
                 compiled.push(CompiledRule {
                     rule: rule.clone(),
                     group_enabled: group.enabled,
+                    inline_values: Arc::clone(&inline),
                 });
             }
         }
@@ -184,6 +194,7 @@ impl RuleEngine {
                 Some(MatchedRule {
                     rule: cr.rule.clone(),
                     remaining_path,
+                    inline_values: Arc::clone(&cr.inline_values),
                 })
             })
             .collect()
@@ -221,6 +232,7 @@ mod tests {
             raw_content: String::new(),
             created_at: 0,
             updated_at: 0,
+            inline_values: HashMap::new(),
         }
     }
 

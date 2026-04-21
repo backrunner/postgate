@@ -1,4 +1,4 @@
-import { Play, Trash2, Filter, Search, X, Download, Upload, Square, Copy, Check, AlertCircle, XCircle } from "lucide-react";
+import { Play, Trash2, Filter, Search, X, Download, Upload, Square, Copy, Check, AlertCircle, XCircle, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -111,7 +111,15 @@ export function Toolbar() {
           </Button>
         </div>
       )}
-      <div className="flex h-10 items-center gap-2 px-3">
+      <div className="flex h-12 items-center gap-2 px-4">
+        {/* Page identity — matches PageHeader treatment on other pages */}
+        <div className="flex items-center gap-2 shrink-0">
+          <Activity className="h-4 w-4 text-muted-foreground" />
+          <h1 className="text-sm font-semibold">Capture</h1>
+        </div>
+
+        <Separator orientation="vertical" className="h-5 mx-1" />
+
         {/* Proxy Start/Stop */}
         <Button
           variant="outline"

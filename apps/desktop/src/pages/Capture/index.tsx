@@ -18,6 +18,7 @@ export function CapturePage() {
 
   return (
     <div className="flex h-full flex-col">
+      {/* Unified header (title + proxy controls + filters live together) */}
       <Toolbar />
       <div className="flex flex-1 overflow-hidden">
         {/* Request List */}

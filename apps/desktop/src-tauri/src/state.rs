@@ -4,6 +4,7 @@ use crate::plugin::PluginManager;
 use crate::proxy::{BodyStorage, ProxyServer};
 use crate::rules::RuleEngine;
 use crate::storage::{CapturedRequestStorage, Database};
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +23,12 @@ pub struct AppState {
     pub plugin_manager: tokio::sync::RwLock<PluginManager>,
     pub plugins_dir: PathBuf,
     pub data_dir: PathBuf,
+    /// In-memory values store (whistle-compatible `{name}` references).
+    /// Populated lazily from SQLite on first access; kept in sync by the
+    /// values commands.
+    pub values_store: Arc<DashMap<String, String>>,
+    /// Whether `values_store` has been populated from the database yet.
+    values_loaded: AtomicBool,
     database: tokio::sync::RwLock<Option<std::sync::Arc<Database>>>,
     debug_server: tokio::sync::RwLock<Option<Arc<DebugServer>>>,
     debug_session_manager: Arc<SessionManager>,
@@ -52,6 +59,8 @@ impl AppState {
             plugin_manager: tokio::sync::RwLock::new(plugin_manager),
             plugins_dir,
             data_dir,
+            values_store: Arc::new(DashMap::new()),
+            values_loaded: AtomicBool::new(false),
             database: tokio::sync::RwLock::new(None),
             debug_server: tokio::sync::RwLock::new(None),
             debug_session_manager,
@@ -82,9 +91,24 @@ impl AppState {
         Ok(db)
     }
 
+    /// Ensure the in-memory values store is populated from the database.
+    /// Safe to call multiple times; subsequent calls are cheap.
+    pub async fn ensure_values_loaded(&self) -> crate::error::Result<()> {
+        if self.values_loaded.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let db = self.get_database().await?;
+        let entries = db.list_values().await?;
+        self.values_store.clear();
+        for entry in entries {
+            self.values_store.insert(entry.name, entry.content);
+        }
+        self.values_loaded.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Get or initialize captured request storage
-    pub async fn get_captured_storage(&self) -> crate::error::Result<Arc<CapturedRequestStorage>> {
-        // Check if already initialized
+    pub async fn get_captured_storage(&self) -> crate::error::Result<Arc<CapturedRequestStorage>> {        // Check if already initialized
         {
             let guard = self.captured_storage.read().await;
             if let Some(ref storage) = *guard {

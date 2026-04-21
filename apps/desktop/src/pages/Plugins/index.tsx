@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { PageHeader } from "@/components/layout/PageHeader";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -89,36 +90,33 @@ export function PluginsPage() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Toolbar */}
-      <div className="flex h-10 items-center justify-between border-b px-4">
-        <h2 className="text-sm font-semibold">Plugins</h2>
-        <div className="flex items-center gap-2">
-          <Button 
-            variant="outline" 
-            size="sm" 
-            className="gap-1"
-            onClick={handleDiscover}
-            disabled={isLoading}
-          >
-            {isLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <RefreshCw className="h-4 w-4" />
-            )}
-            Scan
-          </Button>
-          <Button 
-            variant="outline" 
-            size="sm" 
-            className="gap-1"
-            onClick={openPluginsDir}
-            title={pluginsDir || 'Plugins directory'}
-          >
-            <FolderOpen className="h-4 w-4" />
-            Open Folder
-          </Button>
-        </div>
-      </div>
+      {/* Unified page header */}
+      <PageHeader icon={Puzzle} title="Plugins">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          onClick={handleDiscover}
+          disabled={isLoading}
+        >
+          {isLoading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3.5 w-3.5" />
+          )}
+          Scan
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          onClick={openPluginsDir}
+          title={pluginsDir || 'Plugins directory'}
+        >
+          <FolderOpen className="h-3.5 w-3.5" />
+          Open Folder
+        </Button>
+      </PageHeader>
 
       {/* Error Banner */}
       {error && (

@@ -35,6 +35,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { cn } from "@/lib/utils";
 
 export function SettingsPage() {
@@ -108,13 +109,8 @@ export function SettingsPage() {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      {/* Header */}
-      <div className="flex h-12 items-center justify-between border-b px-6 bg-muted/10">
-        <div className="flex items-center gap-2">
-          <Settings className="h-4 w-4 text-muted-foreground" />
-          <h1 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Settings</h1>
-        </div>
-      </div>
+      {/* Unified page header */}
+      <PageHeader icon={Settings} title="Settings" />
 
       <ScrollArea className="flex-1">
         <div className="max-w-3xl mx-auto py-8 px-6 space-y-6">

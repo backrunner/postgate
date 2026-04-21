@@ -3,8 +3,11 @@ use crate::error::{PostGateError, Result};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
-use crate::rules::{apply_request_rules, apply_response_rules};
+use crate::rules::{
+    apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
+};
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
+use crate::values::RequestCtx;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
@@ -141,13 +144,33 @@ async fn handle_https_request(
     ctx.body_storage.store_request_body(&request_id, request_body.clone()).await;
     ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
 
+    // Build resolver context for whistle `{name}` references.
+    let _ = ctx.app_state.ensure_values_loaded().await;
+    let query_map = super::handler::tunnel_value_helpers::query_map(&url);
+    let cookie_map = super::handler::tunnel_value_helpers::cookie_map(&request_headers);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let values_ctx = RequestCtx {
+        url: &url,
+        method: &method_str,
+        client_ip: "",
+        req_headers: &request_headers,
+        query: &query_map,
+        req_cookies: &cookie_map,
+        now_ms,
+    };
+    let resolve_ctx = ResolveCtx {
+        store: Some(&ctx.app_state.values_store),
+        ctx: Some(&values_ctx),
+    };
+
     // Apply request rules to get modifications
-    let request_modification = apply_request_rules(
+    let request_modification = apply_request_rules_with_values(
         &matched_rules,
         &url,
         &method_str,
         &request_headers,
         Some(&request_body.data),
+        &resolve_ctx,
     );
 
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
@@ -187,7 +210,14 @@ async fn handle_https_request(
         });
 
         let mut builder = Response::builder().status(short_circuit.status);
-        for (k, v) in &short_circuit.headers {
+        let mut sc_headers = short_circuit.headers.clone();
+        sc_headers.remove("content-encoding");
+        sc_headers.remove("transfer-encoding");
+        sc_headers.insert(
+            "content-length".to_string(),
+            short_circuit.body.len().to_string(),
+        );
+        for (k, v) in &sc_headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
         return Ok(builder
@@ -238,7 +268,7 @@ async fn handle_https_request(
             let response_content_type = response_headers.get("content-type").cloned();
             
             // Apply response rules
-            let response_modification = apply_response_rules(
+            let response_modification = apply_response_rules_with_values(
                 &matched_rules,
                 &url,
                 &method_str,
@@ -246,11 +276,25 @@ async fn handle_https_request(
                 &response_headers,
                 Some(&response_body.data),
                 response_content_type.as_deref(),
+                &resolve_ctx,
             );
 
             let final_body = response_modification.body.unwrap_or(response_body.data.clone());
             let final_status = response_modification.status_code.unwrap_or(status);
-            
+
+            // Fix content-length/encoding if the body was replaced, otherwise
+            // the browser sees a stale Content-Length and aborts the response
+            // (ERR_EMPTY_RESPONSE).
+            let mut final_headers = response_modification.headers.clone();
+            if final_body != response_body.data {
+                final_headers.remove("content-encoding");
+                final_headers.remove("transfer-encoding");
+                final_headers.insert(
+                    "content-length".to_string(),
+                    final_body.len().to_string(),
+                );
+            }
+
             let response_size = final_body.len() as u64;
             let duration = start_time.elapsed().as_millis() as u64;
 
@@ -275,7 +319,7 @@ async fn handle_https_request(
                     path,
                     request_headers: Some(request_headers),
                     response_status: Some(final_status),
-                    response_headers: Some(response_modification.headers.clone()),
+                    response_headers: Some(final_headers.clone()),
                     duration_ms: Some(duration),
                     matched_rules: matched_rule_ids,
                     protocol: "https".to_string(),
@@ -289,7 +333,7 @@ async fn handle_https_request(
 
             // Build final response
             let mut builder = Response::builder().status(final_status);
-            for (k, v) in &response_modification.headers {
+            for (k, v) in &final_headers {
                 if let (Ok(name), Ok(value)) = (
                     hyper::header::HeaderName::from_bytes(k.as_bytes()),
                     hyper::header::HeaderValue::from_str(v),

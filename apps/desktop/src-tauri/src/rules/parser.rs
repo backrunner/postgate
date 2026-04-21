@@ -26,13 +26,31 @@ use uuid::Uuid;
 
 /// Parse whistle-compatible rules from text
 pub fn parse_rules(content: &str) -> Result<Vec<Rule>> {
-    let mut rules = Vec::new();
+    parse_rules_with_inline(content).map(|(rules, _)| rules)
+}
 
-    for (line_num, line) in content.lines().enumerate() {
+/// Parse rules AND inline value definitions from a rule-group's raw content.
+///
+/// Inline values are fenced blocks of the form:
+/// ```text
+/// ``` name
+/// body line 1
+/// body line 2
+/// ```
+/// ```
+/// The opening fence is three backticks followed by a name; the body runs
+/// until a matching closing fence of three backticks on its own line. These
+/// definitions have higher precedence than the global Values store
+/// (whistle v1.12.12+ behaviour).
+pub fn parse_rules_with_inline(content: &str) -> Result<(Vec<Rule>, HashMap<String, String>)> {
+    let (rule_lines, inline_values) = extract_inline_values(content);
+
+    let mut rules = Vec::new();
+    for (line_num, line) in rule_lines.lines().enumerate() {
         let line = line.trim();
 
-        // Skip empty lines and comments
-        // Whistle: only # starts a comment. // is NOT a comment (it's a no-schema pattern).
+        // Skip empty lines and comments.
+        // Whistle: only `#` starts a comment. `//` is NOT a comment (no-schema pattern).
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -50,7 +68,61 @@ pub fn parse_rules(content: &str) -> Result<Vec<Rule>> {
         }
     }
 
-    Ok(rules)
+    Ok((rules, inline_values))
+}
+
+/// Strip fenced ``` name\n…\n``` blocks from `content`, returning the cleaned
+/// rule text and a name→body map.
+fn extract_inline_values(content: &str) -> (String, HashMap<String, String>) {
+    let mut cleaned = String::with_capacity(content.len());
+    let mut values: HashMap<String, String> = HashMap::new();
+
+    let mut in_block = false;
+    let mut current_name = String::new();
+    let mut current_body = String::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_block {
+                // Closing fence: the payload becomes the value.
+                values.insert(current_name.clone(), current_body.clone());
+                current_name.clear();
+                current_body.clear();
+                in_block = false;
+                // Drop the closing fence from rule content.
+                continue;
+            } else {
+                // Opening fence: anything after the backticks is the name.
+                // Accept whistle plugin-namespace form ```whistle.plugin/name
+                let name = trimmed.trim_start_matches('`').trim();
+                if !name.is_empty() {
+                    current_name = name.to_string();
+                    current_body.clear();
+                    in_block = true;
+                    continue;
+                }
+                // Fence with no name → treat as literal rule content.
+            }
+        }
+
+        if in_block {
+            if !current_body.is_empty() {
+                current_body.push('\n');
+            }
+            current_body.push_str(line);
+        } else {
+            cleaned.push_str(line);
+            cleaned.push('\n');
+        }
+    }
+
+    // If the file ends mid-block, still capture what we have.
+    if in_block && !current_name.is_empty() {
+        values.insert(current_name, current_body);
+    }
+
+    (cleaned, values)
 }
 
 // =============================================================================

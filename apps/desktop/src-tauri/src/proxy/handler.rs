@@ -8,7 +8,8 @@ use crate::proxy::sse;
 use crate::proxy::websocket;
 use crate::proxy::BodyStorage;
 use crate::rules::{
-    apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx, RuleEngine,
+    apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
+    ResponseModification, RuleEngine,
 };
 use crate::state::{AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
@@ -393,8 +394,27 @@ async fn handle_request(
         .body(Full::new(modified_body).map_err(|_| unreachable!()).boxed())
         .unwrap();
 
-    // Forward request to upstream and check for SSE
-    let response = forward_http_request_check_sse(req, &request_id, &ctx).await;
+    // Forward request to upstream. If no matched rule needs the response body,
+    // we stream it straight back to the client — that makes TTFB match the
+    // upstream instead of `upstream_ttfb + full_body_download`.
+    let buffer_response_body = crate::rules::rules_require_response_body(&matched_rules);
+    tracing::trace!(
+        target: "postgate::perf",
+        "[{}] {} {} — {} matched rules, {}",
+        request_id,
+        method,
+        uri,
+        matched_rules.len(),
+        if buffer_response_body { "BUFFERING body" } else { "streaming body" }
+    );
+    let forward_start = std::time::Instant::now();
+    let response = forward_http_request_check_sse(req, &request_id, &ctx, buffer_response_body).await;
+    tracing::trace!(
+        target: "postgate::perf",
+        "[{}] upstream first byte after {:?}",
+        request_id,
+        forward_start.elapsed()
+    );
 
     match response {
         Ok(ForwardResult::Sse { parts, body, content_type }) => {
@@ -449,6 +469,85 @@ async fn handle_request(
             // Convert the wrapped body to BoxBody
             let boxed_body = wrapped_body.boxed();
             Ok(builder.body(boxed_body).unwrap())
+        }
+        Ok(ForwardResult::Streaming { parts, body }) => {
+            // Fast path: no matched rule rewrites the body, so stream straight
+            // through. The client's TTFB then matches the upstream's TTFB.
+            let status = parts.status.as_u16();
+            let upstream_headers: HashMap<String, String> = parts
+                .headers
+                .iter()
+                .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+
+            // Apply non-body response rules (headers, status, cookies,
+            // header-removes, delay). `response_modification.body` is
+            // guaranteed None here because we only took this path when no
+            // rule requires the body.
+            let response_content_type = upstream_headers.get("content-type").cloned();
+            let response_modification = apply_response_rules_with_values(
+                &matched_rules,
+                &uri,
+                &method,
+                &request_headers,
+                &upstream_headers,
+                None,
+                response_content_type.as_deref(),
+                &resolve_ctx,
+            );
+
+            let final_status = response_modification.status_code.unwrap_or(status);
+            // Run the shared header finalization so cookies + removals land
+            // consistently across streaming and buffering paths.
+            let final_headers = super::passthrough::finalize_response_headers(
+                &upstream_headers,
+                &response_modification,
+                None,
+            );
+
+            // Apply response delay (resDelay://) before sending the first
+            // byte so the client observes the full TTFB penalty, not just
+            // the inter-chunk gap.
+            if let Some(delay_ms) = response_modification.delay_ms {
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            }
+
+            // Wrap body so we can capture bytes for the UI and emit the
+            // Completed event when the stream ends, without blocking delivery.
+            let wrapped = PassthroughCapturingBody::new(
+                body,
+                PassthroughMeta {
+                    request_id: request_id.clone(),
+                    timestamp,
+                    method: method.clone(),
+                    url: uri.clone(),
+                    host: host.clone(),
+                    path: path.clone(),
+                    request_headers: request_headers.clone(),
+                    response_status: final_status,
+                    response_headers: final_headers.clone(),
+                    matched_rules: matched_rule_ids.clone(),
+                    protocol: "http1".to_string(),
+                    content_type: response_content_type,
+                    request_size,
+                    start_time,
+                    persistence_enabled: ctx.app_state.is_persistence_enabled(),
+                    tls_version: None,
+                },
+                ctx.app_state.clone(),
+                ctx.body_storage.clone(),
+            );
+
+            let mut builder = Response::builder().status(final_status);
+            for (k, v) in &final_headers {
+                if let (Ok(name), Ok(value)) = (
+                    hyper::header::HeaderName::from_bytes(k.as_bytes()),
+                    hyper::header::HeaderValue::from_str(v),
+                ) {
+                    builder = builder.header(name, value);
+                }
+            }
+            Ok(builder.body(wrapped.boxed()).unwrap())
         }
         Ok(ForwardResult::Normal { response: resp, body: response_body }) => {
             let status = resp.status().as_u16();
@@ -546,36 +645,17 @@ async fn handle_request(
 
             // Use modified body and headers (plugin modifications take precedence)
             let mut final_body = plugin_modified_body
-                .or(response_modification.body)
+                .or(response_modification.body.clone())
                 .unwrap_or(response_body.data.clone());
-            let mut final_headers = plugin_modified_headers
-                .unwrap_or(response_modification.headers);
+            let headers_source = plugin_modified_headers.unwrap_or(response_modification.headers.clone());
 
-            // If the body was replaced/modified relative to what upstream
-            // sent, the upstream's `content-length` / `content-encoding` /
-            // `transfer-encoding` headers no longer describe the new body.
-            // Leaving them in place results in ERR_EMPTY_RESPONSE in the
-            // browser (content-length mismatch) or decoding errors when
-            // upstream sent gzip/br and we replaced it with plain text.
-            let body_was_modified = final_body != response_body.data;
-            if body_was_modified {
-                final_headers.remove("content-encoding");
-                final_headers.remove("transfer-encoding");
-                final_headers.insert(
-                    "content-length".to_string(),
-                    final_body.len().to_string(),
-                );
-            }
-
-            // Inject debug script if enabled
+            // Inject debug script if enabled (this changes the body).
             if response_modification.inject_debug {
                 let injector = ScriptInjector::new(9229); // Default debug port
                 if let Ok(html) = String::from_utf8(final_body.to_vec()) {
                     if !ScriptInjector::is_already_injected(&html) {
                         let injected = injector.inject_into_html(&html);
                         final_body = Bytes::from(injected);
-                        // Update content-length header
-                        final_headers.insert("content-length".to_string(), final_body.len().to_string());
                     }
                 }
             }
@@ -584,6 +664,31 @@ async fn handle_request(
             if let Some(speed_kbps) = response_modification.speed_kbps {
                 final_body = super::throttle::apply_throttle(final_body, Some(speed_kbps)).await;
             }
+
+            let body_was_modified = final_body != response_body.data;
+
+            // Finalize headers: apply `headers_to_remove`, fold in cookies,
+            // strip stale content-encoding/transfer-encoding and set
+            // content-length when the body was replaced. Uses the same
+            // helper as the streaming path so semantics match.
+            let mut modified_for_finalize = ResponseModification {
+                headers: headers_source,
+                headers_to_remove: response_modification.headers_to_remove.clone(),
+                cookies: response_modification.cookies.clone(),
+                ..Default::default()
+            };
+            // The helper only needs headers / removals / cookies to do its
+            // job; zero the rest.
+            modified_for_finalize.status_code = response_modification.status_code;
+            let final_headers = super::passthrough::finalize_response_headers(
+                &response_headers,
+                &modified_for_finalize,
+                if body_was_modified {
+                    Some(final_body.len())
+                } else {
+                    None
+                },
+            );
 
             let final_size = final_body.len() as u64;
 
@@ -598,6 +703,7 @@ async fn handle_request(
             ctx.app_state.persist_body(request_id.clone(), stored_body.data.clone(), false);
 
             let final_duration = start_time.elapsed().as_millis() as u64;
+            let final_status = response_modification.status_code.unwrap_or(status);
 
             // Emit completion event
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -611,7 +717,7 @@ async fn handle_request(
                     host,
                     path,
                     request_headers: Some(request_headers),
-                    response_status: Some(status),
+                    response_status: Some(final_status),
                     response_headers: Some(final_headers.clone()),
                     duration_ms: Some(final_duration),
                     matched_rules: matched_rule_ids,
@@ -624,7 +730,7 @@ async fn handle_request(
             });
 
             // Build final response with modified headers and body
-            let mut builder = Response::builder().status(status);
+            let mut builder = Response::builder().status(final_status);
             for (k, v) in &final_headers {
                 if let (Ok(name), Ok(value)) = (
                     hyper::header::HeaderName::from_bytes(k.as_bytes()),
@@ -737,24 +843,30 @@ async fn handle_connect(
         .unwrap())
 }
 
-/// Forward HTTP request and check if response is SSE
-/// Returns either (response, body) for normal responses or starts SSE streaming
+/// Forward HTTP request and decide how to handle the response.
+///
+/// When `buffer_body` is false AND the response isn't SSE, we return
+/// `ForwardResult::Streaming` with the hyper `Incoming` body intact — the
+/// caller wires it straight to the client, so TTFB matches the upstream.
+/// When `buffer_body` is true, the body is drained into memory so rule
+/// actions like `resBody://` and `htmlAppend://` can rewrite it.
 async fn forward_http_request_check_sse(
     req: Request<BoxBody<Bytes, hyper::Error>>,
     _request_id: &str,
     ctx: &Arc<ProxyContext>,
+    buffer_body: bool,
 ) -> std::result::Result<ForwardResult, Box<dyn std::error::Error + Send + Sync>> {
     // Use the shared, pooled upstream client. Building one per request would
     // discard the connection pool and force a fresh TCP + TLS handshake each
     // time, which dominated wall-clock time on page loads.
     let resp = ctx.upstream_client.request(req).await?;
-    
+
     // Check if this is an SSE response
     let content_type = resp.headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    
+
     if sse::is_sse_response(content_type.as_deref()) {
         // Return SSE info for streaming
         let (parts, body) = resp.into_parts();
@@ -764,13 +876,21 @@ async fn forward_http_request_check_sse(
             content_type,
         });
     }
-    
-    // Normal response - collect body
+
+    if !buffer_body {
+        // No matched rule needs the body bytes — stream through so the client
+        // gets the first byte as soon as the upstream sends it. This is the
+        // main lever for bringing TTFB in line with whistle.
+        let (parts, body) = resp.into_parts();
+        return Ok(ForwardResult::Streaming { parts, body });
+    }
+
+    // Buffering path: collect the body so we can run body-modifying rules.
     let (parts, body) = resp.into_parts();
     let incoming_body: Incoming = body;
     let captured_body = collect_body(incoming_body, MAX_BODY_SIZE).await?;
     let resp_without_body = Response::from_parts(parts, ());
-    
+
     Ok(ForwardResult::Normal {
         response: resp_without_body,
         body: captured_body,
@@ -789,6 +909,12 @@ enum ForwardResult {
         parts: hyper::http::response::Parts,
         body: Incoming,
         content_type: Option<String>,
+    },
+    /// Generic streaming pass-through: the body flows straight to the client
+    /// without buffering. Used when no matched rule rewrites the body.
+    Streaming {
+        parts: hyper::http::response::Parts,
+        body: Incoming,
     },
 }
 
@@ -1082,6 +1208,10 @@ impl Body for SseCapturingBody {
         self.inner.size_hint()
     }
 }
+
+// Passthrough streaming body lives in proxy/passthrough.rs — shared across
+// h1, h1-over-TLS and h2 code paths.
+use super::passthrough::{PassthroughCapturingBody, PassthroughMeta};
 
 /// Helpers reused by `tunnel.rs` for whistle `{name}` reference resolution.
 pub mod tunnel_value_helpers {

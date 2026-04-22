@@ -133,6 +133,66 @@ pub struct ResponseModification {
     pub inject_debug: bool,
 }
 
+/// Does the set of matched rules require buffering the upstream response body
+/// before sending to the client?
+///
+/// Returns false only when the rules touch nothing beyond headers / status /
+/// cookies — in that case we can stream the response straight through and
+/// the client's TTFB tracks the upstream's, not `upstream_latency +
+/// upstream_body_size / bandwidth`.
+pub fn rules_require_response_body(matched_rules: &[MatchedRule]) -> bool {
+    for matched in matched_rules {
+        if !matched.rule.enabled {
+            continue;
+        }
+        for action in &matched.rule.actions {
+            match action {
+                // Body replacement or injection.
+                RuleAction::ResponseBody { .. }
+                | RuleAction::HtmlBody { .. }
+                | RuleAction::CssBody { .. }
+                | RuleAction::JsBody { .. }
+                | RuleAction::ResponseReplace { .. }
+                | RuleAction::HtmlAppend { .. }
+                | RuleAction::HtmlPrepend { .. }
+                | RuleAction::JsAppend { .. }
+                | RuleAction::JsPrepend { .. }
+                | RuleAction::CssAppend { .. }
+                | RuleAction::CssPrepend { .. } => return true,
+                // Response throttling requires owning the body chunks.
+                RuleAction::Speed { response_kbps, .. } if response_kbps.is_some() => return true,
+                // Debug injects a <script> into HTML responses.
+                RuleAction::Debug { .. } => return true,
+                // Plugins may rewrite the response body in handleResponse.
+                RuleAction::Plugin { .. } => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Does the set of matched rules require buffering the client's request body
+/// before sending upstream? Same rationale as `rules_require_response_body`.
+pub fn rules_require_request_body(matched_rules: &[MatchedRule]) -> bool {
+    for matched in matched_rules {
+        if !matched.rule.enabled {
+            continue;
+        }
+        for action in &matched.rule.actions {
+            match action {
+                RuleAction::RequestBody { .. } | RuleAction::RequestReplace { .. } => {
+                    return true
+                }
+                RuleAction::Speed { request_kbps, .. } if request_kbps.is_some() => return true,
+                RuleAction::Plugin { .. } => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// Apply rules to a request and return modifications
 pub fn apply_request_rules(
     matched_rules: &[MatchedRule],

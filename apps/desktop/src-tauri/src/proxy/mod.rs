@@ -1,6 +1,7 @@
 mod body;
 mod forward;
 mod http2;
+mod passthrough;
 mod pool;
 mod server;
 mod handler;

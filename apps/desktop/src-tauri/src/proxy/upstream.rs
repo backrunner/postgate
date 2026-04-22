@@ -79,6 +79,25 @@ pub async fn forward_collect(
     Ok((Response::from_parts(parts, ()), captured))
 }
 
+/// Forward a request to an absolute URL and return the streaming response
+/// (parts + unconsumed body) so the caller can either collect or pass through.
+/// Used by the TTFB-optimized streaming path.
+pub async fn forward_stream(
+    client: &SharedClient,
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HashMap<String, String>,
+    body: Bytes,
+) -> Result<(hyper::http::response::Parts, hyper::body::Incoming)> {
+    let req = build_upstream_request(method, absolute_url, headers, body)?;
+    let resp = client
+        .request(req)
+        .await
+        .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+
+    Ok(resp.into_parts())
+}
+
 /// Build a boxed-body request targeting an absolute URL, filtering out
 /// hop-by-hop headers that confuse pooled HTTP/2 connections.
 fn build_upstream_request(

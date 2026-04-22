@@ -16,7 +16,6 @@ use tokio::sync::mpsc;
 /// Custom error type for plugin operations that implements JsErrorClass
 #[derive(Debug, thiserror::Error, JsError)]
 #[class(generic)]
-#[allow(dead_code)]
 pub enum PluginOpError {
     #[error("Storage error: {0}")]
     Storage(String),

@@ -8,9 +8,9 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 /// Application-wide shared state
 pub struct AppState {
@@ -35,6 +35,9 @@ pub struct AppState {
     // Captured request persistence
     captured_storage: tokio::sync::RwLock<Option<Arc<CapturedRequestStorage>>>,
     persistence_enabled: AtomicBool,
+    /// Async channel for offloading `app_handle.emit` + persistence off the
+    /// proxy hot path. Populated on first use via `ensure_emit_worker`.
+    emit_tx: OnceLock<mpsc::Sender<CapturedRequestEvent>>,
 }
 
 impl AppState {
@@ -66,6 +69,7 @@ impl AppState {
             debug_session_manager,
             captured_storage: tokio::sync::RwLock::new(None),
             persistence_enabled: AtomicBool::new(false),
+            emit_tx: OnceLock::new(),
         }
     }
 
@@ -153,68 +157,92 @@ impl AppState {
         Ok(ca)
     }
 
-    /// Emit a request event to the frontend and persist asynchronously
-    pub fn emit_request_event(&self, event: &CapturedRequestEvent) {
-        // Send via broadcast channel for internal use
-        let _ = self.request_tx.send(event.clone());
-
-        // Emit to frontend via Tauri
-        if let Err(e) = self.app_handle.emit("proxy:request", event) {
-            tracing::warn!("Failed to emit request event: {}", e);
+    /// Emit a request event to the frontend and persist asynchronously.
+    ///
+    /// The hot path (proxy code) does ONLY a non-blocking channel send here.
+    /// A dedicated background task deserializes + calls `app_handle.emit`
+    /// (which runs serde_json on the current thread + writes to the Tauri
+    /// IPC pipe) and then kicks off persistence. Doing this work inline used
+    /// to add milliseconds per request on busy pages (80+ resources each
+    /// emitting started + completed events).
+    pub fn emit_request_event(self: &Arc<Self>, event: &CapturedRequestEvent) {
+        // Broadcast for in-process subscribers — skip the clone cost if no
+        // one is listening (there are currently no subscribers in tree, but
+        // the API is retained for future use).
+        if self.request_tx.receiver_count() > 0 {
+            let _ = self.request_tx.send(event.clone());
         }
 
-        // Async persistence (only for completed events to avoid duplicates)
-        if self.is_persistence_enabled() {
-            let data = event.data.clone();
-            let data_dir = self.data_dir.clone();
-            let app_handle = self.app_handle.clone();
-            
-            tokio::spawn(async move {
-                if let Err(e) = Self::persist_request(app_handle, data_dir, data).await {
-                    tracing::warn!("Failed to persist captured request: {}", e);
+        let tx = self.ensure_emit_worker();
+        // try_send keeps the hot path non-blocking. If the worker is saturated
+        // (e.g. frontend paused), drop the event rather than back-pressure the
+        // proxy — the UI is informational, not critical correctness.
+        if let Err(e) = tx.try_send(event.clone()) {
+            match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    tracing::warn!("Emit worker queue full; dropping request event");
                 }
-            });
+                mpsc::error::TrySendError::Closed(_) => {
+                    tracing::warn!("Emit worker queue closed; cannot emit request event");
+                }
+            }
         }
     }
 
-    /// Persist a captured request to storage
-    async fn persist_request(
-        _app_handle: AppHandle,
-        data_dir: PathBuf,
-        data: CapturedRequestData,
-    ) -> crate::error::Result<()> {
-        // Get database path and create storage
-        let db_path = data_dir.join("postgate.db");
-        let db = Database::new(&db_path).await?;
-        let storage = CapturedRequestStorage::new(db.pool().clone(), &data_dir);
+    /// Start (lazily) the background task that drains the emit queue. One
+    /// task per `AppState`; returns the sender.
+    fn ensure_emit_worker(self: &Arc<Self>) -> &mpsc::Sender<CapturedRequestEvent> {
+        self.emit_tx.get_or_init(|| {
+            // Bounded queue so we don't grow memory unboundedly if the UI is
+            // slow to drain. 4096 is enough to buffer several seconds of
+            // high-rate capture on a typical page load.
+            let (tx, mut rx) = mpsc::channel::<CapturedRequestEvent>(4096);
+            let this = self.clone();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    if let Err(e) = this.app_handle.emit("proxy:request", &event) {
+                        tracing::warn!("Failed to emit request event: {}", e);
+                    }
+                    if this.is_persistence_enabled() {
+                        if let Err(e) = this.persist_request(event.data).await {
+                            tracing::warn!("Failed to persist captured request: {}", e);
+                        }
+                    }
+                }
+            });
+            tx
+        })
+    }
+
+    /// Persist a captured request to storage using the shared storage handle
+    /// (avoids opening a fresh SQLite pool + re-running migrations per request).
+    async fn persist_request(&self, data: CapturedRequestData) -> crate::error::Result<()> {
+        let storage = self.get_captured_storage().await?;
         storage.save_request(&data).await?;
         Ok(())
     }
 
     /// Persist body data asynchronously
-    pub fn persist_body(&self, request_id: String, body: bytes::Bytes, is_request: bool) {
+    pub fn persist_body(self: &Arc<Self>, request_id: String, body: bytes::Bytes, is_request: bool) {
         if !self.is_persistence_enabled() {
             return;
         }
 
-        let data_dir = self.data_dir.clone();
-
+        let this = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = Self::persist_body_internal(data_dir, request_id, body, is_request).await {
+            if let Err(e) = this.persist_body_internal(request_id, body, is_request).await {
                 tracing::warn!("Failed to persist body: {}", e);
             }
         });
     }
 
     async fn persist_body_internal(
-        data_dir: PathBuf,
+        &self,
         request_id: String,
         body: bytes::Bytes,
         is_request: bool,
     ) -> crate::error::Result<()> {
-        let db_path = data_dir.join("postgate.db");
-        let db = Database::new(&db_path).await?;
-        let storage = CapturedRequestStorage::new(db.pool().clone(), &data_dir);
+        let storage = self.get_captured_storage().await?;
         storage.save_body(&request_id, &body, is_request).await?;
         Ok(())
     }

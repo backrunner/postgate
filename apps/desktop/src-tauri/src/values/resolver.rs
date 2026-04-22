@@ -64,7 +64,6 @@ impl<'a> RequestCtx<'a> {
 ///   precedence than the global store, following whistle v1.12.12+ semantics)
 /// * `store` — the global in-memory values map
 /// * `ctx` — per-request variables used for template expansion
-#[allow(dead_code)]
 pub fn resolve(
     arg: &str,
     inline: &HashMap<String, String>,
@@ -87,29 +86,38 @@ pub fn resolve_str(
     }
 
     // Template form: leading and trailing backtick wrap a `{name}` ref.
+    //
+    // Value content is substituted VERBATIM — we do not run another pass of
+    // `{name}` expansion over it. If the content happens to contain brace
+    // sequences that look like references (e.g. JS/HTML/CSS source code),
+    // munging them would corrupt the payload and trigger things like
+    // `Unexpected token '}'` in the browser.
     let trimmed = arg.trim();
     if let Some(name) = trimmed
         .strip_prefix("`{")
         .and_then(|s| s.strip_suffix("}`"))
     {
         let raw = lookup(name, inline, store);
-        // Recursively resolve any nested refs, THEN run ${var} interpolation.
-        let resolved = resolve_nested_refs(&raw, inline, store, ctx, depth + 1);
-        return interpolate_template(&resolved, ctx);
+        return interpolate_template(&raw, ctx);
     }
 
     // Plain form: exact `{name}` wrapping the whole arg.
+    //
+    // Whistle semantics: return the stored content verbatim. Do NOT run
+    // `resolve_nested_refs` on it — otherwise JS code such as
+    // `const {foo} = obj` or `import {x} from 'y'` would be mis-parsed as a
+    // value reference and either expanded (wrong) or eaten (worse).
     if let Some(name) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
         // Guard against `{ ... { ... }` and arbitrary JSON payloads — only
         // value-name-shaped strings are treated as references.
         if !name.contains('{') && !name.contains('}') && is_valid_value_name(name) {
-            let raw = lookup(name, inline, store);
-            return resolve_nested_refs(&raw, inline, store, ctx, depth + 1);
+            return lookup(name, inline, store);
         }
     }
 
     // Also expand embedded `{name}` references inside larger strings (for
-    // cases like header values `"Bearer {token}"`).
+    // cases like header values `"Bearer {token}"`). One-shot: the substituted
+    // value is kept as literal text, we do not recurse into it.
     resolve_nested_refs(arg, inline, store, ctx, depth)
 }
 
@@ -126,11 +134,16 @@ fn lookup(name: &str, inline: &HashMap<String, String>, store: &DashMap<String, 
 
 /// Expand every `{name}` occurrence inside `input`. Skips `${...}` template
 /// vars (those are handled separately by [`interpolate_template`]).
+///
+/// Substitutions are inserted verbatim — we do NOT rescan them for more
+/// `{name}` patterns. That prevents JS / HTML / CSS payloads which happen to
+/// contain `{foo}` sequences (destructuring, imports, template strings) from
+/// being corrupted by spurious lookups.
 fn resolve_nested_refs(
     input: &str,
     inline: &HashMap<String, String>,
     store: &DashMap<String, String>,
-    ctx: &RequestCtx,
+    _ctx: &RequestCtx,
     depth: usize,
 ) -> String {
     if depth >= MAX_DEPTH {
@@ -141,10 +154,19 @@ fn resolve_nested_refs(
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
     while i < bytes.len() {
-        let c = bytes[i];
+        // Fast path: copy plain text in bulk until we hit a special byte.
+        if bytes[i] != b'$' && bytes[i] != b'{' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b'$' && bytes[j] != b'{' {
+                j += 1;
+            }
+            out.push_str(&input[i..j]);
+            i = j;
+            continue;
+        }
 
         // Preserve `${...}` so the template interpolator can handle it.
-        if c == b'$' && bytes.get(i + 1) == Some(&b'{') {
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
             if let Some(end) = find_matching_brace(bytes, i + 1) {
                 out.push_str(&input[i..=end]);
                 i = end + 1;
@@ -152,32 +174,41 @@ fn resolve_nested_refs(
             }
         }
 
-        if c == b'{' {
+        if bytes[i] == b'{' {
             if let Some(end) = find_matching_brace(bytes, i) {
                 let name = &input[i + 1..end];
-                // Avoid treating `{ }` (with spaces) or braces containing `{`
-                // as references — too lenient would break JSON payloads.
+                // Only treat as a reference if the name is strictly
+                // filename-shaped AND an entry exists in the store / inline
+                // map. Bare JS identifiers like `{foo}` in
+                // `const {foo} = obj` must pass through unchanged — otherwise
+                // we'd swallow them and break the script.
                 if !name.is_empty()
                     && !name.contains('{')
                     && !name.contains('}')
                     && !name.contains('\n')
                     && is_valid_value_name(name)
+                    && has_entry(name, inline, store)
                 {
-                    let raw = lookup(name, inline, store);
-                    let expanded = resolve_str(&raw, inline, store, ctx, depth + 1);
-                    out.push_str(&expanded);
+                    // Substitute verbatim; do not rescan the substitution.
+                    out.push_str(&lookup(name, inline, store));
                     i = end + 1;
                     continue;
                 }
             }
         }
 
-        // Default: copy byte. UTF-8 safe because we only pattern-match ASCII
-        // delimiters.
-        out.push(c as char);
+        // Single unmatched `$` or `{` — safe to push as char because they are ASCII.
+        out.push(bytes[i] as char);
         i += 1;
     }
     out
+}
+
+/// Whether `name` is present in either the inline scope or the global store.
+/// Used to decide if an in-text `{name}` should be treated as a reference or
+/// left alone (e.g. JS destructuring).
+fn has_entry(name: &str, inline: &HashMap<String, String>, store: &DashMap<String, String>) -> bool {
+    inline.contains_key(name) || store.contains_key(name)
 }
 
 /// Find the position of the closing `}` for an opening `{` at `open_idx`.
@@ -225,8 +256,14 @@ fn interpolate_template(input: &str, ctx: &RequestCtx) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+
+        // Fast path: copy plain text in bulk until the next `$`.
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j] != b'$' {
+            j += 1;
+        }
+        out.push_str(&input[i..j]);
+        i = j;
     }
     out
 }
@@ -338,10 +375,61 @@ mod tests {
 
     #[test]
     fn recursion_is_bounded() {
+        // Substituted content is now inserted verbatim — `{a}` resolves to
+        // the literal string `{b}` rather than recursing. This keeps JS/HTML
+        // payloads safe but also means there's no cycle to worry about.
         let store = store_with(&[("a", "{b}"), ("b", "{a}")]);
         let out = resolve_str("{a}", &HashMap::new(), &store, &RequestCtx::empty(), 0);
-        // Should not hang; final value is empty after depth cap.
-        assert!(out.len() < 10);
+        assert_eq!(out, "{b}");
+    }
+
+    #[test]
+    fn multibyte_utf8_is_preserved() {
+        // Regression test: value content with non-ASCII characters must not be
+        // corrupted by the byte-at-a-time loop in resolve_nested_refs.
+        let store = store_with(&[("script.js", "console.log('你好世界🌍');")]);
+        let out = resolve_str(
+            "{script.js}",
+            &HashMap::new(),
+            &store,
+            &RequestCtx::empty(),
+            0,
+        );
+        assert_eq!(out, "console.log('你好世界🌍');");
+    }
+
+    #[test]
+    fn embedded_reference_with_multibyte_context() {
+        let store = store_with(&[("msg", "你好")]);
+        let out = resolve_str(
+            "前缀{msg}后缀",
+            &HashMap::new(),
+            &store,
+            &RequestCtx::empty(),
+            0,
+        );
+        assert_eq!(out, "前缀你好后缀");
+    }
+
+    #[test]
+    fn template_interpolation_preserves_multibyte() {
+        let store = store_with(&[("tmpl", "用户: ${url} 说你好")]);
+        let out = resolve_str(
+            "`{tmpl}`",
+            &HashMap::new(),
+            &store,
+            &RequestCtx {
+                url: "http://example.com",
+                method: "GET",
+                client_ip: "",
+                req_headers: &HashMap::new(),
+                query: &HashMap::new(),
+                req_cookies: &HashMap::new(),
+                now_ms: 0,
+            },
+            0,
+        );
+        assert_eq!(out, "用户: http://example.com 说你好");
     }
 
     #[test]
@@ -370,5 +458,65 @@ mod tests {
         );
         // Contains colon/quote → not a valid value name → passed through.
         assert_eq!(out, r#"{"id":1,"name":"foo"}"#);
+    }
+
+    #[test]
+    fn js_destructuring_is_not_treated_as_reference() {
+        // Regression: JS source delivered via a value (e.g. `script.js` rule
+        // returning a <script>) must not have its `{foo}` destructuring
+        // patterns eaten by the nested-ref expansion. The exact error the
+        // user saw was "Unexpected token '}'" because substituting `{foo}`
+        // with an empty string left a dangling `}` in the source.
+        let js_src = r#"
+import {bar} from 'baz';
+const {foo} = obj;
+function f() { return {x}; }
+const g = () => ({y});
+"#;
+        let store = store_with(&[("script.js", js_src)]);
+        let out = resolve_str(
+            "{script.js}",
+            &HashMap::new(),
+            &store,
+            &RequestCtx::empty(),
+            0,
+        );
+        assert_eq!(out, js_src, "JS source must be returned verbatim");
+    }
+
+    #[test]
+    fn embedded_unknown_name_is_left_alone() {
+        // When the resolver scans a string for embedded `{...}` refs and the
+        // name is not defined anywhere, leave it as-is. Otherwise JS code
+        // passing through an "embedded" code path (e.g. a header with a curly
+        // in it) would get mangled.
+        let store = store_with(&[("token", "secret")]);
+        let out = resolve_str(
+            "Bearer {token} and function f(){return {unknown};}",
+            &HashMap::new(),
+            &store,
+            &RequestCtx::empty(),
+            0,
+        );
+        assert_eq!(
+            out,
+            "Bearer secret and function f(){return {unknown};}"
+        );
+    }
+
+    #[test]
+    fn js_body_with_response_rule_preserves_braces() {
+        // Full-flow simulation: rule `resBody://{script.js}` returns a body
+        // containing JS code with shorthand object literals.
+        let js = "const obj = {name: 'foo', age: 1};\nconst {name} = obj;\nreturn {result: name};";
+        let store = store_with(&[("script.js", js)]);
+        let out = resolve_str(
+            "{script.js}",
+            &HashMap::new(),
+            &store,
+            &RequestCtx::empty(),
+            0,
+        );
+        assert_eq!(out, js);
     }
 }

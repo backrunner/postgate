@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 /// Event emitted when debug state changes
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum DebugEvent {
     SessionConnected(DebugSession),
     SessionDisconnected(String),
@@ -143,7 +142,6 @@ impl SessionManager {
     }
 
     /// Get a specific session
-    #[allow(dead_code)]
     pub fn get_session(&self, session_id: &str) -> Option<DebugSession> {
         self.sessions.get(session_id).map(|r| r.clone())
     }
@@ -189,7 +187,6 @@ impl SessionManager {
     }
 
     /// Get network requests for a session
-    #[allow(dead_code)]
     pub fn get_network_requests(&self, session_id: &str) -> Vec<PageNetworkRequest> {
         self.network_requests
             .iter()
@@ -219,7 +216,6 @@ impl SessionManager {
     }
 
     /// Subscribe to debug events
-    #[allow(dead_code)]
     pub fn subscribe(&self) -> broadcast::Receiver<DebugEvent> {
         self.event_tx.subscribe()
     }

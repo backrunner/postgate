@@ -8,6 +8,7 @@ mod sse;
 mod throttle;
 mod tls;
 mod tunnel;
+mod upstream;
 mod websocket;
 
 pub use body::BodyStorage;

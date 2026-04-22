@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react";
-import { 
-  Puzzle, 
-  RefreshCw, 
-  FolderOpen, 
-  Power, 
-  PowerOff, 
-  Trash2, 
+import {
+  Puzzle,
+  RefreshCw,
+  FolderOpen,
+  Power,
+  PowerOff,
+  Trash2,
   AlertCircle,
   CheckCircle2,
   Loader2,
-  ExternalLink
+  ExternalLink,
+  Download,
+  FolderInput,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -31,19 +34,22 @@ import { usePluginsStore, PluginInfo } from "@/stores/plugins";
 import { cn } from "@/lib/utils";
 
 export function PluginsPage() {
-  const { 
-    plugins, 
-    pluginsDir, 
-    isLoading, 
+  const {
+    plugins,
+    pluginsDir,
+    isLoading,
     error,
-    fetchPlugins, 
+    fetchPlugins,
     discoverPlugins,
     togglePlugin,
     uninstallPlugin,
-    fetchPluginsDir 
+    installPluginFromNpm,
+    installPluginFromPath,
+    fetchPluginsDir,
   } = usePluginsStore();
-  
+
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [npmPackage, setNpmPackage] = useState("");
 
   useEffect(() => {
     fetchPlugins();
@@ -59,7 +65,7 @@ export function PluginsPage() {
     try {
       await togglePlugin(plugin.id, !plugin.enabled);
     } catch (error) {
-      console.error('Failed to toggle plugin:', error);
+      console.error("Failed to toggle plugin:", error);
     } finally {
       setActionLoading(null);
     }
@@ -70,21 +76,58 @@ export function PluginsPage() {
     try {
       await uninstallPlugin(pluginId);
     } catch (error) {
-      console.error('Failed to uninstall plugin:', error);
+      console.error("Failed to uninstall plugin:", error);
     } finally {
       setActionLoading(null);
     }
   };
 
+  const handleInstallFromNpm = async () => {
+    const pkg = npmPackage.trim();
+    if (!pkg) return;
+    setActionLoading("npm-install");
+    try {
+      await installPluginFromNpm(pkg);
+      setNpmPackage("");
+    } catch (error) {
+      console.error("Failed to install plugin from npm:", error);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleInstallFromPath = async () => {
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select plugin folder",
+      });
+      if (selected && typeof selected === "string") {
+        setActionLoading("path-install");
+        try {
+          await installPluginFromPath(selected);
+        } catch (error) {
+          console.error("Failed to install plugin from path:", error);
+        } finally {
+          setActionLoading(null);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to open dialog:", error);
+    }
+  };
+
   const openPluginsDir = () => {
     if (pluginsDir) {
-      // Use Tauri shell plugin to open directory
-      import('@tauri-apps/plugin-shell').then(({ open }) => {
-        open(pluginsDir);
-      }).catch(() => {
-        // Fallback: just show the path
-        navigator.clipboard.writeText(pluginsDir);
-      });
+      import("@tauri-apps/plugin-shell")
+        .then(({ open }) => {
+          open(pluginsDir);
+        })
+        .catch(() => {
+          navigator.clipboard.writeText(pluginsDir);
+        });
     }
   };
 
@@ -92,6 +135,45 @@ export function PluginsPage() {
     <div className="flex h-full flex-col">
       {/* Unified page header */}
       <PageHeader icon={Puzzle} title="Plugins">
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="npm package name"
+            className="h-8 w-48 text-xs"
+            value={npmPackage}
+            onChange={(e) => setNpmPackage(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleInstallFromNpm();
+            }}
+          />
+          <Button
+            variant="default"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={handleInstallFromNpm}
+            disabled={isLoading || !npmPackage.trim() || actionLoading === "npm-install"}
+          >
+            {actionLoading === "npm-install" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            Install
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={handleInstallFromPath}
+            disabled={isLoading || actionLoading === "path-install"}
+          >
+            {actionLoading === "path-install" ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <FolderInput className="h-3.5 w-3.5" />
+            )}
+            Local
+          </Button>
+        </div>
         <Button
           variant="outline"
           size="sm"
@@ -111,7 +193,7 @@ export function PluginsPage() {
           size="sm"
           className="h-8 gap-1.5 text-xs"
           onClick={openPluginsDir}
-          title={pluginsDir || 'Plugins directory'}
+          title={pluginsDir || "Plugins directory"}
         >
           <FolderOpen className="h-3.5 w-3.5" />
           Open Folder
@@ -133,8 +215,8 @@ export function PluginsPage() {
             <Puzzle className="mx-auto h-12 w-12 mb-4 opacity-50" />
             <h3 className="font-semibold mb-1">No plugins installed</h3>
             <p className="text-sm mb-4 max-w-md">
-              Install PostGate plugins to extend functionality.
-              Plugins should be installed to:
+              Install PostGate plugins to extend functionality. Plugins should
+              be installed to:
             </p>
             {pluginsDir && (
               <code className="block bg-muted px-3 py-2 rounded text-xs mb-4 max-w-lg break-all">
@@ -146,8 +228,8 @@ export function PluginsPage() {
               <code className="bg-muted px-1 rounded">postgate-plugin-*</code>
             </p>
             <div className="flex justify-center gap-2">
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 className="gap-1"
                 onClick={handleDiscover}
                 disabled={isLoading}
@@ -159,11 +241,7 @@ export function PluginsPage() {
                 )}
                 Scan for Plugins
               </Button>
-              <Button 
-                variant="outline" 
-                className="gap-1"
-                onClick={openPluginsDir}
-              >
+              <Button variant="outline" className="gap-1" onClick={openPluginsDir}>
                 <FolderOpen className="h-4 w-4" />
                 Open Plugins Folder
               </Button>
@@ -191,9 +269,9 @@ export function PluginsPage() {
         <p className="flex items-center gap-1">
           <ExternalLink className="h-3 w-3" />
           Learn how to create plugins in the{" "}
-          <a 
-            href="https://github.com/postgate/postgate/docs/plugins" 
-            target="_blank" 
+          <a
+            href="https://github.com/postgate/postgate/docs/plugins"
+            target="_blank"
             rel="noopener noreferrer"
             className="text-primary hover:underline"
           >
@@ -214,20 +292,26 @@ interface PluginCardProps {
 
 function PluginCard({ plugin, isLoading, onToggle, onUninstall }: PluginCardProps) {
   return (
-    <div className={cn(
-      "p-4 border rounded-lg transition-colors",
-      plugin.enabled ? "bg-background" : "bg-muted/30"
-    )}>
+    <div
+      className={cn(
+        "p-4 border rounded-lg transition-colors",
+        plugin.enabled ? "bg-background" : "bg-muted/30"
+      )}
+    >
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-start gap-3 min-w-0">
-          <div className={cn(
-            "p-2 rounded-lg shrink-0",
-            plugin.loaded ? "bg-emerald-500/10" : "bg-muted"
-          )}>
-            <Puzzle className={cn(
-              "h-5 w-5",
-              plugin.loaded ? "text-emerald-500" : "text-muted-foreground"
-            )} />
+          <div
+            className={cn(
+              "p-2 rounded-lg shrink-0",
+              plugin.loaded ? "bg-emerald-500/10" : "bg-muted"
+            )}
+          >
+            <Puzzle
+              className={cn(
+                "h-5 w-5",
+                plugin.loaded ? "text-emerald-500" : "text-muted-foreground"
+              )}
+            />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -236,7 +320,10 @@ function PluginCard({ plugin, isLoading, onToggle, onUninstall }: PluginCardProp
                 v{plugin.version}
               </Badge>
               {plugin.loaded && (
-                <Badge variant="default" className="text-xs shrink-0 bg-emerald-500">
+                <Badge
+                  variant="default"
+                  className="text-xs shrink-0 bg-emerald-500"
+                >
                   <CheckCircle2 className="h-3 w-3 mr-1" />
                   Running
                 </Badge>
@@ -257,7 +344,7 @@ function PluginCard({ plugin, isLoading, onToggle, onUninstall }: PluginCardProp
             </p>
           </div>
         </div>
-        
+
         <div className="flex items-center gap-2 shrink-0">
           {/* Enable/Disable Toggle */}
           <div className="flex items-center gap-2">
@@ -274,7 +361,7 @@ function PluginCard({ plugin, isLoading, onToggle, onUninstall }: PluginCardProp
               disabled={isLoading}
             />
           </div>
-          
+
           {/* Uninstall Button */}
           <AlertDialog>
             <AlertDialogTrigger asChild>
@@ -291,8 +378,8 @@ function PluginCard({ plugin, isLoading, onToggle, onUninstall }: PluginCardProp
               <AlertDialogHeader>
                 <AlertDialogTitle>Uninstall Plugin</AlertDialogTitle>
                 <AlertDialogDescription>
-                  Are you sure you want to uninstall "{plugin.name}"? 
-                  This will remove the plugin from your plugins directory.
+                  Are you sure you want to uninstall "{plugin.name}"? This will
+                  remove the plugin from your plugins directory.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>

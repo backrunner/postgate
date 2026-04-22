@@ -155,7 +155,6 @@ fn join_paths(base: &str, remaining: &str) -> String {
 /// - HTTP -> HTTPS
 /// - HTTPS -> HTTP
 /// - HTTPS -> HTTPS
-#[allow(dead_code)]
 pub async fn forward_request(
     method: hyper::Method,
     target: &ForwardTarget,
@@ -170,7 +169,6 @@ pub async fn forward_request(
 }
 
 /// Forward request to HTTP target
-#[allow(dead_code)]
 async fn forward_http(
     method: hyper::Method,
     target: &ForwardTarget,
@@ -244,7 +242,6 @@ async fn forward_http(
 }
 
 /// Forward request to HTTPS target
-#[allow(dead_code)]
 async fn forward_https(
     method: hyper::Method,
     target: &ForwardTarget,

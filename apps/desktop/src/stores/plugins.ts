@@ -45,6 +45,8 @@ interface PluginsState {
   uninstallPlugin: (pluginId: string) => Promise<void>;
   fetchPanels: () => Promise<void>;
   fetchPluginsDir: () => Promise<void>;
+  installPluginFromNpm: (packageName: string) => Promise<PluginInfo>;
+  installPluginFromPath: (sourcePath: string) => Promise<PluginInfo>;
   
   // Event handling
   addPanel: (panel: PluginPanel) => void;
@@ -147,6 +149,32 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
       set({ pluginsDir });
     } catch (error) {
       console.error('Failed to fetch plugins directory:', error);
+    }
+  },
+
+  installPluginFromNpm: async (packageName: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const plugin = await invoke<PluginInfo>('install_plugin_from_npm', { packageName });
+      await get().fetchPlugins();
+      set({ isLoading: false });
+      return plugin;
+    } catch (error) {
+      set({ error: String(error), isLoading: false });
+      throw error;
+    }
+  },
+
+  installPluginFromPath: async (sourcePath: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const plugin = await invoke<PluginInfo>('install_plugin_from_path', { sourcePath });
+      await get().fetchPlugins();
+      set({ isLoading: false });
+      return plugin;
+    } catch (error) {
+      set({ error: String(error), isLoading: false });
+      throw error;
     }
   },
 

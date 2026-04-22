@@ -32,12 +32,12 @@ pub fn parse_rules(content: &str) -> Result<Vec<Rule>> {
 /// Parse rules AND inline value definitions from a rule-group's raw content.
 ///
 /// Inline values are fenced blocks of the form:
-/// ```text
+/// ````text
 /// ``` name
 /// body line 1
 /// body line 2
 /// ```
-/// ```
+/// ````
 /// The opening fence is three backticks followed by a name; the body runs
 /// until a matching closing fence of three backticks on its own line. These
 /// definitions have higher precedence than the global Values store
@@ -459,19 +459,26 @@ fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
     // No-schema pattern: //host/path (but not ///)
     if s.starts_with("//") && !s.starts_with("///") {
         let rest = &s[2..];
-        if let Some(slash_idx) = rest.find('/') {
-            let host = rest[..slash_idx].to_string();
-            let path = rest[slash_idx..].to_string();
-            return Ok((negated, Pattern::NoSchema {
-                host,
-                path: Some(path),
-            }));
+        let host_end = rest.find(&['/', '?', '#'][..]).unwrap_or(rest.len());
+        let host = rest[..host_end].to_string();
+
+        let path = if host_end < rest.len() {
+            let path_part = &rest[host_end..];
+            let path_end = path_part.find(&['?', '#'][..]).unwrap_or(path_part.len());
+            let path_str = &path_part[..path_end];
+            if path_str.is_empty() {
+                None
+            } else {
+                Some(path_str.to_string())
+            }
         } else {
-            return Ok((negated, Pattern::NoSchema {
-                host: rest.to_string(),
-                path: None,
-            }));
-        }
+            None
+        };
+
+        return Ok((negated, Pattern::NoSchema {
+            host,
+            path,
+        }));
     }
 
     // Dot-suffix pattern: .json, .html$
@@ -690,10 +697,22 @@ fn parse_url_pattern(s: &str) -> Result<Pattern> {
         (None, s)
     };
 
-    let (host, path) = if let Some(idx) = rest.find('/') {
-        (rest[..idx].to_string(), Some(rest[idx..].to_string()))
+    // Find host boundary: could be /, ?, or #
+    let host_end = rest.find(&['/', '?', '#'][..]).unwrap_or(rest.len());
+    let host = rest[..host_end].to_string();
+
+    let path = if host_end < rest.len() {
+        let path_part = &rest[host_end..];
+        // Strip query and hash from the path
+        let path_end = path_part.find(&['?', '#'][..]).unwrap_or(path_part.len());
+        let path_str = &path_part[..path_end];
+        if path_str.is_empty() {
+            None
+        } else {
+            Some(path_str.to_string())
+        }
     } else {
-        (rest.to_string(), None)
+        None
     };
 
     Ok(Pattern::Url {
@@ -1789,6 +1808,60 @@ example.com host://127.0.0.1
         } else {
             panic!("Expected UrlParams action");
         }
+    }
+
+    #[test]
+    fn test_url_pattern_with_query_is_stripped() {
+        // Regression: URL pattern containing query/hash should have them
+        // stripped from the path so matching works correctly.
+        let rules = parse_rules("https://example.com/api?q=1 host://127.0.0.1:3000").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let Pattern::Url { protocol, host, path } = &rules[0].pattern {
+            assert_eq!(protocol.as_deref(), Some("https"));
+            assert_eq!(host, "example.com");
+            assert_eq!(path.as_deref(), Some("/api"));
+        } else {
+            panic!("Expected Url pattern, got {:?}", rules[0].pattern);
+        }
+    }
+
+    #[test]
+    fn test_url_pattern_with_hash_is_stripped() {
+        let rules = parse_rules("https://example.com/api#section host://127.0.0.1:3000").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let Pattern::Url { protocol, host, path } = &rules[0].pattern {
+            assert_eq!(protocol.as_deref(), Some("https"));
+            assert_eq!(host, "example.com");
+            assert_eq!(path.as_deref(), Some("/api"));
+        } else {
+            panic!("Expected Url pattern, got {:?}", rules[0].pattern);
+        }
+    }
+
+    #[test]
+    fn test_no_schema_pattern_with_query_is_stripped() {
+        let rules = parse_rules("//example.com/api?q=1 host://127.0.0.1:3000").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let Pattern::NoSchema { host, path } = &rules[0].pattern {
+            assert_eq!(host, "example.com");
+            assert_eq!(path.as_deref(), Some("/api"));
+        } else {
+            panic!("Expected NoSchema pattern, got {:?}", rules[0].pattern);
+        }
+    }
+
+    #[test]
+    fn test_url_pattern_matches_request_with_query() {
+        use crate::rules::types::Pattern;
+        let pattern = Pattern::Url {
+            protocol: Some("https".to_string()),
+            host: "example.com".to_string(),
+            path: Some("/api".to_string()),
+        };
+        // Rule path is /api, request has query — should still match
+        assert!(pattern.matches("https://example.com/api?q=1"));
+        assert!(pattern.matches("https://example.com/api#hash"));
+        assert!(pattern.matches("https://example.com/api/users?q=1"));
     }
 
     #[test]

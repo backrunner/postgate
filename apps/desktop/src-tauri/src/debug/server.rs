@@ -161,7 +161,6 @@ impl DebugServer {
     }
 
     /// Check if server is running
-    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
     }
@@ -339,7 +338,6 @@ impl DebugServer {
     }
 
     /// Get session manager
-    #[allow(dead_code)]
     pub fn session_manager(&self) -> &Arc<SessionManager> {
         &self.session_manager
     }

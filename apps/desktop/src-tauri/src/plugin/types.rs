@@ -28,7 +28,6 @@ pub struct PluginInfo {
 
 /// Plugin state stored in database
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct PluginState {
     pub id: String,
     pub enabled: bool,
@@ -84,7 +83,6 @@ pub struct PluginRequestContext {
 
 /// Log entry from plugin
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct PluginLogEntry {
     pub plugin_id: String,
     pub level: LogLevel,
@@ -95,7 +93,6 @@ pub struct PluginLogEntry {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-#[allow(dead_code)]
 pub enum LogLevel {
     Debug,
     Info,
@@ -130,7 +127,6 @@ pub enum PanelContent {
 /// Storage operation for plugin
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op")]
-#[allow(dead_code)]
 pub enum StorageOp {
     #[serde(rename = "get")]
     Get { key: String },
@@ -148,7 +144,6 @@ pub enum StorageOp {
 
 /// Result of a storage operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct StorageResult {
     pub success: bool,
     pub value: Option<serde_json::Value>,
@@ -158,7 +153,6 @@ pub struct StorageResult {
 /// Message from plugin to host
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-#[allow(dead_code)]
 pub enum PluginMessage {
     /// Log message
     #[serde(rename = "log")]
@@ -206,7 +200,6 @@ pub enum PluginMessage {
 /// Message from host to plugin
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
-#[allow(dead_code)]
 pub enum HostMessage {
     /// Initialize plugin
     #[serde(rename = "init")]

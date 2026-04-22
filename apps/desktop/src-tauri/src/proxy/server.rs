@@ -2,6 +2,7 @@ use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
 use crate::proxy::handler::{handle_connection, ProxyContext};
 use crate::proxy::pool::{ConnectionPool, PoolConfig};
+use crate::proxy::upstream::build_upstream_client;
 use crate::proxy::BodyStorage;
 use crate::rules::RuleEngine;
 use crate::state::AppState;
@@ -79,6 +80,10 @@ impl ProxyServer {
         let connection_pool = ConnectionPool::new(PoolConfig::default())
             .expect("Failed to create connection pool");
 
+        // Build the shared upstream client once — its connection pool is what
+        // makes the proxy fast. See proxy/upstream.rs.
+        let upstream_client = build_upstream_client(config.enable_http2);
+
         let ctx = Arc::new(ProxyContext {
             ca: Arc::new(ca),
             rule_engine,
@@ -86,6 +91,7 @@ impl ProxyServer {
             app_state,
             connection_pool: Arc::new(connection_pool),
             enable_http2: config.enable_http2,
+            upstream_client,
         });
 
         Self {
@@ -200,7 +206,6 @@ impl ProxyServer {
     }
 
     /// Check if the proxy is running
-    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }

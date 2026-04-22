@@ -3,6 +3,7 @@ use crate::error::{PostGateError, Result};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
+use crate::proxy::upstream::forward_collect;
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
 };
@@ -18,10 +19,9 @@ use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use uuid::Uuid;
 
-use super::tls::{create_tls_connector, parse_server_name, tls_version_string, TlsAcceptor};
+use super::tls::{tls_version_string, TlsAcceptor};
 
 /// Handle a tunneled HTTPS connection with MITM
 /// Takes a TokioIo-wrapped stream for hyper interoperability
@@ -38,35 +38,40 @@ where
 {
     // Accept TLS from client - TokioIo<S> implements AsyncRead/AsyncWrite
     let tls_stream = acceptor.accept(upgraded).await?;
-    
-    // Get the negotiated TLS version from the client connection
-    let tls_version = {
+
+    // Get the negotiated TLS version and ALPN from the client connection
+    let (tls_version, alpn) = {
         let (_, server_conn) = tls_stream.get_ref();
-        tls_version_string(server_conn.protocol_version())
+        let version = tls_version_string(server_conn.protocol_version());
+        let alpn = server_conn.alpn_protocol().map(|p| p.to_vec());
+        (version, alpn)
     };
-    
-    let io = TokioIo::new(tls_stream);
 
     let host = host.to_string();
-    let ctx_clone = ctx.clone();
 
-    // Handle HTTP over TLS
-    http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .serve_connection(
-            io,
-            service_fn(move |req| {
-                let host = host.clone();
-                let ctx = ctx_clone.clone();
-                let tls_ver = tls_version.clone();
-                async move { handle_https_request(req, &host, port, ctx, &tls_ver).await }
-            }),
-        )
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTPS tunnel error: {}", e)))?;
+    // Route to HTTP/2 or HTTP/1.1 based on ALPN
+    if super::http2::should_use_http2(alpn.as_deref()) {
+        super::http2::handle_http2_connection(tls_stream, host, port, ctx, tls_version).await
+    } else {
+        let io = TokioIo::new(tls_stream);
+        let ctx_clone = ctx.clone();
 
-    Ok(())
+        // Handle HTTP over TLS
+        http1::Builder::new()
+            .preserve_header_case(true)
+            .title_case_headers(true)
+            .serve_connection(
+                io,
+                service_fn(move |req| {
+                    let host = host.clone();
+                    let ctx = ctx_clone.clone();
+                    let tls_ver = tls_version.clone();
+                    async move { handle_https_request(req, &host, port, ctx, &tls_ver).await }
+                }),
+            )
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("HTTPS tunnel error: {}", e)))
+    }
 }
 
 /// Handle an HTTPS request after TLS termination
@@ -232,28 +237,53 @@ async fn handle_https_request(
 
     // Determine target for forwarding
     let forward_result = if let Some(target_host) = &request_modification.target_host {
-        // Rule specifies a target - parse it and forward
+        // Rule specifies a target - parse it and forward through the shared client
         let remaining_path = request_modification.remaining_path.as_deref().unwrap_or("");
-        
+
         match ForwardTarget::parse(target_host, remaining_path, "https") {
             Ok(target) => {
                 tracing::debug!(
-                    "Forwarding {} to {} (remaining: {})", 
-                    url, 
+                    "Forwarding {} to {} (remaining: {})",
+                    url,
                     target.build_url(),
                     remaining_path
                 );
-                
-                // Use modified body and headers
+
                 let body_to_send = request_modification.body.unwrap_or(request_body.data.clone());
-                forward_to_target(method.clone(), &target, &request_modification.headers, body_to_send).await
+                forward_collect(
+                    &ctx.upstream_client,
+                    method.clone(),
+                    &target.build_url(),
+                    &request_modification.headers,
+                    body_to_send,
+                )
+                .await
             }
-            Err(e) => Err(e)
+            Err(e) => Err(e),
         }
     } else {
-        // No rule target - forward to original host
+        // No rule target - forward back to the original upstream via the shared
+        // client. The pooled client amortizes TLS handshakes across requests.
         let body_to_send = request_modification.body.unwrap_or(request_body.data.clone());
-        forward_https_request(parts, body_to_send, host, port).await
+        let original_path = parts
+            .uri
+            .path_and_query()
+            .map(|pq| pq.to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let authority = if port == 443 {
+            host.to_string()
+        } else {
+            format!("{}:{}", host, port)
+        };
+        let absolute = format!("https://{}{}", authority, original_path);
+        forward_collect(
+            &ctx.upstream_client,
+            method.clone(),
+            &absolute,
+            &request_modification.headers,
+            body_to_send,
+        )
+        .await
     };
 
     match forward_result {
@@ -377,231 +407,3 @@ async fn handle_https_request(
     }
 }
 
-/// Forward request to a specific target (handles protocol conversion)
-async fn forward_to_target(
-    method: hyper::Method,
-    target: &ForwardTarget,
-    headers: &HashMap<String, String>,
-    body: Bytes,
-) -> Result<(Response<()>, CapturedBody)> {
-    if target.is_https() {
-        forward_https_to_target(method, target, headers, body).await
-    } else {
-        forward_http_to_target(method, target, headers, body).await
-    }
-}
-
-/// Forward to HTTP target
-async fn forward_http_to_target(
-    method: hyper::Method,
-    target: &ForwardTarget,
-    headers: &HashMap<String, String>,
-    body: Bytes,
-) -> Result<(Response<()>, CapturedBody)> {
-    let addr = format!("{}:{}", target.host, target.port);
-    let stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to connect to {}: {}", addr, e)))?;
-
-    let io = TokioIo::new(stream);
-
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTP handshake error: {}", e)))?;
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::debug!("HTTP connection error: {}", e);
-        }
-    });
-
-    let uri = target.build_path();
-    let mut builder = Request::builder().method(method).uri(&uri);
-
-    // Copy headers, updating Host header
-    for (key, value) in headers {
-        let key_lower = key.to_lowercase();
-        if key_lower == "host" {
-            let host_value = if target.port == 80 {
-                target.host.clone()
-            } else {
-                format!("{}:{}", target.host, target.port)
-            };
-            builder = builder.header("host", host_value);
-        } else {
-            if let (Ok(name), Ok(value)) = (
-                hyper::header::HeaderName::from_bytes(key.as_bytes()),
-                hyper::header::HeaderValue::from_str(value),
-            ) {
-                builder = builder.header(name, value);
-            }
-        }
-    }
-
-    // Ensure Host header exists
-    if !headers.contains_key("host") {
-        let host_value = if target.port == 80 {
-            target.host.clone()
-        } else {
-            format!("{}:{}", target.host, target.port)
-        };
-        builder = builder.header("host", host_value);
-    }
-
-    let req = builder
-        .body(Full::new(body))
-        .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
-
-    let resp = sender.send_request(req)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTP request error: {}", e)))?;
-
-    let (parts, incoming) = resp.into_parts();
-    let response_body = collect_body(incoming, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
-    
-    Ok((Response::from_parts(parts, ()), response_body))
-}
-
-/// Forward to HTTPS target
-async fn forward_https_to_target(
-    method: hyper::Method,
-    target: &ForwardTarget,
-    headers: &HashMap<String, String>,
-    body: Bytes,
-) -> Result<(Response<()>, CapturedBody)> {
-    let addr = format!("{}:{}", target.host, target.port);
-    let stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to connect to {}: {}", addr, e)))?;
-
-    let connector = create_tls_connector()?;
-    let server_name = parse_server_name(&target.host)?;
-
-    let tls_stream = connector
-        .connect(server_name, stream)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("TLS connect error: {}", e)))?;
-
-    let io = TokioIo::new(tls_stream);
-
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTPS handshake error: {}", e)))?;
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::debug!("HTTPS connection error: {}", e);
-        }
-    });
-
-    let uri = target.build_path();
-    let mut builder = Request::builder().method(method).uri(&uri);
-
-    // Copy headers, updating Host header
-    for (key, value) in headers {
-        let key_lower = key.to_lowercase();
-        if key_lower == "host" {
-            let host_value = if target.port == 443 {
-                target.host.clone()
-            } else {
-                format!("{}:{}", target.host, target.port)
-            };
-            builder = builder.header("host", host_value);
-        } else {
-            if let (Ok(name), Ok(value)) = (
-                hyper::header::HeaderName::from_bytes(key.as_bytes()),
-                hyper::header::HeaderValue::from_str(value),
-            ) {
-                builder = builder.header(name, value);
-            }
-        }
-    }
-
-    // Ensure Host header exists
-    if !headers.contains_key("host") {
-        let host_value = if target.port == 443 {
-            target.host.clone()
-        } else {
-            format!("{}:{}", target.host, target.port)
-        };
-        builder = builder.header("host", host_value);
-    }
-
-    let req = builder
-        .body(Full::new(body))
-        .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
-
-    let resp = sender.send_request(req)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTPS request error: {}", e)))?;
-
-    let (parts, incoming) = resp.into_parts();
-    let response_body = collect_body(incoming, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
-    
-    Ok((Response::from_parts(parts, ()), response_body))
-}
-
-/// Forward an HTTPS request to the original upstream server (no rule target)
-async fn forward_https_request(
-    parts: hyper::http::request::Parts,
-    body: Bytes,
-    host: &str,
-    port: u16,
-) -> Result<(Response<()>, CapturedBody)> {
-    let addr = format!("{}:{}", host, port);
-    let stream = TcpStream::connect(&addr)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to connect to {}: {}", addr, e)))?;
-
-    let connector = create_tls_connector()?;
-    let server_name = parse_server_name(host)?;
-
-    let tls_stream = connector
-        .connect(server_name, stream)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("TLS connect error: {}", e)))?;
-
-    let io = TokioIo::new(tls_stream);
-
-    let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(io)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTP handshake error: {}", e)))?;
-
-    tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            tracing::debug!("Connection error: {}", e);
-        }
-    });
-
-    let uri = parts
-        .uri
-        .path_and_query()
-        .map(|pq| pq.to_string())
-        .unwrap_or_else(|| "/".to_string());
-
-    let mut builder = Request::builder().method(parts.method).uri(uri);
-
-    for (key, value) in parts.headers.iter() {
-        builder = builder.header(key, value);
-    }
-
-    let new_req = builder
-        .body(Full::new(body))
-        .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
-
-    let resp = sender
-        .send_request(new_req)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to send request: {}", e)))?;
-
-    let (resp_parts, resp_body) = resp.into_parts();
-    let captured_body = collect_body(resp_body, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
-
-    Ok((Response::from_parts(resp_parts, ()), captured_body))
-}

@@ -27,9 +27,9 @@ use uuid::Uuid;
 
 use super::tls::TlsAcceptor;
 use super::tunnel::tunnel_connection;
+use super::upstream::SharedClient;
 
 /// Context passed through the proxy pipeline
-#[allow(dead_code)]
 pub struct ProxyContext {
     pub ca: Arc<CertificateAuthority>,
     pub rule_engine: Arc<RuleEngine>,
@@ -37,6 +37,15 @@ pub struct ProxyContext {
     pub app_state: Arc<AppState>,
     pub connection_pool: Arc<ConnectionPool>,
     pub enable_http2: bool,
+    /// Shared hyper client used for ALL upstream forwarding.
+    ///
+    /// Hugely important for performance: `hyper_util::client::legacy::Client`
+    /// has a built-in connection pool keyed by (scheme, host, port). Rebuilding
+    /// the client per request (which the old code did) threw away the pool and
+    /// forced a fresh TCP + TLS handshake for every single request — see
+    /// `handler.rs:732` in git history. A single client is enough because it
+    /// serves both HTTP and HTTPS through the hyper-rustls connector.
+    pub upstream_client: SharedClient,
 }
 
 /// Handle an incoming connection
@@ -236,6 +245,100 @@ async fn handle_request(
         return Ok(builder
             .body(Full::new(short_circuit.body).map_err(|_| unreachable!()).boxed())
             .unwrap());
+    }
+
+    // Apply plugin handleRequest if a plugin was matched
+    if let Some(ref plugin_info) = request_modification.plugin {
+        let plugin_request = PluginRequest {
+            id: request_id.clone(),
+            method: method.clone(),
+            url: uri.clone(),
+            host: host.clone(),
+            path: path.clone(),
+            query: extract_query_params(&uri),
+            headers: request_headers.clone(),
+            body: Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &request_body.data,
+            )),
+            body_base64: true,
+            timestamp,
+        };
+
+        let plugin_context = PluginRequestContext {
+            rule_config: match &plugin_info.config {
+                serde_json::Value::Object(map) => map.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                _ => std::collections::HashMap::new(),
+            },
+            matched_pattern: uri.clone(),
+        };
+
+        let plugin_manager = ctx.app_state.plugin_manager.read().await;
+        match plugin_manager.handle_request(&plugin_info.name, plugin_request, plugin_context).await {
+            Ok(Some(modified)) => {
+                let duration = start_time.elapsed().as_millis() as u64;
+                let decoded_body = if modified.body_base64 {
+                    modified.body.as_ref()
+                        .and_then(|b| base64::Engine::decode(
+                            &base64::engine::general_purpose::STANDARD,
+                            b,
+                        ).ok())
+                        .map(Bytes::from)
+                } else {
+                    modified.body.as_ref().map(|b| Bytes::from(b.clone()))
+                };
+                let body_bytes = decoded_body.unwrap_or_default();
+
+                let response_body = CapturedBody {
+                    data: body_bytes.clone(),
+                    size: body_bytes.len(),
+                    truncated: false,
+                };
+                ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
+                ctx.app_state.persist_body(request_id.clone(), body_bytes.clone(), false);
+
+                ctx.app_state.emit_request_event(&CapturedRequestEvent {
+                    id: request_id.clone(),
+                    event_type: RequestEventType::Completed,
+                    data: CapturedRequestData {
+                        id: request_id,
+                        timestamp,
+                        method,
+                        url: uri,
+                        host,
+                        path,
+                        request_headers: Some(request_headers),
+                        response_status: Some(modified.status),
+                        response_headers: Some(modified.headers.clone()),
+                        duration_ms: Some(duration),
+                        matched_rules: matched_rule_ids,
+                        protocol: "http1".to_string(),
+                        content_type: modified.headers.get("content-type").cloned(),
+                        request_size,
+                        response_size: Some(body_bytes.len() as u64),
+                        ..Default::default()
+                    },
+                });
+
+                let mut builder = Response::builder().status(modified.status);
+                let mut resp_headers = modified.headers.clone();
+                resp_headers.remove("content-encoding");
+                resp_headers.remove("transfer-encoding");
+                resp_headers.insert("content-length".to_string(), body_bytes.len().to_string());
+                for (k, v) in &resp_headers {
+                    builder = builder.header(k.as_str(), v.as_str());
+                }
+                return Ok(builder
+                    .body(Full::new(body_bytes).map_err(|_| unreachable!()).boxed())
+                    .unwrap());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("Plugin handleRequest failed for {}: {}", plugin_info.name, e);
+            }
+        }
     }
 
     // Apply request delay if specified
@@ -605,8 +708,10 @@ async fn handle_connect(
     tokio::task::spawn(async move {
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                // Create TLS acceptor for MITM
-                match TlsAcceptor::new(&ca, &host) {
+                // Create TLS acceptor for MITM. ALPN advertisement must
+                // reflect `enable_http2` so disabling h2 actually prevents
+                // clients from negotiating it.
+                match TlsAcceptor::new(&ca, &host, ctx_clone.enable_http2) {
                     Ok(acceptor) => {
                         // Pass the upgraded connection wrapped in TokioIo
                         let io = TokioIo::new(upgraded);
@@ -637,23 +742,12 @@ async fn handle_connect(
 async fn forward_http_request_check_sse(
     req: Request<BoxBody<Bytes, hyper::Error>>,
     _request_id: &str,
-    _ctx: &Arc<ProxyContext>,
+    ctx: &Arc<ProxyContext>,
 ) -> std::result::Result<ForwardResult, Box<dyn std::error::Error + Send + Sync>> {
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
-
-    // Create HTTPS connector with rustls
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-
-    let client: Client<_, BoxBody<Bytes, hyper::Error>> = Client::builder(TokioExecutor::new())
-        .build(https);
-
-    let resp = client.request(req).await?;
+    // Use the shared, pooled upstream client. Building one per request would
+    // discard the connection pool and force a fresh TCP + TLS handshake each
+    // time, which dominated wall-clock time on page loads.
+    let resp = ctx.upstream_client.request(req).await?;
     
     // Check if this is an SSE response
     let content_type = resp.headers()

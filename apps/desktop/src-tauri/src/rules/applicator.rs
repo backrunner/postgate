@@ -26,7 +26,6 @@ pub struct ResolveCtx<'a> {
 }
 
 impl<'a> ResolveCtx<'a> {
-    #[allow(dead_code)]
     pub fn disabled() -> Self {
         Self {
             store: None,
@@ -135,7 +134,6 @@ pub struct ResponseModification {
 }
 
 /// Apply rules to a request and return modifications
-#[allow(dead_code)]
 pub fn apply_request_rules(
     matched_rules: &[MatchedRule],
     url: &str,
@@ -444,7 +442,6 @@ pub fn apply_request_rules_with_values(
 }
 
 /// Apply rules to a response and return modifications
-#[allow(dead_code)]
 pub fn apply_response_rules(
     matched_rules: &[MatchedRule],
     url: &str,
@@ -742,7 +739,6 @@ pub fn apply_response_rules_with_values(
 }
 
 /// Apply header modifications
-#[allow(dead_code)]
 fn apply_header_modifications(
     headers: &mut HashMap<String, String>,
     modifications: &HeaderModifications,

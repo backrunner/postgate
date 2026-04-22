@@ -225,7 +225,6 @@ impl PluginManager {
     }
 
     /// Handle a request through a plugin
-    #[allow(dead_code)]
     pub async fn handle_request(
         &self,
         plugin_id: &str,
@@ -262,19 +261,16 @@ impl PluginManager {
     }
 
     /// Register a panel (called from plugin runtime)
-    #[allow(dead_code)]
     pub fn register_panel(&self, panel: PluginPanel) {
         self.panels.insert(panel.id.clone(), panel);
     }
 
     /// Unregister a panel
-    #[allow(dead_code)]
     pub fn unregister_panel(&self, panel_id: &str) {
         self.panels.remove(panel_id);
     }
 
     /// Shutdown all plugins
-    #[allow(dead_code)]
     pub async fn shutdown(&self) -> Result<()> {
         let mut runtimes = self.runtimes.write().await;
         

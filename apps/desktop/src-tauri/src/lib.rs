@@ -36,6 +36,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -92,6 +93,8 @@ pub fn run() {
             commands::plugin::get_plugin_panels,
             commands::plugin::get_plugins_dir,
             commands::plugin::install_plugin,
+            commands::plugin::install_plugin_from_npm,
+            commands::plugin::install_plugin_from_path,
             commands::plugin::uninstall_plugin,
             commands::replay::get_collection_tree,
             commands::replay::get_collections,

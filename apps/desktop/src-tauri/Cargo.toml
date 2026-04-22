@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 # Tauri
 tauri = { version = "2", features = [ "devtools"] }
 tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
@@ -73,6 +74,9 @@ chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2"
 urlencoding = "2"
 if-addrs = "0.15"
+tar = "0.4"
+flate2 = "1"
+tempfile = "3"
 
 # JavaScript Runtime (embedded V8 via Deno Core)
 deno_core = "0.393"

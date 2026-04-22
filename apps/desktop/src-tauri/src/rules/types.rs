@@ -214,7 +214,6 @@ pub struct PatternMatchResult {
 
 impl Pattern {
     /// Check if this pattern matches a URL
-    #[allow(dead_code)]
     pub fn matches(&self, url: &str) -> bool {
         self.match_with_remainder(url, 0).matched
     }

@@ -39,6 +39,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tanstack/react-virtual": "^3.13.24",
     "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-updater": "^2.10.1",

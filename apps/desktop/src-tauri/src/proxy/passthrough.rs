@@ -106,6 +106,10 @@ pub struct PassthroughMeta {
     pub start_time: std::time::Instant,
     pub persistence_enabled: bool,
     pub tls_version: Option<String>,
+    /// Whether whistle `disable://capture` is NOT set, i.e. the UI / storage
+    /// should still receive the Completed event. When false the streaming
+    /// body wrapper proxies bytes normally but doesn't emit.
+    pub capture: bool,
 }
 
 pub struct PassthroughCapturingBody {
@@ -165,6 +169,11 @@ impl PassthroughCapturingBody {
         tokio::spawn(async move {
             body_storage.store_response_body(&request_id, stored).await;
         });
+        // Only persist & emit when capture is enabled — whistle
+        // `disable://capture` should leave no trace.
+        if !self.meta.capture {
+            return;
+        }
         if self.meta.persistence_enabled {
             self.app_state
                 .persist_body(self.meta.request_id.clone(), collected.clone(), false);

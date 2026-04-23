@@ -114,25 +114,6 @@ async fn handle_request(
         return handle_websocket_upgrade(req, &request_id, timestamp, &host, &path, &request_headers, peer_addr, ctx).await;
     }
 
-    // Emit request started event
-    ctx.app_state.emit_request_event(&CapturedRequestEvent {
-        id: request_id.clone(),
-        event_type: RequestEventType::Started,
-        data: CapturedRequestData {
-            id: request_id.clone(),
-            timestamp,
-            method: method.clone(),
-            url: uri.clone(),
-            host: host.clone(),
-            path: path.clone(),
-            request_headers: Some(request_headers.clone()),
-            protocol: "http1".to_string(),
-            content_type: content_type.clone(),
-            remote_addr: Some(peer_addr.to_string()),
-            ..Default::default()
-        },
-    });
-
     // Match rules for this request
     // Extract protocol and port for filter matching
     let protocol = req.uri().scheme_str().unwrap_or("http").to_string();
@@ -145,7 +126,7 @@ async fn handle_request(
     let request_body = match collect_body(body, MAX_BODY_SIZE).await {
         Ok(b) => b,
         Err(e) => {
-            emit_error_event(&ctx, &request_id, timestamp, &method, &uri, &host, &path, 
+            emit_error_event(&ctx, &request_id, timestamp, &method, &uri, &host, &path,
                 &request_headers, start_time.elapsed().as_millis() as u64, &e.to_string());
             return Ok(error_response(502, &format!("Failed to read request body: {}", e)));
         }
@@ -189,6 +170,44 @@ async fn handle_request(
         Some(&request_body.data),
         &resolve_ctx,
     );
+
+    // `enable://abort` — tear down the connection without a normal response.
+    // Maps to whistle's abort feature, used to simulate peer resets during
+    // testing. We send `Connection: close` with an empty body and 444; hyper
+    // then closes the TCP connection after flushing.
+    if crate::rules::should_abort(&request_modification) {
+        tracing::debug!("abort:// matched for {}; closing connection", uri);
+        return Ok(Response::builder()
+            .status(444) // nginx convention: "no response"
+            .header("connection", "close")
+            .body(Empty::<Bytes>::new().map_err(|_: std::convert::Infallible| unreachable!()).boxed())
+            .unwrap());
+    }
+
+    // Emit request started event (after rule match so `disable://capture`
+    // can suppress it). Users typically care about the Completed event in
+    // the UI, but we still want to surface Started for long-running requests.
+    let capture = crate::rules::capture_enabled(&request_modification);
+    if capture {
+        ctx.app_state.emit_request_event(&CapturedRequestEvent {
+            id: request_id.clone(),
+            event_type: RequestEventType::Started,
+            data: CapturedRequestData {
+                id: request_id.clone(),
+                timestamp,
+                method: method.clone(),
+                url: uri.clone(),
+                host: host.clone(),
+                path: path.clone(),
+                request_headers: Some(request_headers.clone()),
+                protocol: "http1".to_string(),
+                content_type: content_type.clone(),
+                remote_addr: Some(peer_addr.to_string()),
+                matched_rules: matched_rule_ids.clone(),
+                ..Default::default()
+            },
+        });
+    }
 
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
     if let Some(short_circuit) = request_modification.short_circuit {
@@ -397,6 +416,10 @@ async fn handle_request(
     // Forward request to upstream. If no matched rule needs the response body,
     // we stream it straight back to the client — that makes TTFB match the
     // upstream instead of `upstream_ttfb + full_body_download`.
+    //
+    // When an upstream proxy rule matched we bypass the shared pooled client
+    // (the pool can't route chained proxies) and always take the buffering
+    // path via `forward_collect_with_proxy`.
     let buffer_response_body = crate::rules::rules_require_response_body(&matched_rules);
     tracing::trace!(
         target: "postgate::perf",
@@ -408,7 +431,57 @@ async fn handle_request(
         if buffer_response_body { "BUFFERING body" } else { "streaming body" }
     );
     let forward_start = std::time::Instant::now();
-    let response = forward_http_request_check_sse(req, &request_id, &ctx, buffer_response_body).await;
+    let response = if let Some(ref proxy) = request_modification.upstream_proxy {
+        // Detached path: build the (method, url, headers, body) tuple by
+        // tearing `req` apart and handing off to chain::forward_via_proxy.
+        let (p, b) = req.into_parts();
+        let body_bytes = match b.collect().await {
+            Ok(c) => c.to_bytes(),
+            Err(e) => {
+                emit_error_event(
+                    &ctx,
+                    &request_id,
+                    timestamp,
+                    &method,
+                    &uri,
+                    &host,
+                    &path,
+                    &request_headers,
+                    start_time.elapsed().as_millis() as u64,
+                    &format!("request body read failed: {}", e),
+                );
+                return Ok(error_response(502, &format!("Proxy error: {}", e)));
+            }
+        };
+        let mut hdr_map: HashMap<String, String> = HashMap::new();
+        for (k, v) in p.headers.iter() {
+            hdr_map.insert(
+                k.to_string().to_lowercase(),
+                v.to_str().unwrap_or("").to_string(),
+            );
+        }
+        super::upstream::forward_collect_with_proxy(
+            &ctx.upstream_client,
+            p.method,
+            &p.uri.to_string(),
+            &hdr_map,
+            body_bytes,
+            request_modification.timeout_ms,
+            Some(proxy),
+        )
+        .await
+        .map(|(resp, body)| ForwardResult::Normal { response: resp, body })
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
+    } else {
+        forward_http_request_check_sse(
+            req,
+            &request_id,
+            &ctx,
+            buffer_response_body,
+            request_modification.timeout_ms,
+        )
+        .await
+    };
     tracing::trace!(
         target: "postgate::perf",
         "[{}] upstream first byte after {:?}",
@@ -533,6 +606,7 @@ async fn handle_request(
                     start_time,
                     persistence_enabled: ctx.app_state.is_persistence_enabled(),
                     tls_version: None,
+                    capture,
                 },
                 ctx.app_state.clone(),
                 ctx.body_storage.clone(),
@@ -855,11 +929,25 @@ async fn forward_http_request_check_sse(
     _request_id: &str,
     ctx: &Arc<ProxyContext>,
     buffer_body: bool,
+    timeout_ms: Option<u64>,
 ) -> std::result::Result<ForwardResult, Box<dyn std::error::Error + Send + Sync>> {
     // Use the shared, pooled upstream client. Building one per request would
     // discard the connection pool and force a fresh TCP + TLS handshake each
     // time, which dominated wall-clock time on page loads.
-    let resp = ctx.upstream_client.request(req).await?;
+    //
+    // `timeout_ms` (whistle `timeout://<ms>`) only bounds the time until
+    // response headers come back; streaming bodies can take as long as they
+    // like, matching whistle semantics.
+    let request_fut = ctx.upstream_client.request(req);
+    let resp = match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), request_fut).await {
+            Ok(r) => r?,
+            Err(_) => {
+                return Err(format!("Upstream request timed out after {} ms", ms).into());
+            }
+        },
+        None => request_fut.await?,
+    };
 
     // Check if this is an SSE response
     let content_type = resp.headers()

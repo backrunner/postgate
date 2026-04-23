@@ -196,6 +196,16 @@ async fn handle_http2_request(
         &resolve_ctx,
     );
 
+    // `enable://abort` — tear down the h2 stream. Returning from the handler
+    // closes the stream without sending a response.
+    if crate::rules::should_abort(&request_modification) {
+        tracing::debug!("abort:// matched for {}; closing h2 stream", url);
+        let _ = respond.send_reset(h2::Reason::CANCEL);
+        return Ok(());
+    }
+
+    let capture = crate::rules::capture_enabled(&request_modification);
+
     // Handle short-circuit responses (redirect / file / statusCode / ...)
     if let Some(short_circuit) = request_modification.short_circuit {
         let duration = start_time.elapsed().as_millis() as u64;
@@ -382,7 +392,7 @@ async fn handle_http2_request(
     // the main TTFB lever.
     let buffer_response_body = crate::rules::rules_require_response_body(&matched_rules);
 
-    if !buffer_response_body {
+    if !buffer_response_body && request_modification.upstream_proxy.is_none() {
         let stream_result = match absolute_url {
             Ok(target_url) => {
                 super::upstream::forward_stream(
@@ -391,6 +401,7 @@ async fn handle_http2_request(
                     &target_url,
                     &request_modification.headers,
                     body_to_send,
+                    request_modification.timeout_ms,
                 )
                 .await
             }
@@ -469,6 +480,7 @@ async fn handle_http2_request(
                     start_time,
                     persistence_enabled: ctx.app_state.is_persistence_enabled(),
                     tls_version: Some(tls_version.to_string()),
+                    capture,
                 };
                 pump_incoming_into_h2(
                     up_body,
@@ -518,12 +530,14 @@ async fn handle_http2_request(
     // Buffering path (rules rewrite the body)
     let forward_result = match absolute_url {
         Ok(absolute) => {
-            super::upstream::forward_collect(
+            super::upstream::forward_collect_with_proxy(
                 &ctx.upstream_client,
                 method.clone(),
                 &absolute,
                 &request_modification.headers,
                 body_to_send,
+                request_modification.timeout_ms,
+                request_modification.upstream_proxy.as_ref(),
             )
             .await
         }
@@ -913,6 +927,11 @@ async fn pump_incoming_into_h2(
         tokio::spawn(async move {
             body_storage.store_response_body(&request_id, stored).await;
         });
+    }
+    // Honor `disable://capture`: suppress persistence + emit but still let
+    // the body flow through to the client.
+    if !meta.capture {
+        return Ok(());
     }
     if meta.persistence_enabled {
         app_state.persist_body(meta.request_id.clone(), collected.clone(), false);

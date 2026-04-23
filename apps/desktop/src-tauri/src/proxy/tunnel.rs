@@ -3,7 +3,6 @@ use crate::error::{PostGateError, Result};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
-use crate::proxy::upstream::forward_collect;
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
 };
@@ -178,6 +177,20 @@ async fn handle_https_request(
         &resolve_ctx,
     );
 
+    // `enable://abort` — drop the HTTPS connection without responding. The
+    // browser will see a closed TLS tunnel and report ERR_CONNECTION_CLOSED
+    // or similar, which matches whistle's abort semantics.
+    if crate::rules::should_abort(&request_modification) {
+        tracing::debug!("abort:// matched for {}; closing h1-TLS stream", url);
+        return Ok(Response::builder()
+            .status(444)
+            .header("connection", "close")
+            .body(Full::new(Bytes::new()).map_err(|_| unreachable!()).boxed())
+            .unwrap());
+    }
+
+    let capture = crate::rules::capture_enabled(&request_modification);
+
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
     if let Some(short_circuit) = request_modification.short_circuit {
         let duration = start_time.elapsed().as_millis() as u64;
@@ -273,7 +286,9 @@ async fn handle_https_request(
     let body_to_send = request_modification.body.unwrap_or(request_body.data.clone());
 
     // --- Streaming path ---------------------------------------------------
-    if !buffer_response_body {
+    // Streaming bypass requires the shared pooled client; chained proxy
+    // routes don't go through it, so they always take the buffering path.
+    if !buffer_response_body && request_modification.upstream_proxy.is_none() {
         let stream_result = match absolute_url {
             Ok(target_url) => {
                 super::upstream::forward_stream(
@@ -282,6 +297,7 @@ async fn handle_https_request(
                     &target_url,
                     &request_modification.headers,
                     body_to_send,
+                    request_modification.timeout_ms,
                 )
                 .await
             }
@@ -343,6 +359,7 @@ async fn handle_https_request(
                         start_time,
                         persistence_enabled: ctx.app_state.is_persistence_enabled(),
                         tls_version: Some(tls_version.to_string()),
+                        capture,
                     },
                     ctx.app_state.clone(),
                     ctx.body_storage.clone(),
@@ -394,12 +411,14 @@ async fn handle_https_request(
     // --- Buffering path (body-modifying rules) ---------------------------
     let forward_result = match absolute_url {
         Ok(url) => {
-            forward_collect(
+            super::upstream::forward_collect_with_proxy(
                 &ctx.upstream_client,
                 method.clone(),
                 &url,
                 &request_modification.headers,
                 body_to_send,
+                request_modification.timeout_ms,
+                request_modification.upstream_proxy.as_ref(),
             )
             .await
         }

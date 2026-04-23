@@ -58,44 +58,101 @@ pub fn build_upstream_client(enable_http2: bool) -> SharedClient {
 /// Forward a request to an absolute URL through the shared client, then
 /// collect the response body eagerly. This is the common shape used by all
 /// proxy code paths that don't need response streaming.
+///
+/// `timeout_ms` optionally wraps both the request dispatch and body-collect
+/// phases with a tokio timeout — returning `PostGateError::Proxy("timeout")`
+/// when exceeded. Used to implement whistle's `timeout://<ms>` rule action.
 pub async fn forward_collect(
     client: &SharedClient,
     method: hyper::Method,
     absolute_url: &str,
     headers: &HashMap<String, String>,
     body: Bytes,
+    timeout_ms: Option<u64>,
 ) -> Result<(Response<()>, CapturedBody)> {
+    forward_collect_with_proxy(client, method, absolute_url, headers, body, timeout_ms, None).await
+}
+
+/// Same as `forward_collect` but routes through an upstream proxy if one
+/// was supplied via a `proxy://` / `socks://` rule action.
+pub async fn forward_collect_with_proxy(
+    client: &SharedClient,
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HashMap<String, String>,
+    body: Bytes,
+    timeout_ms: Option<u64>,
+    upstream_proxy: Option<&crate::rules::UpstreamProxy>,
+) -> Result<(Response<()>, CapturedBody)> {
+    // When a proxy rule matched we bypass the pooled client entirely because
+    // the pool keys on (scheme, host, port) and knows nothing about chained
+    // proxies. Performance-critical use cases for chained proxies are rare.
+    if let Some(proxy) = upstream_proxy {
+        return super::chain::forward_via_proxy(method, absolute_url, headers, body, proxy, timeout_ms)
+            .await;
+    }
+
     let req = build_upstream_request(method, absolute_url, headers, body)?;
-    let resp = client
-        .request(req)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+    let fut = async {
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
 
-    let (parts, incoming) = resp.into_parts();
-    let captured = collect_body(incoming, MAX_BODY_SIZE)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
+        let (parts, incoming) = resp.into_parts();
+        let captured = collect_body(incoming, MAX_BODY_SIZE)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
 
-    Ok((Response::from_parts(parts, ()), captured))
+        Ok((Response::from_parts(parts, ()), captured))
+    };
+
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), fut).await {
+            Ok(result) => result,
+            Err(_) => Err(PostGateError::Proxy(format!(
+                "Upstream request timed out after {} ms",
+                ms
+            ))),
+        },
+        None => fut.await,
+    }
 }
 
 /// Forward a request to an absolute URL and return the streaming response
 /// (parts + unconsumed body) so the caller can either collect or pass through.
 /// Used by the TTFB-optimized streaming path.
+///
+/// `timeout_ms` bounds only the time until response headers arrive — streaming
+/// the body itself is unbounded, matching whistle semantics where the timeout
+/// covers only upstream responsiveness.
 pub async fn forward_stream(
     client: &SharedClient,
     method: hyper::Method,
     absolute_url: &str,
     headers: &HashMap<String, String>,
     body: Bytes,
+    timeout_ms: Option<u64>,
 ) -> Result<(hyper::http::response::Parts, hyper::body::Incoming)> {
     let req = build_upstream_request(method, absolute_url, headers, body)?;
-    let resp = client
-        .request(req)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+    let fut = async {
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+        Ok(resp.into_parts())
+    };
 
-    Ok(resp.into_parts())
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), fut).await {
+            Ok(result) => result,
+            Err(_) => Err(PostGateError::Proxy(format!(
+                "Upstream request timed out after {} ms",
+                ms
+            ))),
+        },
+        None => fut.await,
+    }
 }
 
 /// Build a boxed-body request targeting an absolute URL, filtering out

@@ -189,6 +189,20 @@ impl AppState {
         }
     }
 
+    /// Emit a request event only if capture is enabled for this request.
+    /// Used to implement whistle `disable://capture` — the request still
+    /// proxies normally, but no UI / persistence trace is left.
+    pub fn emit_request_event_if(
+        self: &Arc<Self>,
+        capture: bool,
+        event: &CapturedRequestEvent,
+    ) {
+        if !capture {
+            return;
+        }
+        self.emit_request_event(event);
+    }
+
     /// Start (lazily) the background task that drains the emit queue. One
     /// task per `AppState`; returns the sender.
     fn ensure_emit_worker(self: &Arc<Self>) -> &mpsc::Sender<CapturedRequestEvent> {

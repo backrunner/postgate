@@ -95,6 +95,43 @@ pub struct RequestModification {
     pub debug_name: Option<String>,
     /// Plugin to handle request (name, config)
     pub plugin: Option<PluginHandlerInfo>,
+    /// Upstream timeout in milliseconds (whistle `timeout://<ms>`). When set
+    /// the forward call is wrapped in `tokio::time::timeout`; expiring
+    /// returns 504 Gateway Timeout to the client.
+    pub timeout_ms: Option<u64>,
+    /// Feature flags opted into via `enable://`.
+    pub enabled_features: Vec<String>,
+    /// Feature flags opted out of via `disable://`.
+    pub disabled_features: Vec<String>,
+    /// Upstream proxy to chain this request through (whistle
+    /// `proxy://`/`http-proxy://`/`https-proxy://`/`socks://`). When set the
+    /// forward client is built against this upstream proxy instead of
+    /// connecting directly.
+    pub upstream_proxy: Option<UpstreamProxy>,
+}
+
+/// An upstream proxy configuration derived from `proxy://` / `socks://`
+/// actions.
+#[derive(Debug, Clone)]
+pub struct UpstreamProxy {
+    pub kind: UpstreamProxyKind,
+    pub host: String,
+    pub port: u16,
+    pub auth: Option<ProxyCreds>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpstreamProxyKind {
+    Http,
+    Https,
+    Socks4,
+    Socks5,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyCreds {
+    pub username: String,
+    pub password: String,
 }
 
 /// Plugin handler information
@@ -152,13 +189,21 @@ pub fn rules_require_response_body(matched_rules: &[MatchedRule]) -> bool {
                 | RuleAction::HtmlBody { .. }
                 | RuleAction::CssBody { .. }
                 | RuleAction::JsBody { .. }
+                | RuleAction::JsonBody { .. }
                 | RuleAction::ResponseReplace { .. }
+                | RuleAction::HtmlReplace { .. }
+                | RuleAction::JsReplace { .. }
+                | RuleAction::CssReplace { .. }
                 | RuleAction::HtmlAppend { .. }
                 | RuleAction::HtmlPrepend { .. }
                 | RuleAction::JsAppend { .. }
                 | RuleAction::JsPrepend { .. }
                 | RuleAction::CssAppend { .. }
-                | RuleAction::CssPrepend { .. } => return true,
+                | RuleAction::CssPrepend { .. }
+                | RuleAction::ResponsePrepend { .. }
+                | RuleAction::ResponseAppend { .. }
+                | RuleAction::Echo
+                | RuleAction::Mock { .. } => return true,
                 // Response throttling requires owning the body chunks.
                 RuleAction::Speed { response_kbps, .. } if response_kbps.is_some() => return true,
                 // Debug injects a <script> into HTML responses.
@@ -181,9 +226,10 @@ pub fn rules_require_request_body(matched_rules: &[MatchedRule]) -> bool {
         }
         for action in &matched.rule.actions {
             match action {
-                RuleAction::RequestBody { .. } | RuleAction::RequestReplace { .. } => {
-                    return true
-                }
+                RuleAction::RequestBody { .. }
+                | RuleAction::RequestReplace { .. }
+                | RuleAction::RequestPrepend { .. }
+                | RuleAction::RequestAppend { .. } => return true,
                 RuleAction::Speed { request_kbps, .. } if request_kbps.is_some() => return true,
                 RuleAction::Plugin { .. } => return true,
                 _ => {}
@@ -191,6 +237,36 @@ pub fn rules_require_request_body(matched_rules: &[MatchedRule]) -> bool {
         }
     }
     false
+}
+
+/// Whistle feature flags consumed by the proxy. Values match the whistle
+/// `enable://` / `disable://` token names (lowercased).
+pub mod feature {
+    /// Don't record this request in the UI or persistent capture.
+    pub const CAPTURE: &str = "capture";
+    /// Legacy alias of `capture` — whistle users also use `hide`.
+    pub const HIDE: &str = "hide";
+    /// Close the connection without responding. Useful for simulating peer
+    /// disconnects.
+    pub const ABORT: &str = "abort";
+}
+
+/// Returns true if `feature` is not in the modification's `disabled_features`.
+/// Used at capture / emit sites to honor `disable://capture`.
+pub fn capture_enabled(modification: &RequestModification) -> bool {
+    !modification
+        .disabled_features
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(feature::CAPTURE) || f.eq_ignore_ascii_case(feature::HIDE))
+}
+
+/// Returns true if `enable://abort` is set, i.e. the proxy should terminate
+/// this request without responding.
+pub fn should_abort(modification: &RequestModification) -> bool {
+    modification
+        .enabled_features
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(feature::ABORT))
 }
 
 /// Apply rules to a request and return modifications
@@ -464,10 +540,6 @@ pub fn apply_request_rules_with_values(
                     }
                 }
 
-                RuleAction::HttpProxy { .. } | RuleAction::HttpsProxy { .. } | RuleAction::SocksProxy { .. } => {
-                    // Upstream proxy chaining not yet implemented
-                }
-
                 RuleAction::Debug { name } => {
                     modification.debug_name = Some(name.clone());
                 }
@@ -489,6 +561,96 @@ pub fn apply_request_rules_with_values(
                         name: name.clone(),
                         config: config.clone(),
                     });
+                }
+
+                // `reqPrepend://` — prepend raw text to the request body.
+                RuleAction::RequestPrepend { content } => {
+                    let extra = resolve_bytes(content, inline, res);
+                    let current = modification.body.clone().unwrap_or_default();
+                    let mut combined = Vec::with_capacity(extra.len() + current.len());
+                    combined.extend_from_slice(&extra);
+                    combined.extend_from_slice(&current);
+                    modification.body = Some(Bytes::from(combined));
+                }
+
+                // `reqAppend://` — append raw text to the request body.
+                RuleAction::RequestAppend { content } => {
+                    let extra = resolve_bytes(content, inline, res);
+                    let current = modification.body.clone().unwrap_or_default();
+                    let mut combined = Vec::with_capacity(extra.len() + current.len());
+                    combined.extend_from_slice(&current);
+                    combined.extend_from_slice(&extra);
+                    modification.body = Some(Bytes::from(combined));
+                }
+
+                // `timeout://<ms>` — abort the upstream call if it takes longer.
+                // Stored on the RequestModification; consumed in the proxy
+                // forward sites via tokio::time::timeout.
+                RuleAction::Timeout { ms } => {
+                    modification.timeout_ms = Some(*ms);
+                }
+
+                // `delete://name1,name2` — pure request-header removal.
+                RuleAction::DeleteHeaders { headers } => {
+                    for name in headers {
+                        let lower = name.to_lowercase();
+                        modification.headers.remove(&lower);
+                        modification.headers_to_remove.push(lower);
+                    }
+                }
+
+                // Upstream proxy chaining — captured on the modification so
+                // the forward sites can route through a per-target pooled
+                // client. The actual connection is still made lazily by
+                // the proxy::upstream module.
+                RuleAction::HttpProxy { host, port, auth } => {
+                    modification.upstream_proxy = Some(UpstreamProxy {
+                        kind: UpstreamProxyKind::Http,
+                        host: host.clone(),
+                        port: *port,
+                        auth: auth.as_ref().map(|a| ProxyCreds {
+                            username: a.username.clone(),
+                            password: a.password.clone(),
+                        }),
+                    });
+                }
+                RuleAction::HttpsProxy { host, port, auth } => {
+                    modification.upstream_proxy = Some(UpstreamProxy {
+                        kind: UpstreamProxyKind::Https,
+                        host: host.clone(),
+                        port: *port,
+                        auth: auth.as_ref().map(|a| ProxyCreds {
+                            username: a.username.clone(),
+                            password: a.password.clone(),
+                        }),
+                    });
+                }
+                RuleAction::SocksProxy { host, port, version, auth } => {
+                    let kind = if *version == 4 {
+                        UpstreamProxyKind::Socks4
+                    } else {
+                        UpstreamProxyKind::Socks5
+                    };
+                    modification.upstream_proxy = Some(UpstreamProxy {
+                        kind,
+                        host: host.clone(),
+                        port: *port,
+                        auth: auth.as_ref().map(|a| ProxyCreds {
+                            username: a.username.clone(),
+                            password: a.password.clone(),
+                        }),
+                    });
+                }
+
+                // `enable://<features>` / `disable://<features>` — toggled
+                // for the duration of this request. Currently only a few
+                // flags are wired into the proxy; the rest are recorded so
+                // plugins / reporting can see them.
+                RuleAction::Enable { features } => {
+                    modification.enabled_features.extend(features.iter().cloned());
+                }
+                RuleAction::Disable { features } => {
+                    modification.disabled_features.extend(features.iter().cloned());
                 }
 
                 _ => {
@@ -788,6 +950,119 @@ pub fn apply_response_rules_with_values(
                     }
                 }
 
+                // `jsonBody://{value}` — short-circuit with a JSON response.
+                RuleAction::JsonBody { value } => {
+                    let body_str = serde_json::to_string(value).unwrap_or_default();
+                    let resolved = resolve_bytes(&body_str, inline, res);
+                    modification.headers.insert(
+                        "content-type".to_string(),
+                        "application/json; charset=utf-8".to_string(),
+                    );
+                    modification.body = Some(resolved);
+                }
+
+                // `delete://name1,name2` — remove response headers by name.
+                RuleAction::DeleteHeaders { headers } => {
+                    for name in headers {
+                        let lower = name.to_lowercase();
+                        modification.headers.remove(&lower);
+                        modification.headers_to_remove.push(lower);
+                    }
+                }
+
+                // `echo://` — respond with an echo of the request. The
+                // applicator can't see the request body here without a hook,
+                // so we emit a textual summary using the URL/method/headers.
+                // This matches whistle's default behaviour for HTML clients.
+                RuleAction::Echo => {
+                    let mut s = String::new();
+                    s.push_str(method);
+                    s.push(' ');
+                    s.push_str(url);
+                    s.push('\n');
+                    for (k, v) in request_headers {
+                        s.push_str(k);
+                        s.push_str(": ");
+                        s.push_str(v);
+                        s.push('\n');
+                    }
+                    modification
+                        .headers
+                        .insert("content-type".to_string(), "text/plain; charset=utf-8".to_string());
+                    modification.body = Some(Bytes::from(s));
+                }
+
+                // `mock://<path>` — replace response body with the referenced
+                // file/value and pick a MIME from the name. Status is 200.
+                RuleAction::Mock { path } => {
+                    let path_str = path.to_string_lossy().into_owned();
+                    let trimmed = path_str.trim();
+                    let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                        || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
+                    let (body, guessed_ct) = if is_ref {
+                        let body = resolve_bytes(trimmed, inline, res);
+                        let name_for_mime = trimmed
+                            .trim_matches('`')
+                            .trim_start_matches('{')
+                            .trim_end_matches('}');
+                        let ct = mime_guess::from_path(name_for_mime)
+                            .first_or_octet_stream()
+                            .to_string();
+                        (body, ct)
+                    } else {
+                        let bytes = std::fs::read(path).map(Bytes::from).unwrap_or_default();
+                        let ct = mime_guess::from_path(path)
+                            .first_or_octet_stream()
+                            .to_string();
+                        (bytes, ct)
+                    };
+                    modification
+                        .headers
+                        .entry("content-type".to_string())
+                        .or_insert(guessed_ct);
+                    modification.body = Some(body);
+                    modification.status_code = Some(200);
+                }
+
+                // `htmlReplace://` / `jsReplace://` / `cssReplace://`
+                // — content-type-gated string/regex replacements. Essentially
+                // `resReplace://` scoped to a specific mime family.
+                RuleAction::HtmlReplace { pattern, replacement, regex } => {
+                    if is_html(content_type) {
+                        apply_body_replace(&mut modification.body, pattern, replacement, *regex);
+                    }
+                }
+                RuleAction::JsReplace { pattern, replacement, regex } => {
+                    if is_js(content_type) {
+                        apply_body_replace(&mut modification.body, pattern, replacement, *regex);
+                    }
+                }
+                RuleAction::CssReplace { pattern, replacement, regex } => {
+                    if is_css(content_type) {
+                        apply_body_replace(&mut modification.body, pattern, replacement, *regex);
+                    }
+                }
+
+                // `resPrepend://` / `resAppend://` — plain text prepend/append
+                // to the response body. Unlike the `html*` / `js*` / `css*`
+                // variants these are content-type agnostic.
+                RuleAction::ResponsePrepend { content } => {
+                    let extra = resolve_bytes(content, inline, res);
+                    let current = modification.body.clone().unwrap_or_default();
+                    let mut combined = Vec::with_capacity(extra.len() + current.len());
+                    combined.extend_from_slice(&extra);
+                    combined.extend_from_slice(&current);
+                    modification.body = Some(Bytes::from(combined));
+                }
+                RuleAction::ResponseAppend { content } => {
+                    let extra = resolve_bytes(content, inline, res);
+                    let current = modification.body.clone().unwrap_or_default();
+                    let mut combined = Vec::with_capacity(extra.len() + current.len());
+                    combined.extend_from_slice(&current);
+                    combined.extend_from_slice(&extra);
+                    modification.body = Some(Bytes::from(combined));
+                }
+
                 _ => {
                     // Request-only actions are skipped here
                 }
@@ -977,6 +1252,29 @@ fn is_css(content_type: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
+/// String- or regex-replace inside a response body. Used by resReplace,
+/// htmlReplace, jsReplace, cssReplace. Falls back to literal `.replace`
+/// when the supplied pattern doesn't compile as a regex.
+fn apply_body_replace(
+    body: &mut Option<Bytes>,
+    pattern: &str,
+    replacement: &str,
+    regex: bool,
+) {
+    if let Some(current) = body.as_ref() {
+        let body_str = String::from_utf8_lossy(current);
+        let new_body = if regex {
+            match regex::Regex::new(pattern) {
+                Ok(re) => re.replace_all(&body_str, replacement).to_string(),
+                Err(_) => body_str.replace(pattern, replacement),
+            }
+        } else {
+            body_str.replace(pattern, replacement)
+        };
+        *body = Some(Bytes::from(new_body));
+    }
+}
+
 /// Append or prepend content to HTML body
 fn append_to_html(body: Option<&Bytes>, content: &str, prepend: bool) -> Bytes {
     let html = body
@@ -1011,6 +1309,7 @@ fn append_to_html(body: Option<&Bytes>, content: &str, prepend: bool) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_header_modifications() {
@@ -1083,5 +1382,76 @@ mod tests {
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("SameSite=Strict"));
+    }
+
+    #[test]
+    fn test_apply_body_replace_literal() {
+        let mut body = Some(Bytes::from("hello world, hello"));
+        apply_body_replace(&mut body, "hello", "hi", false);
+        assert_eq!(body.unwrap(), Bytes::from("hi world, hi"));
+    }
+
+    #[test]
+    fn test_apply_body_replace_regex() {
+        let mut body = Some(Bytes::from("user=123; user=456"));
+        apply_body_replace(&mut body, r"user=\d+", "user=X", true);
+        assert_eq!(body.unwrap(), Bytes::from("user=X; user=X"));
+    }
+
+    #[test]
+    fn test_rules_require_response_body_covers_all_body_actions() {
+        // Guard against future regressions: if we add a body-modifying action
+        // and forget to list it here, streaming-path users silently lose it.
+        // This test exercises the predicate for a representative sample of
+        // the newly-added actions.
+        use crate::rules::engine::MatchedRule;
+        use crate::rules::types::{Pattern, Rule};
+
+        let mk_rule = |action: RuleAction| MatchedRule {
+            rule: Rule {
+                id: "t".into(),
+                pattern: Pattern::Domain("example.com".into()),
+                filters: None,
+                actions: vec![action],
+                enabled: true,
+                priority: 0,
+                raw_line: String::new(),
+                negated: false,
+            },
+            remaining_path: String::new(),
+            inline_values: Arc::new(HashMap::new()),
+        };
+
+        // Should require buffering:
+        for action in [
+            RuleAction::JsonBody { value: serde_json::json!({}) },
+            RuleAction::HtmlReplace { pattern: "a".into(), replacement: "b".into(), regex: false },
+            RuleAction::JsReplace { pattern: "a".into(), replacement: "b".into(), regex: false },
+            RuleAction::CssReplace { pattern: "a".into(), replacement: "b".into(), regex: false },
+            RuleAction::ResponsePrepend { content: "x".into() },
+            RuleAction::ResponseAppend { content: "x".into() },
+            RuleAction::Echo,
+            RuleAction::Mock { path: "/tmp/x".into() },
+        ] {
+            assert!(
+                rules_require_response_body(&[mk_rule(action.clone())]),
+                "response body should be required for {:?}",
+                action
+            );
+        }
+
+        // Should NOT require buffering:
+        for action in [
+            RuleAction::ResponseHeaders { modifications: HeaderModifications::default() },
+            RuleAction::DeleteHeaders { headers: vec!["X-Foo".into()] },
+            RuleAction::ResponseType { content_type: "text/plain".into() },
+            RuleAction::Delay { request_ms: None, response_ms: Some(100) },
+        ] {
+            assert!(
+                !rules_require_response_body(&[mk_rule(action.clone())]),
+                "response body should NOT be required for {:?}",
+                action
+            );
+        }
     }
 }

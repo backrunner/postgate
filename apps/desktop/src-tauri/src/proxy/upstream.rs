@@ -12,6 +12,7 @@ use crate::error::{PostGateError, Result};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use hyper::header::HeaderMap;
 use hyper::{Request, Response};
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
@@ -192,4 +193,102 @@ fn build_upstream_request(
     builder
         .body(Full::new(body).map_err(|_| unreachable!()).boxed())
         .map_err(|e| PostGateError::Proxy(format!("Failed to build upstream request: {}", e)))
+}
+
+/// Like [`build_upstream_request`] but takes a full `HeaderMap` so multi-value
+/// headers (`cookie` over h2, repeated client headers) reach the upstream
+/// with their original cardinality intact. Used by the header-preserving
+/// forwarding path introduced to fix lost cookies.
+fn build_upstream_request_from_headermap(
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<Request<UpstreamBody>> {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(absolute_url)
+        .body(Full::new(body).map_err(|_| unreachable!()).boxed())
+        .map_err(|e| PostGateError::Proxy(format!("Failed to build upstream request: {}", e)))?;
+
+    // Copy headers directly so multi-value entries (e.g. several `cookie` or
+    // `via` header lines) are preserved. The caller is responsible for
+    // having already stripped hop-by-hop headers via
+    // `proxy::headers::build_forward_request_headers`.
+    {
+        let dst = req.headers_mut();
+        for (name, value) in headers.iter() {
+            dst.append(name.clone(), value.clone());
+        }
+    }
+
+    Ok(req)
+}
+
+/// Forward a request using a caller-provided `HeaderMap`, then collect the
+/// response body eagerly. This is the multi-value-preserving counterpart to
+/// `forward_collect`.
+pub async fn forward_collect_headermap(
+    client: &SharedClient,
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+    timeout_ms: Option<u64>,
+) -> Result<(Response<()>, CapturedBody)> {
+    let req = build_upstream_request_from_headermap(method, absolute_url, headers, body)?;
+    let fut = async {
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+
+        let (parts, incoming) = resp.into_parts();
+        let captured = collect_body(incoming, MAX_BODY_SIZE)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
+
+        Ok((Response::from_parts(parts, ()), captured))
+    };
+
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), fut).await {
+            Ok(result) => result,
+            Err(_) => Err(PostGateError::Proxy(format!(
+                "Upstream request timed out after {} ms",
+                ms
+            ))),
+        },
+        None => fut.await,
+    }
+}
+
+/// Streaming variant of [`forward_collect_headermap`].
+pub async fn forward_stream_headermap(
+    client: &SharedClient,
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+    timeout_ms: Option<u64>,
+) -> Result<(hyper::http::response::Parts, hyper::body::Incoming)> {
+    let req = build_upstream_request_from_headermap(method, absolute_url, headers, body)?;
+    let fut = async {
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+        Ok(resp.into_parts())
+    };
+
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), fut).await {
+            Ok(result) => result,
+            Err(_) => Err(PostGateError::Proxy(format!(
+                "Upstream request timed out after {} ms",
+                ms
+            ))),
+        },
+        None => fut.await,
+    }
 }

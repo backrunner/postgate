@@ -3,6 +3,10 @@ use crate::debug::ScriptInjector;
 use crate::error::Result;
 use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::headers::{
+    apply_headers_to_response_builder, build_forward_request_headers,
+    build_forward_response_headers, flat_to_headermap, headermap_to_flat,
+};
 use crate::proxy::pool::ConnectionPool;
 use crate::proxy::sse;
 use crate::proxy::websocket;
@@ -16,6 +20,7 @@ use crate::values::RequestCtx;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Incoming;
+use hyper::header::HeaderMap;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -101,11 +106,15 @@ async fn handle_request(
         .unwrap_or_else(|| "/".to_string());
 
     // Extract headers
-    let request_headers: HashMap<String, String> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-        .collect();
+    //
+    // We keep the ORIGINAL `HeaderMap` (with full multi-value fidelity) for
+    // rebuilding the upstream request and the client response later on —
+    // folding multi-value headers like `cookie` (HTTP/2) or repeated `via`
+    // into a single string would silently drop data we need to forward.
+    // The flat `HashMap` is still produced for rule matching, UI events
+    // and template resolution, which only need a representative value.
+    let original_request_headers: HeaderMap = req.headers().clone();
+    let request_headers: HashMap<String, String> = headermap_to_flat(&original_request_headers);
 
     let content_type = request_headers.get("content-type").cloned();
 
@@ -394,18 +403,30 @@ async fn handle_request(
         parts.uri.to_string()
     };
 
+    // Rebuild the outgoing request headers starting from the ORIGINAL
+    // `HeaderMap` (preserving multi-value fidelity) and only overlaying
+    // keys the rules actually changed. This is the fix for
+    // "cookies lost through the proxy": previously we flattened headers
+    // into a `HashMap<String,String>` which silently collapsed multi-value
+    // `cookie` headers (common over HTTP/2) down to a single crumble.
+    let forward_header_map: HeaderMap = build_forward_request_headers(
+        &original_request_headers,
+        &request_headers,
+        &request_modification.headers,
+        &request_modification.headers_to_remove,
+    );
+
     // Rebuild request with modified body and headers
     let mut new_req = Request::builder()
         .method(parts.method.clone())
         .uri(&target_uri);
 
-    // Apply modified headers
-    for (k, v) in &request_modification.headers {
-        if let (Ok(name), Ok(value)) = (
-            hyper::header::HeaderName::from_bytes(k.as_bytes()),
-            hyper::header::HeaderValue::from_str(v),
-        ) {
-            new_req = new_req.header(name, value);
+    // Apply the preserved/merged header map.
+    {
+        if let Some(dst) = new_req.headers_mut() {
+            for (name, value) in forward_header_map.iter() {
+                dst.append(name.clone(), value.clone());
+            }
         }
     }
 
@@ -453,13 +474,11 @@ async fn handle_request(
                 return Ok(error_response(502, &format!("Proxy error: {}", e)));
             }
         };
-        let mut hdr_map: HashMap<String, String> = HashMap::new();
-        for (k, v) in p.headers.iter() {
-            hdr_map.insert(
-                k.to_string().to_lowercase(),
-                v.to_str().unwrap_or("").to_string(),
-            );
-        }
+        // Use the multi-value-aware flattener so chained proxies (which
+        // expect a `HashMap<String,String>`) at least receive a single
+        // `cookie` header with all crumbles joined, rather than a single
+        // random crumble from the last insert.
+        let hdr_map: HashMap<String, String> = headermap_to_flat(&p.headers);
         super::upstream::forward_collect_with_proxy(
             &ctx.upstream_client,
             p.method,
@@ -493,10 +512,8 @@ async fn handle_request(
         Ok(ForwardResult::Sse { parts, body, content_type }) => {
             // Handle SSE streaming response
             let status = parts.status.as_u16();
-            let response_headers: HashMap<String, String> = parts.headers
-                .iter()
-                .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-                .collect();
+            let original_resp_headers: HeaderMap = parts.headers.clone();
+            let response_headers: HashMap<String, String> = headermap_to_flat(&original_resp_headers);
 
             // Emit started event with SSE protocol
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -528,17 +545,12 @@ async fn handle_request(
             // Create a wrapper that captures SSE events while streaming
             let wrapped_body = SseCapturingBody::new(body, request_id_clone, ctx_clone.app_state.clone());
 
-            // Build streaming response
-            let mut builder = Response::builder().status(status);
-            for (k, v) in &response_headers {
-                if let (Ok(name), Ok(value)) = (
-                    hyper::header::HeaderName::from_bytes(k.as_bytes()),
-                    hyper::header::HeaderValue::from_str(v),
-                ) {
-                    builder = builder.header(name, value);
-                }
-            }
-            
+            // Build streaming response — preserve multi-value headers
+            // (particularly `Set-Cookie`) by starting from the original
+            // upstream HeaderMap rather than a flattened map.
+            let builder = Response::builder().status(status);
+            let builder = apply_headers_to_response_builder(builder, &original_resp_headers);
+
             // Convert the wrapped body to BoxBody
             let boxed_body = wrapped_body.boxed();
             Ok(builder.body(boxed_body).unwrap())
@@ -547,11 +559,8 @@ async fn handle_request(
             // Fast path: no matched rule rewrites the body, so stream straight
             // through. The client's TTFB then matches the upstream's TTFB.
             let status = parts.status.as_u16();
-            let upstream_headers: HashMap<String, String> = parts
-                .headers
-                .iter()
-                .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-                .collect();
+            let original_resp_headers: HeaderMap = parts.headers.clone();
+            let upstream_headers: HashMap<String, String> = headermap_to_flat(&original_resp_headers);
 
             // Apply non-body response rules (headers, status, cookies,
             // header-removes, delay). `response_modification.body` is
@@ -570,13 +579,17 @@ async fn handle_request(
             );
 
             let final_status = response_modification.status_code.unwrap_or(status);
-            // Run the shared header finalization so cookies + removals land
-            // consistently across streaming and buffering paths.
-            let final_headers = super::passthrough::finalize_response_headers(
+            // Rebuild the outgoing response HeaderMap while preserving the
+            // upstream's multi-value headers (notably multiple Set-Cookie).
+            // This replaces the legacy flat-map finalization which would
+            // collapse multiple Set-Cookie entries into one joined string.
+            let final_header_map: HeaderMap = build_forward_response_headers(
+                &original_resp_headers,
                 &upstream_headers,
                 &response_modification,
                 None,
             );
+            let final_headers = headermap_to_flat(&final_header_map);
 
             // Apply response delay (resDelay://) before sending the first
             // byte so the client observes the full TTFB penalty, not just
@@ -612,24 +625,14 @@ async fn handle_request(
                 ctx.body_storage.clone(),
             );
 
-            let mut builder = Response::builder().status(final_status);
-            for (k, v) in &final_headers {
-                if let (Ok(name), Ok(value)) = (
-                    hyper::header::HeaderName::from_bytes(k.as_bytes()),
-                    hyper::header::HeaderValue::from_str(v),
-                ) {
-                    builder = builder.header(name, value);
-                }
-            }
+            let builder = Response::builder().status(final_status);
+            let builder = apply_headers_to_response_builder(builder, &final_header_map);
             Ok(builder.body(wrapped.boxed()).unwrap())
         }
         Ok(ForwardResult::Normal { response: resp, body: response_body }) => {
             let status = resp.status().as_u16();
-            let response_headers: HashMap<String, String> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-                .collect();
+            let original_resp_headers: HeaderMap = resp.headers().clone();
+            let response_headers: HashMap<String, String> = headermap_to_flat(&original_resp_headers);
 
             let response_content_type = response_headers.get("content-type").cloned();
 
@@ -721,6 +724,7 @@ async fn handle_request(
             let mut final_body = plugin_modified_body
                 .or(response_modification.body.clone())
                 .unwrap_or(response_body.data.clone());
+            let plugin_replaced_headers = plugin_modified_headers.is_some();
             let headers_source = plugin_modified_headers.unwrap_or(response_modification.headers.clone());
 
             // Inject debug script if enabled (this changes the body).
@@ -743,8 +747,9 @@ async fn handle_request(
 
             // Finalize headers: apply `headers_to_remove`, fold in cookies,
             // strip stale content-encoding/transfer-encoding and set
-            // content-length when the body was replaced. Uses the same
-            // helper as the streaming path so semantics match.
+            // content-length when the body was replaced. We now use the
+            // HeaderMap-preserving builder so multiple upstream Set-Cookie
+            // entries survive intact.
             let mut modified_for_finalize = ResponseModification {
                 headers: headers_source,
                 headers_to_remove: response_modification.headers_to_remove.clone(),
@@ -754,8 +759,22 @@ async fn handle_request(
             // The helper only needs headers / removals / cookies to do its
             // job; zero the rest.
             modified_for_finalize.status_code = response_modification.status_code;
-            let final_headers = super::passthrough::finalize_response_headers(
-                &response_headers,
+            // If a plugin replaced the headers wholesale we can't preserve
+            // upstream multi-value entries — the plugin has authored a final
+            // header map already, so we materialize a fresh HeaderMap from
+            // its flat form. Otherwise we keep the upstream HeaderMap as the
+            // base so multiple Set-Cookie entries pass through intact.
+            let (base_headers, base_flat): (HeaderMap, HashMap<String, String>) =
+                if plugin_replaced_headers {
+                    let hm = flat_to_headermap(&modified_for_finalize.headers);
+                    let flat = modified_for_finalize.headers.clone();
+                    (hm, flat)
+                } else {
+                    (original_resp_headers.clone(), response_headers.clone())
+                };
+            let final_header_map: HeaderMap = build_forward_response_headers(
+                &base_headers,
+                &base_flat,
                 &modified_for_finalize,
                 if body_was_modified {
                     Some(final_body.len())
@@ -763,6 +782,7 @@ async fn handle_request(
                     None
                 },
             );
+            let final_headers = headermap_to_flat(&final_header_map);
 
             let final_size = final_body.len() as u64;
 
@@ -804,15 +824,8 @@ async fn handle_request(
             });
 
             // Build final response with modified headers and body
-            let mut builder = Response::builder().status(final_status);
-            for (k, v) in &final_headers {
-                if let (Ok(name), Ok(value)) = (
-                    hyper::header::HeaderName::from_bytes(k.as_bytes()),
-                    hyper::header::HeaderValue::from_str(v),
-                ) {
-                    builder = builder.header(name, value);
-                }
-            }
+            let builder = Response::builder().status(final_status);
+            let builder = apply_headers_to_response_builder(builder, &final_header_map);
             let new_resp = builder
                 .body(Full::new(final_body).map_err(|_| unreachable!()).boxed())
                 .unwrap();

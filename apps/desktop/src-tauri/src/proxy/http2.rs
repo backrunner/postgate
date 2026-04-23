@@ -14,6 +14,10 @@ use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
 use crate::proxy::body::{CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
+use crate::proxy::headers::{
+    apply_headers_to_response_builder_h2, build_forward_request_headers,
+    build_forward_response_headers, flat_to_headermap, headermap_to_flat,
+};
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
 };
@@ -119,16 +123,14 @@ async fn handle_http2_request(
     };
 
     // Extract headers (lowercased, h2 has these in `:authority` / `:path` etc.)
-    let request_headers: HashMap<String, String> = request
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.to_string().to_lowercase(),
-                v.to_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
+    //
+    // Preserve the original `HeaderMap`. HTTP/2 browsers routinely split
+    // cookies into one header per crumble (RFC 7540 §8.1.2.5) — flattening
+    // to a `HashMap` here would discard every crumble except the last,
+    // which is the exact failure mode users hit as "logged out after
+    // going through the proxy". See `build_forward_request_headers`.
+    let original_request_headers: HeaderMap = request.headers().clone();
+    let request_headers: HashMap<String, String> = headermap_to_flat(&original_request_headers);
 
     let content_type = request_headers.get("content-type").cloned();
 
@@ -392,14 +394,23 @@ async fn handle_http2_request(
     // the main TTFB lever.
     let buffer_response_body = crate::rules::rules_require_response_body(&matched_rules);
 
+    // Build the upstream HeaderMap once, reusing the multi-value-preserving
+    // builder shared with the h1 path.
+    let forward_header_map: HeaderMap = build_forward_request_headers(
+        &original_request_headers,
+        &request_headers,
+        &request_modification.headers,
+        &request_modification.headers_to_remove,
+    );
+
     if !buffer_response_body && request_modification.upstream_proxy.is_none() {
         let stream_result = match absolute_url {
             Ok(target_url) => {
-                super::upstream::forward_stream(
+                super::upstream::forward_stream_headermap(
                     &ctx.upstream_client,
                     method.clone(),
                     &target_url,
-                    &request_modification.headers,
+                    &forward_header_map,
                     body_to_send,
                     request_modification.timeout_ms,
                 )
@@ -411,16 +422,9 @@ async fn handle_http2_request(
         match stream_result {
             Ok((up_parts, up_body)) => {
                 let status = up_parts.status.as_u16();
-                let upstream_headers: HashMap<String, String> = up_parts
-                    .headers
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.to_string().to_lowercase(),
-                            v.to_str().unwrap_or("").to_string(),
-                        )
-                    })
-                    .collect();
+                let original_resp_headers: HeaderMap = up_parts.headers.clone();
+                let upstream_headers: HashMap<String, String> =
+                    headermap_to_flat(&original_resp_headers);
 
                 let response_content_type = upstream_headers.get("content-type").cloned();
                 let response_modification = apply_response_rules_with_values(
@@ -434,13 +438,16 @@ async fn handle_http2_request(
                     &resolve_ctx,
                 );
                 let final_status = response_modification.status_code.unwrap_or(status);
-                // Unified header finalization — applies resHeaders://-X-Foo
-                // removals, fold in resCookies:// Set-Cookie values.
-                let final_headers = super::passthrough::finalize_response_headers(
+                // HeaderMap-preserving finalization — keep multi-value
+                // Set-Cookie from upstream and append resCookies:// entries
+                // as distinct header lines.
+                let final_header_map: HeaderMap = build_forward_response_headers(
+                    &original_resp_headers,
                     &upstream_headers,
                     &response_modification,
                     None,
                 );
+                let final_headers = headermap_to_flat(&final_header_map);
 
                 // resDelay:// — sleep before sending the first h2 HEADERS frame.
                 if let Some(delay_ms) = response_modification.delay_ms {
@@ -448,14 +455,9 @@ async fn handle_http2_request(
                 }
 
                 // Send headers to the h2 client (no end-of-stream yet)
-                let mut response_builder = Response::builder().status(final_status);
-                {
-                    let hdrs = response_builder.headers_mut().ok_or_else(|| {
-                        PostGateError::Proxy("Invalid response builder state".into())
-                    })?;
-                    apply_flat_headers_to(hdrs, &final_headers);
-                }
-                let h2_response = response_builder
+                let builder = Response::builder().status(final_status);
+                let builder = apply_headers_to_response_builder_h2(builder, &final_header_map);
+                let h2_response = builder
                     .body(())
                     .map_err(|e| PostGateError::Proxy(format!("Failed to build response: {}", e)))?;
                 let mut send_stream = respond
@@ -530,16 +532,29 @@ async fn handle_http2_request(
     // Buffering path (rules rewrite the body)
     let forward_result = match absolute_url {
         Ok(absolute) => {
-            super::upstream::forward_collect_with_proxy(
-                &ctx.upstream_client,
-                method.clone(),
-                &absolute,
-                &request_modification.headers,
-                body_to_send,
-                request_modification.timeout_ms,
-                request_modification.upstream_proxy.as_ref(),
-            )
-            .await
+            if let Some(proxy) = request_modification.upstream_proxy.as_ref() {
+                let flat_for_chain = headermap_to_flat(&forward_header_map);
+                super::upstream::forward_collect_with_proxy(
+                    &ctx.upstream_client,
+                    method.clone(),
+                    &absolute,
+                    &flat_for_chain,
+                    body_to_send,
+                    request_modification.timeout_ms,
+                    Some(proxy),
+                )
+                .await
+            } else {
+                super::upstream::forward_collect_headermap(
+                    &ctx.upstream_client,
+                    method.clone(),
+                    &absolute,
+                    &forward_header_map,
+                    body_to_send,
+                    request_modification.timeout_ms,
+                )
+                .await
+            }
         }
         Err(e) => Err(e),
     };
@@ -547,16 +562,9 @@ async fn handle_http2_request(
     match forward_result {
         Ok((resp, response_body)) => {
             let status = resp.status().as_u16();
-            let upstream_headers: HashMap<String, String> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.to_string().to_lowercase(),
-                        v.to_str().unwrap_or("").to_string(),
-                    )
-                })
-                .collect();
+            let original_resp_headers: HeaderMap = resp.headers().clone();
+            let upstream_headers: HashMap<String, String> =
+                headermap_to_flat(&original_resp_headers);
 
             let response_content_type = upstream_headers.get("content-type").cloned();
 
@@ -648,6 +656,7 @@ async fn handle_http2_request(
             let mut final_body = plugin_modified_body
                 .or(response_modification.body.clone())
                 .unwrap_or(response_body.data.clone());
+            let plugin_replaced_headers = plugin_modified_headers.is_some();
             let headers_source = plugin_modified_headers
                 .unwrap_or_else(|| response_modification.headers.clone());
 
@@ -678,11 +687,24 @@ async fn handle_http2_request(
                 ..Default::default()
             };
             modified_for_finalize.status_code = response_modification.status_code;
-            let final_headers = super::passthrough::finalize_response_headers(
-                &upstream_headers,
+            // Plugin-authored header maps are already flat; everything else
+            // rides on the original upstream HeaderMap so multi-value
+            // Set-Cookie survives.
+            let (base_headers, base_flat): (HeaderMap, HashMap<String, String>) =
+                if plugin_replaced_headers {
+                    let hm = flat_to_headermap(&modified_for_finalize.headers);
+                    let flat = modified_for_finalize.headers.clone();
+                    (hm, flat)
+                } else {
+                    (original_resp_headers.clone(), upstream_headers.clone())
+                };
+            let final_header_map: HeaderMap = build_forward_response_headers(
+                &base_headers,
+                &base_flat,
                 &modified_for_finalize,
                 if body_was_modified { Some(final_body.len()) } else { None },
             );
+            let final_headers = headermap_to_flat(&final_header_map);
 
             let final_size = final_body.len() as u64;
             let final_duration = start_time.elapsed().as_millis() as u64;
@@ -720,7 +742,7 @@ async fn handle_http2_request(
                 },
             });
 
-            send_h2_response(&mut respond, final_status, &final_headers, final_body)?;
+            send_h2_response_headermap(&mut respond, final_status, &final_header_map, final_body)?;
         }
         Err(e) => {
             let duration = start_time.elapsed().as_millis() as u64;
@@ -774,6 +796,36 @@ fn send_h2_response(
             .ok_or_else(|| PostGateError::Proxy("Invalid response builder state".into()))?;
         apply_flat_headers_to(header_map, headers);
     }
+
+    let response = builder
+        .body(())
+        .map_err(|e| PostGateError::Proxy(format!("Failed to build h2 response: {}", e)))?;
+
+    let end_stream = body.is_empty();
+    let mut send_stream = respond
+        .send_response(response, end_stream)
+        .map_err(|e| PostGateError::Proxy(format!("Failed to send h2 response headers: {}", e)))?;
+
+    if !end_stream {
+        send_stream
+            .send_data(body, true)
+            .map_err(|e| PostGateError::Proxy(format!("Failed to send h2 response body: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Same as [`send_h2_response`] but takes a fully-built `HeaderMap` so
+/// multi-value headers (e.g. multiple `Set-Cookie` lines) are emitted as
+/// distinct h2 header entries instead of being collapsed through a flat
+/// map. Used by the multi-value-preserving buffering path.
+fn send_h2_response_headermap(
+    respond: &mut SendResponse<Bytes>,
+    status: u16,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<()> {
+    let builder = Response::builder().status(status);
+    let builder = apply_headers_to_response_builder_h2(builder, headers);
 
     let response = builder
         .body(())

@@ -3,6 +3,10 @@ use crate::error::{PostGateError, Result};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
+use crate::proxy::headers::{
+    apply_headers_to_response_builder, build_forward_request_headers,
+    build_forward_response_headers, headermap_to_flat,
+};
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
 };
@@ -11,6 +15,7 @@ use crate::values::RequestCtx;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Full};
 use hyper::body::Incoming;
+use hyper::header::HeaderMap;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -100,11 +105,13 @@ async fn handle_https_request(
     };
 
     // Extract headers
-    let request_headers: HashMap<String, String> = req
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-        .collect();
+    //
+    // Preserve the original `HeaderMap` so multi-value entries (cookies
+    // sent as separate headers over h2-then-downgraded, repeated `via`,
+    // etc.) can be replayed upstream with their original cardinality.
+    // The flat `HashMap` is the lossy view used for rule matching / UI.
+    let original_request_headers: HeaderMap = req.headers().clone();
+    let request_headers: HashMap<String, String> = headermap_to_flat(&original_request_headers);
 
     let content_type = request_headers.get("content-type").cloned();
 
@@ -285,17 +292,29 @@ async fn handle_https_request(
 
     let body_to_send = request_modification.body.unwrap_or(request_body.data.clone());
 
+    // Build the multi-value-preserving `HeaderMap` to ship upstream. We
+    // start from the original client headers and overlay only what the
+    // rules actually modified; untouched keys pass through with their
+    // original cardinality intact. This is the core of the cookie-loss
+    // fix on the HTTPS path.
+    let forward_header_map: HeaderMap = build_forward_request_headers(
+        &original_request_headers,
+        &request_headers,
+        &request_modification.headers,
+        &request_modification.headers_to_remove,
+    );
+
     // --- Streaming path ---------------------------------------------------
     // Streaming bypass requires the shared pooled client; chained proxy
     // routes don't go through it, so they always take the buffering path.
     if !buffer_response_body && request_modification.upstream_proxy.is_none() {
         let stream_result = match absolute_url {
             Ok(target_url) => {
-                super::upstream::forward_stream(
+                super::upstream::forward_stream_headermap(
                     &ctx.upstream_client,
                     method.clone(),
                     &target_url,
-                    &request_modification.headers,
+                    &forward_header_map,
                     body_to_send,
                     request_modification.timeout_ms,
                 )
@@ -307,11 +326,9 @@ async fn handle_https_request(
         return match stream_result {
             Ok((parts, body)) => {
                 let status = parts.status.as_u16();
-                let upstream_headers: HashMap<String, String> = parts
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-                    .collect();
+                let original_resp_headers: HeaderMap = parts.headers.clone();
+                let upstream_headers: HashMap<String, String> =
+                    headermap_to_flat(&original_resp_headers);
 
                 let response_content_type = upstream_headers.get("content-type").cloned();
                 let response_modification = apply_response_rules_with_values(
@@ -325,15 +342,15 @@ async fn handle_https_request(
                     &resolve_ctx,
                 );
                 let final_status = response_modification.status_code.unwrap_or(status);
-                // Unified header finalization: applies `headers_to_remove`,
-                // fold in `resCookies://` set-cookies, strip stale
-                // content-encoding/transfer-encoding/content-length when the
-                // body was replaced (body is unchanged in this branch).
-                let final_headers = super::passthrough::finalize_response_headers(
+                // HeaderMap-preserving finalization — multi-value Set-Cookie
+                // from upstream survives intact.
+                let final_header_map: HeaderMap = build_forward_response_headers(
+                    &original_resp_headers,
                     &upstream_headers,
                     &response_modification,
                     None,
                 );
+                let final_headers = headermap_to_flat(&final_header_map);
 
                 // resDelay:// — delay before first byte.
                 if let Some(delay_ms) = response_modification.delay_ms {
@@ -365,15 +382,8 @@ async fn handle_https_request(
                     ctx.body_storage.clone(),
                 );
 
-                let mut builder = Response::builder().status(final_status);
-                for (k, v) in &final_headers {
-                    if let (Ok(name), Ok(value)) = (
-                        hyper::header::HeaderName::from_bytes(k.as_bytes()),
-                        hyper::header::HeaderValue::from_str(v),
-                    ) {
-                        builder = builder.header(name, value);
-                    }
-                }
+                let builder = Response::builder().status(final_status);
+                let builder = apply_headers_to_response_builder(builder, &final_header_map);
                 Ok(builder.body(wrapped.boxed()).unwrap())
             }
             Err(e) => {
@@ -411,16 +421,31 @@ async fn handle_https_request(
     // --- Buffering path (body-modifying rules) ---------------------------
     let forward_result = match absolute_url {
         Ok(url) => {
-            super::upstream::forward_collect_with_proxy(
-                &ctx.upstream_client,
-                method.clone(),
-                &url,
-                &request_modification.headers,
-                body_to_send,
-                request_modification.timeout_ms,
-                request_modification.upstream_proxy.as_ref(),
-            )
-            .await
+            if let Some(proxy) = request_modification.upstream_proxy.as_ref() {
+                // Chained proxies still run through the flat-map path. Use
+                // our multi-value-aware flattener so cookies don't collapse.
+                let flat_for_chain = headermap_to_flat(&forward_header_map);
+                super::upstream::forward_collect_with_proxy(
+                    &ctx.upstream_client,
+                    method.clone(),
+                    &url,
+                    &flat_for_chain,
+                    body_to_send,
+                    request_modification.timeout_ms,
+                    Some(proxy),
+                )
+                .await
+            } else {
+                super::upstream::forward_collect_headermap(
+                    &ctx.upstream_client,
+                    method.clone(),
+                    &url,
+                    &forward_header_map,
+                    body_to_send,
+                    request_modification.timeout_ms,
+                )
+                .await
+            }
         }
         Err(e) => Err(e),
     };
@@ -428,11 +453,9 @@ async fn handle_https_request(
     match forward_result {
         Ok((resp, response_body)) => {
             let status = resp.status().as_u16();
-            let upstream_headers: HashMap<String, String> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.to_string().to_lowercase(), v.to_str().unwrap_or("").to_string()))
-                .collect();
+            let original_resp_headers: HeaderMap = resp.headers().clone();
+            let upstream_headers: HashMap<String, String> =
+                headermap_to_flat(&original_resp_headers);
 
             let response_content_type = upstream_headers.get("content-type").cloned();
 
@@ -472,11 +495,16 @@ async fn handle_https_request(
 
             let body_was_modified = final_body != response_body.data;
             let final_status = response_modification.status_code.unwrap_or(status);
-            let final_headers = super::passthrough::finalize_response_headers(
+            // HeaderMap-preserving finalization — upstream multi-value
+            // Set-Cookie stays intact, resCookies:// entries are appended as
+            // their own header lines.
+            let final_header_map: HeaderMap = build_forward_response_headers(
+                &original_resp_headers,
                 &upstream_headers,
                 &response_modification,
                 if body_was_modified { Some(final_body.len()) } else { None },
             );
+            let final_headers = headermap_to_flat(&final_header_map);
 
             let response_size = final_body.len() as u64;
             let duration = start_time.elapsed().as_millis() as u64;
@@ -514,17 +542,10 @@ async fn handle_https_request(
                 },
             });
 
-            // Build final response
-            let mut builder = Response::builder().status(final_status);
-            for (k, v) in &final_headers {
-                if let (Ok(name), Ok(value)) = (
-                    hyper::header::HeaderName::from_bytes(k.as_bytes()),
-                    hyper::header::HeaderValue::from_str(v),
-                ) {
-                    builder = builder.header(name, value);
-                }
-            }
-            
+            // Build final response with multi-value-preserving headers.
+            let builder = Response::builder().status(final_status);
+            let builder = apply_headers_to_response_builder(builder, &final_header_map);
+
             Ok(builder
                 .body(Full::new(final_body).map_err(|_| unreachable!()).boxed())
                 .unwrap())

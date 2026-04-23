@@ -49,6 +49,7 @@ Thumbs.db
 *.AppImage
 *.msi
 *.exe
+dist-bundles/
 
 # VSCode Plugins
 .history

@@ -548,6 +548,24 @@ fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
         return Ok((negated, Pattern::Domain(s.to_string())));
     }
 
+    // Host+path pattern without protocol (e.g., vm.gtimg.cn/path/to/file.js)
+    // Whistle treats bare host/path as no-schema patterns (match any protocol)
+    if s.contains('.') && s.contains('/') {
+        if let Some(slash_idx) = s.find('/') {
+            let host = s[..slash_idx].to_string();
+            let path_part = &s[slash_idx..];
+            // Strip query and hash from path
+            let path_end = path_part.find(&['?', '#'][..]).unwrap_or(path_part.len());
+            let path_str = &path_part[..path_end];
+            let path = if path_str.is_empty() {
+                None
+            } else {
+                Some(path_str.to_string())
+            };
+            return Ok((negated, Pattern::NoSchema { host, path }));
+        }
+    }
+
     // Default to exact match
     Ok((negated, Pattern::Exact(s.to_string())))
 }
@@ -2058,5 +2076,73 @@ example.com host://127.0.0.1
         } else {
             panic!("Expected Host action");
         }
+    }
+
+    #[test]
+    fn test_bare_host_path_parsed_as_no_schema() {
+        // Patterns like vm.gtimg.cn/path should be NoSchema, not Exact
+        let rules = parse_rules(
+            "vm.gtimg.cn/thumbplayer/core/1.63.2/txhlsjs-kernel.js https://vm.gtimg.cn/thumbplayer/canary/vsite-ssr/core/1.63.2-next.2/txhlsjs-kernel.js"
+        ).unwrap();
+        assert_eq!(rules.len(), 1);
+        if let Pattern::NoSchema { host, path } = &rules[0].pattern {
+            assert_eq!(host, "vm.gtimg.cn");
+            assert_eq!(
+                path.as_deref(),
+                Some("/thumbplayer/core/1.63.2/txhlsjs-kernel.js")
+            );
+        } else {
+            panic!(
+                "Expected NoSchema pattern, got {:?}",
+                rules[0].pattern
+            );
+        }
+        // The action should be Host with the full target URL
+        if let RuleAction::Host { target } = &rules[0].actions[0] {
+            assert_eq!(
+                target,
+                "https://vm.gtimg.cn/thumbplayer/canary/vsite-ssr/core/1.63.2-next.2/txhlsjs-kernel.js"
+            );
+        } else {
+            panic!("Expected Host action");
+        }
+    }
+
+    #[test]
+    fn test_bare_host_path_matches_any_protocol() {
+        // vm.gtimg.cn/path should match both http:// and https:// URLs
+        let rules = parse_rules(
+            "vm.gtimg.cn/thumbplayer/core/1.63.2/txhlsjs-kernel.js https://vm.gtimg.cn/thumbplayer/canary/vsite-ssr/core/1.63.2-next.2/txhlsjs-kernel.js"
+        ).unwrap();
+        let pattern = &rules[0].pattern;
+        assert!(
+            pattern.matches("https://vm.gtimg.cn/thumbplayer/core/1.63.2/txhlsjs-kernel.js"),
+            "Should match https URL"
+        );
+        assert!(
+            pattern.matches("http://vm.gtimg.cn/thumbplayer/core/1.63.2/txhlsjs-kernel.js"),
+            "Should match http URL"
+        );
+        assert!(
+            !pattern.matches("https://other.com/thumbplayer/core/1.63.2/txhlsjs-kernel.js"),
+            "Should not match different host"
+        );
+    }
+
+    #[test]
+    fn test_bare_host_path_no_schema_with_subpath() {
+        // example.com/api should match example.com/api/users too
+        let rules = parse_rules("example.com/api host://localhost:3000").unwrap();
+        assert_eq!(rules.len(), 1);
+        if let Pattern::NoSchema { host, path } = &rules[0].pattern {
+            assert_eq!(host, "example.com");
+            assert_eq!(path.as_deref(), Some("/api"));
+        } else {
+            panic!("Expected NoSchema pattern, got {:?}", rules[0].pattern);
+        }
+        let pattern = &rules[0].pattern;
+        assert!(pattern.matches("https://example.com/api/users"));
+        assert!(pattern.matches("http://example.com/api"));
+        assert!(!pattern.matches("https://example.com/other"));
     }
 }

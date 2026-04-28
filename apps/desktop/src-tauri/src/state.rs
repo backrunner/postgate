@@ -7,7 +7,7 @@ use crate::storage::{CapturedRequestStorage, Database};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{broadcast, mpsc};
@@ -38,6 +38,16 @@ pub struct AppState {
     /// Async channel for offloading `app_handle.emit` + persistence off the
     /// proxy hot path. Populated on first use via `ensure_emit_worker`.
     emit_tx: OnceLock<mpsc::Sender<CapturedRequestEvent>>,
+    /// Running count of request events dropped because `emit_tx` was full
+    /// or because the broadcast channel had no capacity. Previously each
+    /// drop emitted its own tracing::warn, which at 100 req/s turned into
+    /// a log flood (and itself a memory pressure vector via tracing
+    /// buffers). We now log a single summary warning at most once per
+    /// DROP_LOG_INTERVAL_MS.
+    dropped_events: AtomicU64,
+    /// Epoch-ms when we last emitted a "dropped N events" warning; 0 means
+    /// never. Used to rate-limit the warning to at most one per interval.
+    last_drop_warn_ms: AtomicI64,
 }
 
 impl AppState {
@@ -70,6 +80,8 @@ impl AppState {
             captured_storage: tokio::sync::RwLock::new(None),
             persistence_enabled: AtomicBool::new(false),
             emit_tx: OnceLock::new(),
+            dropped_events: AtomicU64::new(0),
+            last_drop_warn_ms: AtomicI64::new(0),
         }
     }
 
@@ -170,7 +182,12 @@ impl AppState {
         // one is listening (there are currently no subscribers in tree, but
         // the API is retained for future use).
         if self.request_tx.receiver_count() > 0 {
-            let _ = self.request_tx.send(event.clone());
+            if self.request_tx.send(event.clone()).is_err() {
+                // Broadcast fails only if all receivers have dropped since
+                // we last checked — no real user-visible problem, so just
+                // bump the drop counter silently.
+                self.record_drop();
+            }
         }
 
         let tx = self.ensure_emit_worker();
@@ -178,14 +195,49 @@ impl AppState {
         // (e.g. frontend paused), drop the event rather than back-pressure the
         // proxy — the UI is informational, not critical correctness.
         if let Err(e) = tx.try_send(event.clone()) {
+            self.record_drop();
             match e {
                 mpsc::error::TrySendError::Full(_) => {
-                    tracing::warn!("Emit worker queue full; dropping request event");
+                    // Full queue is the common failure mode during a
+                    // capture burst; log at most once per window.
                 }
                 mpsc::error::TrySendError::Closed(_) => {
-                    tracing::warn!("Emit worker queue closed; cannot emit request event");
+                    // This shouldn't happen unless the worker panicked —
+                    // warn unconditionally so it shows up.
+                    tracing::error!("Emit worker queue closed; cannot emit request event");
                 }
             }
+        }
+    }
+
+    /// Rate-limited drop accounting. Increments the counter and, if the
+    /// configured interval has elapsed, emits a single summary warning
+    /// covering all drops since the last warning.
+    fn record_drop(&self) {
+        const DROP_LOG_INTERVAL_MS: i64 = 5_000;
+
+        self.dropped_events.fetch_add(1, Ordering::Relaxed);
+        let now = chrono::Utc::now().timestamp_millis();
+        let last = self.last_drop_warn_ms.load(Ordering::Relaxed);
+        if now - last < DROP_LOG_INTERVAL_MS {
+            return;
+        }
+        // CAS so only one thread wins the right to log — otherwise a burst
+        // of drops would all pass the check above and re-flood the log.
+        if self
+            .last_drop_warn_ms
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let count = self.dropped_events.swap(0, Ordering::Relaxed);
+        if count > 0 {
+            tracing::warn!(
+                dropped = count,
+                window_ms = DROP_LOG_INTERVAL_MS,
+                "emit queue saturated — dropping request events (UI may be paused or lagging)"
+            );
         }
     }
 

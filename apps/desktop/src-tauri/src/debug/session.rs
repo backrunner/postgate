@@ -3,7 +3,8 @@
 use super::types::*;
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -17,6 +18,17 @@ pub enum DebugEvent {
     NetworkRequest(PageNetworkRequest),
 }
 
+/// How long a session (connected or disconnected) can stay in the manager
+/// with no activity before the background reaper evicts it. Without this
+/// cap, long-running proxy sessions accumulate thousands of abandoned
+/// DevTools tabs plus their 10K-entry log buffers in RAM forever.
+const DISCONNECTED_SESSION_TTL: Duration = Duration::from_secs(5 * 60); // 5 min
+const IDLE_SESSION_TTL: Duration = Duration::from_secs(30 * 60); // 30 min
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+/// Hard cap on concurrent sessions. If exceeded we force-evict the
+/// least-recently-active disconnected ones first.
+const MAX_SESSIONS: usize = 200;
+
 /// Manages debug sessions and their data
 pub struct SessionManager {
     sessions: DashMap<String, DebugSession>,
@@ -26,12 +38,16 @@ pub struct SessionManager {
     event_tx: broadcast::Sender<DebugEvent>,
     log_counter: AtomicUsize,
     max_logs_per_session: usize,
+    /// Monotonic wall-clock (epoch-ms) for the most recent activity across
+    /// all sessions. Used to skip the cleanup sweep when the manager is
+    /// completely idle.
+    last_activity_ms: AtomicI64,
 }
 
 impl SessionManager {
     pub fn new() -> Arc<Self> {
         let (event_tx, _) = broadcast::channel(1000);
-        Arc::new(Self {
+        let manager = Arc::new(Self {
             sessions: DashMap::new(),
             console_logs: DashMap::new(),
             page_errors: DashMap::new(),
@@ -39,7 +55,35 @@ impl SessionManager {
             event_tx,
             log_counter: AtomicUsize::new(0),
             max_logs_per_session: 10000,
-        })
+            last_activity_ms: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
+        });
+
+        Self::start_cleanup_task(&manager);
+        manager
+    }
+
+    /// Spawn the idle-session reaper onto the ambient async runtime.
+    /// Separated from `new()` so the spawn happens from an async context
+    /// (lib.rs does this inside `tauri::async_runtime::spawn` at init) —
+    /// calling `tokio::spawn` from a plain sync setup thread would panic
+    /// if no Tokio handle is entered there. Uses a `Weak` so the task
+    /// terminates once the rest of the app has dropped its references.
+    fn start_cleanup_task(manager: &Arc<Self>) {
+        let weak = Arc::downgrade(manager);
+        // `tauri::async_runtime::spawn` is routed to Tokio under the hood
+        // but is safe to call from either sync or async contexts, so we
+        // use it here to avoid the "called outside Tokio runtime" panic
+        // when SessionManager is constructed during Tauri's sync setup.
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
+            // First tick fires immediately; we don't need that.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(manager) = weak.upgrade() else { break };
+                manager.cleanup_stale_sessions();
+            }
+        });
     }
 
     /// Create a new debug session
@@ -61,6 +105,14 @@ impl SessionManager {
         self.sessions.insert(session.id.clone(), session.clone());
         self.console_logs.insert(session.id.clone(), Vec::new());
         self.page_errors.insert(session.id.clone(), Vec::new());
+        self.last_activity_ms.store(now, Ordering::Relaxed);
+
+        // Enforce hard cap on creation so a page opening thousands of
+        // short-lived debug sessions can't blow memory before the reaper
+        // catches up.
+        if self.sessions.len() > MAX_SESSIONS {
+            self.enforce_session_cap();
+        }
 
         let _ = self.event_tx.send(DebugEvent::SessionConnected(session.clone()));
 
@@ -87,9 +139,11 @@ impl SessionManager {
 
     /// Update session activity timestamp
     pub fn update_activity(&self, session_id: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
         if let Some(mut session) = self.sessions.get_mut(session_id) {
-            session.last_activity = chrono::Utc::now().timestamp_millis();
+            session.last_activity = now;
         }
+        self.last_activity_ms.store(now, Ordering::Relaxed);
     }
 
     /// Add a console log
@@ -123,7 +177,7 @@ impl SessionManager {
     pub fn add_network_request(&self, request: PageNetworkRequest) {
         self.update_activity(&request.session_id);
         let id = request.id.clone();
-        
+
         let _ = self.event_tx.send(DebugEvent::NetworkRequest(request.clone()));
         self.network_requests.insert(id, request);
     }
@@ -168,9 +222,9 @@ impl SessionManager {
             .iter()
             .flat_map(|r| r.value().clone())
             .collect();
-        
+
         all_logs.sort_by_key(|l| l.timestamp);
-        
+
         if let Some(limit) = limit {
             all_logs.into_iter().rev().take(limit).collect()
         } else {
@@ -219,6 +273,74 @@ impl SessionManager {
     pub fn subscribe(&self) -> broadcast::Receiver<DebugEvent> {
         self.event_tx.subscribe()
     }
+
+    /// Background reaper: drop sessions that have been idle past their TTL.
+    /// Disconnected sessions are evicted aggressively (5 min) since they
+    /// represent closed DevTools tabs; still-connected sessions get 30 min
+    /// before we assume the client is gone but never sent a close.
+    fn cleanup_stale_sessions(&self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let disconnected_ttl = DISCONNECTED_SESSION_TTL.as_millis() as i64;
+        let idle_ttl = IDLE_SESSION_TTL.as_millis() as i64;
+
+        let mut stale: Vec<String> = Vec::new();
+        for entry in self.sessions.iter() {
+            let session = entry.value();
+            let ttl = if session.is_connected {
+                idle_ttl
+            } else {
+                disconnected_ttl
+            };
+            if now - session.last_activity > ttl {
+                stale.push(entry.key().clone());
+            }
+        }
+
+        for id in &stale {
+            self.remove_session(id);
+        }
+
+        if !stale.is_empty() {
+            tracing::info!(
+                count = stale.len(),
+                remaining = self.sessions.len(),
+                "reaped stale debug sessions"
+            );
+        }
+
+        if self.sessions.len() > MAX_SESSIONS {
+            self.enforce_session_cap();
+        }
+    }
+
+    /// Evict oldest-activity sessions (disconnected first) until we're back
+    /// under the hard cap. Called from insert paths and from the reaper.
+    fn enforce_session_cap(&self) {
+        if self.sessions.len() <= MAX_SESSIONS {
+            return;
+        }
+        let mut candidates: Vec<(String, bool, i64)> = self
+            .sessions
+            .iter()
+            .map(|r| (r.key().clone(), r.value().is_connected, r.value().last_activity))
+            .collect();
+
+        // Sort: disconnected before connected, then oldest activity first.
+        candidates.sort_by(|a, b| match (a.1, b.1) {
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            _ => a.2.cmp(&b.2),
+        });
+
+        let to_remove = self.sessions.len().saturating_sub(MAX_SESSIONS);
+        for (id, _, _) in candidates.into_iter().take(to_remove) {
+            self.remove_session(&id);
+        }
+    }
 }
 
 impl Default for SessionManager {
@@ -232,6 +354,7 @@ impl Default for SessionManager {
             event_tx,
             log_counter: AtomicUsize::new(0),
             max_logs_per_session: 10000,
+            last_activity_ms: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
         }
     }
 }

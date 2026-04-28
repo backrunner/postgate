@@ -154,99 +154,124 @@ export function useProxy() {
 
   // Listen for proxy events
   useEffect(() => {
-    let unlistenRequest: UnlistenFn | null = null;
-    let unlistenStreamMessage: UnlistenFn | null = null;
-    let unlistenStreamEnded: UnlistenFn | null = null;
+    // `cancelled` guards against the race where the effect is cleaned up
+    // before any of the `await listen()` promises resolve. Without this,
+    // an in-flight listen() can install a listener AFTER cleanup ran,
+    // leaving it orphaned for the rest of the page's lifetime — i.e. a
+    // permanent per-remount leak.
+    let cancelled = false;
+    const unlisteners: UnlistenFn[] = [];
 
-    const setupListeners = async () => {
-      // Request events
-      unlistenRequest = await listen<RequestEvent>("proxy:request", (event) => {
-        if (isPaused) return;
-
-        const { id, eventType, data } = event.payload;
-
-        if (eventType === "started") {
-          // Add new request (queued for batching)
-          const request: CapturedRequest = {
-            id: data.id,
-            timestamp: data.timestamp,
-            method: data.method,
-            url: data.url,
-            host: data.host,
-            path: data.path,
-            requestHeaders: data.requestHeaders || {},
-            requestBody: null,
-            responseStatus: null,
-            responseHeaders: null,
-            responseBody: null,
-            durationMs: null,
-            matchedRules: data.matchedRules || [],
-            protocol: mapProtocol(data.protocol),
-            tlsInfo: data.tlsVersion
-              ? { version: data.tlsVersion, cipher: "", serverName: data.host }
-              : null,
-            contentType: data.contentType || null,
-            requestSize: data.requestSize,
-            responseSize: null,
-            remoteAddr: data.remoteAddr || null,
-          };
-          queueRequest(request);
-        } else if (eventType === "completed" || eventType === "response_received") {
-          // Update existing request (queued for batching)
-          queueUpdate(id, {
-            responseStatus: data.responseStatus,
-            responseHeaders: data.responseHeaders,
-            durationMs: data.durationMs,
-            matchedRules: data.matchedRules || [],
-            contentType: data.contentType,
-            responseSize: data.responseSize,
-          });
-        } else if (eventType === "error") {
-          // Update with error (queued for batching)
-          queueUpdate(id, {
-            durationMs: data.durationMs,
-          });
-        }
-      });
-
-      // Stream message events (SSE/WebSocket)
-      unlistenStreamMessage = await listen<StreamMessageEventPayload>("proxy:stream-message", (event) => {
-        if (isPaused) return;
-        
-        const { connectionId, message } = event.payload;
-        addMessage({
-          connectionId,
-          message: {
-            id: message.id,
-            timestamp: message.timestamp,
-            direction: message.direction as StreamDirection,
-            messageType: message.messageType as StreamMessageType,
-            data: message.data,
-            isBase64: message.isBase64,
-            size: message.size,
-          },
-        });
-      });
-
-      // Stream ended events
-      unlistenStreamEnded = await listen<StreamEndedEventPayload>("proxy:stream-ended", (event) => {
-        const { connectionId, messageCount, totalBytes, durationMs, closeReason } = event.payload;
-        endStream({
-          connectionId,
-          messageCount,
-          totalBytes,
-          durationMs,
-          closeReason,
-        });
-      });
+    const register = async (fn: Promise<UnlistenFn>) => {
+      const unlisten = await fn;
+      if (cancelled) {
+        // Effect already torn down — drop the listener we just installed.
+        unlisten();
+        return;
+      }
+      unlisteners.push(unlisten);
     };
 
-    setupListeners();
+    // Fire-and-forget; errors are logged but shouldn't block the others.
+    Promise.all([
+      register(
+        listen<RequestEvent>("proxy:request", (event) => {
+          if (isPaused) return;
+
+          const { id, eventType, data } = event.payload;
+
+          if (eventType === "started") {
+            // Add new request (queued for batching)
+            const request: CapturedRequest = {
+              id: data.id,
+              timestamp: data.timestamp,
+              method: data.method,
+              url: data.url,
+              host: data.host,
+              path: data.path,
+              requestHeaders: data.requestHeaders || {},
+              requestBody: null,
+              responseStatus: null,
+              responseHeaders: null,
+              responseBody: null,
+              durationMs: null,
+              matchedRules: data.matchedRules || [],
+              protocol: mapProtocol(data.protocol),
+              tlsInfo: data.tlsVersion
+                ? { version: data.tlsVersion, cipher: "", serverName: data.host }
+                : null,
+              contentType: data.contentType || null,
+              requestSize: data.requestSize,
+              responseSize: null,
+              remoteAddr: data.remoteAddr || null,
+            };
+            queueRequest(request);
+          } else if (eventType === "completed" || eventType === "response_received") {
+            // Update existing request (queued for batching)
+            queueUpdate(id, {
+              responseStatus: data.responseStatus,
+              responseHeaders: data.responseHeaders,
+              durationMs: data.durationMs,
+              matchedRules: data.matchedRules || [],
+              contentType: data.contentType,
+              responseSize: data.responseSize,
+            });
+          } else if (eventType === "error") {
+            // Update with error (queued for batching)
+            queueUpdate(id, {
+              durationMs: data.durationMs,
+            });
+          }
+        })
+      ),
+      register(
+        listen<StreamMessageEventPayload>("proxy:stream-message", (event) => {
+          if (isPaused) return;
+
+          const { connectionId, message } = event.payload;
+          addMessage({
+            connectionId,
+            message: {
+              id: message.id,
+              timestamp: message.timestamp,
+              direction: message.direction as StreamDirection,
+              messageType: message.messageType as StreamMessageType,
+              data: message.data,
+              isBase64: message.isBase64,
+              size: message.size,
+            },
+          });
+        })
+      ),
+      register(
+        listen<StreamEndedEventPayload>("proxy:stream-ended", (event) => {
+          const { connectionId, messageCount, totalBytes, durationMs, closeReason } = event.payload;
+          endStream({
+            connectionId,
+            messageCount,
+            totalBytes,
+            durationMs,
+            closeReason,
+          });
+        })
+      ),
+    ]).catch((error) => {
+      console.error("Failed to register proxy event listeners:", error);
+    });
+
+    // Prune idle stream connections on a slow cadence. The store tracks
+    // per-connection `lastActivityAt`; ending a SSE/WS stream doesn't
+    // automatically drop it (the user may still want to inspect history),
+    // so without this sweep ended streams linger until the user manually
+    // clears, which is the dominant leak path for long-lived tabs.
+    const pruneInterval = setInterval(() => {
+      useStreamStore.getState().pruneIdle();
+    }, 60 * 1000);
 
     return () => {
-      if (unlistenRequest) unlistenRequest();
-      if (unlistenStreamMessage) unlistenStreamMessage();
-      if (unlistenStreamEnded) unlistenStreamEnded();
+      cancelled = true;
+      clearInterval(pruneInterval);
+      for (const unlisten of unlisteners) unlisten();
     };
   }, [queueRequest, queueUpdate, addMessage, endStream, isPaused]);
 

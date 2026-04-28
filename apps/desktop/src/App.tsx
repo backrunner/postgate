@@ -42,16 +42,27 @@ function App() {
 
   // Initialize plugin event listeners on mount
   useEffect(() => {
+    // `cancelled` handles the race where the component unmounts before
+    // setupPluginEventListeners() resolves. Without it, listeners installed
+    // after cleanup runs would leak for the rest of the page lifetime.
+    let cancelled = false;
     let unlisteners: (() => void)[] = [];
 
-    setupPluginEventListeners().then((listeners) => {
-      unlisteners = listeners;
-    }).catch((error) => {
-      console.error('Failed to setup plugin event listeners:', error);
-    });
+    setupPluginEventListeners()
+      .then((listeners) => {
+        if (cancelled) {
+          // Already unmounted — immediately release what we just installed.
+          listeners.forEach((unlisten) => unlisten());
+          return;
+        }
+        unlisteners = listeners;
+      })
+      .catch((error) => {
+        console.error('Failed to setup plugin event listeners:', error);
+      });
 
     return () => {
-      // Cleanup listeners on unmount
+      cancelled = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, [setupPluginEventListeners]);

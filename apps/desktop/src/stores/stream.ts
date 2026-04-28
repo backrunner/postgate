@@ -29,6 +29,9 @@ export interface StreamConnection {
   durationMs: number | null;
   closeReason: string | null;
   isEnded: boolean;
+  /** Wall-clock of the last message or lifecycle event. Used by the idle
+   * pruner to decide when a connection can be evicted. */
+  lastActivityAt: number;
 }
 
 interface StreamMessageEvent {
@@ -44,6 +47,15 @@ interface StreamEndedEvent {
   closeReason: string | null;
 }
 
+/** How long an ended connection sticks around with no activity before we
+ * prune it from the store. Active (not-yet-ended) streams are kept for a
+ * longer window so the user can still inspect them. */
+const ENDED_IDLE_TTL_MS = 5 * 60 * 1000; // 5 min
+const ACTIVE_IDLE_TTL_MS = 30 * 60 * 1000; // 30 min
+/** Hard cap. When crossed we force-evict the least-recently-active
+ * connections regardless of TTL. */
+const MAX_CONNECTIONS = 200;
+
 interface StreamState {
   // Map of connectionId to stream connection data
   connections: Map<string, StreamConnection>;
@@ -56,6 +68,11 @@ interface StreamState {
   clearConnection: (connectionId: string) => void;
   clearAllConnections: () => void;
   getConnection: (connectionId: string) => StreamConnection | undefined;
+  /** Drop connections that have been idle past their TTL, and enforce the
+   * `MAX_CONNECTIONS` hard cap by evicting the least-recently-active.
+   * Called periodically (see useProxy) and on insert to keep memory bounded
+   * even when the user never manually clears. */
+  pruneIdle: () => void;
 }
 
 export const useStreamStore = create<StreamState>()((set, get) => ({
@@ -66,6 +83,7 @@ export const useStreamStore = create<StreamState>()((set, get) => ({
     set((state) => {
       const newConnections = new Map(state.connections);
       const existing = newConnections.get(event.connectionId);
+      const now = Date.now();
 
       if (existing) {
         // Add to existing connection
@@ -79,6 +97,7 @@ export const useStreamStore = create<StreamState>()((set, get) => ({
           messages,
           messageCount: existing.messageCount + 1,
           totalBytes: existing.totalBytes + event.message.size,
+          lastActivityAt: now,
         });
       } else {
         // Create new connection
@@ -90,7 +109,15 @@ export const useStreamStore = create<StreamState>()((set, get) => ({
           durationMs: null,
           closeReason: null,
           isEnded: false,
+          lastActivityAt: now,
         });
+
+        // Enforce hard cap on creation. Active streams have a much longer
+        // TTL, so without this cap a page spamming new short-lived SSE
+        // connections could still blow past memory.
+        if (newConnections.size > MAX_CONNECTIONS) {
+          enforceHardCap(newConnections);
+        }
       }
 
       return { connections: newConnections };
@@ -101,6 +128,7 @@ export const useStreamStore = create<StreamState>()((set, get) => ({
     set((state) => {
       const newConnections = new Map(state.connections);
       const existing = newConnections.get(event.connectionId);
+      const now = Date.now();
 
       if (existing) {
         newConnections.set(event.connectionId, {
@@ -110,6 +138,7 @@ export const useStreamStore = create<StreamState>()((set, get) => ({
           durationMs: event.durationMs,
           closeReason: event.closeReason,
           isEnded: true,
+          lastActivityAt: now,
         });
       } else {
         // Connection ended without any messages captured (unlikely but handle it)
@@ -121,6 +150,7 @@ export const useStreamStore = create<StreamState>()((set, get) => ({
           durationMs: event.durationMs,
           closeReason: event.closeReason,
           isEnded: true,
+          lastActivityAt: now,
         });
       }
 
@@ -143,7 +173,51 @@ export const useStreamStore = create<StreamState>()((set, get) => ({
   getConnection: (connectionId) => {
     return get().connections.get(connectionId);
   },
+
+  pruneIdle: () => {
+    set((state) => {
+      if (state.connections.size === 0) return state;
+
+      const now = Date.now();
+      let removed = 0;
+      const newConnections = new Map(state.connections);
+
+      for (const [id, conn] of newConnections) {
+        const ttl = conn.isEnded ? ENDED_IDLE_TTL_MS : ACTIVE_IDLE_TTL_MS;
+        if (now - conn.lastActivityAt > ttl) {
+          newConnections.delete(id);
+          removed++;
+        }
+      }
+
+      if (newConnections.size > MAX_CONNECTIONS) {
+        enforceHardCap(newConnections);
+      }
+
+      if (removed === 0 && newConnections.size === state.connections.size) {
+        return state;
+      }
+      return { connections: newConnections };
+    });
+  },
 }));
+
+/** Evict least-recently-active connections until we're back under
+ * `MAX_CONNECTIONS`. Prefers dropping ended connections first. */
+function enforceHardCap(connections: Map<string, StreamConnection>) {
+  if (connections.size <= MAX_CONNECTIONS) return;
+
+  const sorted = Array.from(connections.values()).sort((a, b) => {
+    // Ended connections are expendable before active ones.
+    if (a.isEnded !== b.isEnded) return a.isEnded ? -1 : 1;
+    return a.lastActivityAt - b.lastActivityAt;
+  });
+
+  const toRemove = connections.size - MAX_CONNECTIONS;
+  for (let i = 0; i < toRemove; i++) {
+    connections.delete(sorted[i].connectionId);
+  }
+}
 
 // Hook to get a specific connection's messages
 export const useStreamConnection = (connectionId: string | null) => {

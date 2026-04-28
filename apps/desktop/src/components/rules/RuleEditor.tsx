@@ -213,12 +213,30 @@ export function RuleEditor({ className }: RuleEditorProps) {
     }
   }, [parseResult]);
 
-  // Cleanup timeout on unmount
+  // Cleanup timeout on unmount + dispose the Monaco editor. `@monaco-editor/react`
+  // will generally dispose the editor itself when the host <Editor /> unmounts,
+  // but the editor model (and the decorations collection we created) sometimes
+  // outlive it if a parent route unmounts mid-layout — calling dispose()
+  // explicitly releases the text model, its syntax-tokenization caches, and
+  // any DOM references before React drops its handle.
   useEffect(() => {
     return () => {
       if (parseTimeoutRef.current) {
         clearTimeout(parseTimeoutRef.current);
       }
+      // Dispose model first so the editor's internal dispose doesn't try
+      // to re-tokenize during teardown, then the editor itself.
+      const editorInstance = editorRef.current;
+      if (editorInstance) {
+        try {
+          editorInstance.getModel()?.dispose();
+          editorInstance.dispose();
+        } catch {
+          // Best-effort: if it's already disposed by the host we don't care.
+        }
+        editorRef.current = null;
+      }
+      monacoRef.current = null;
     };
   }, []);
 

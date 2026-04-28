@@ -368,10 +368,20 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   togglePause: () => set((state) => ({ isPaused: !state.isPaused })),
 
   clearRequests: () =>
-    set({
-      requestMap: new Map(),
-      requestIds: [],
-      selectedId: null,
+    set((state) => {
+      // Also cancel any in-flight batched work — otherwise queued requests
+      // from before the clear will sneak back in on the next flush tick.
+      if (state._flushTimer) {
+        clearTimeout(state._flushTimer);
+      }
+      state._pendingRequests.length = 0;
+      state._pendingUpdates.length = 0;
+      return {
+        requestMap: new Map(),
+        requestIds: [],
+        selectedId: null,
+        _flushTimer: null,
+      };
     }),
 
   setFilter: (filter) =>

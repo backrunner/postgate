@@ -2,7 +2,6 @@ import { useRef, useCallback, useEffect, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { CapturedRequest, useCaptureStore } from "@/stores/capture";
 import { useColumnsStore } from "@/stores/columns";
-import { useStreamStore } from "@/stores/stream";
 import { RequestListItem } from "./RequestListItem";
 import { TableHeader } from "./TableHeader";
 
@@ -20,10 +19,15 @@ export function RequestList({ requests }: RequestListProps) {
   const selectedId = useCaptureStore((state) => state.selectedId);
   const setSelected = useCaptureStore((state) => state.setSelected);
   const columns = useColumnsStore((state) => state.columns);
-  
-  // Get stream connections once at list level
-  const streamConnections = useStreamStore((state) => state.connections);
 
+  // NOTE: we intentionally do NOT subscribe to `useStreamStore().connections`
+  // at the list level. That Map reference changes on every SSE/WS frame (the
+  // store rebuilds it with `new Map(...)` for React state-identity), which
+  // would re-render the entire virtualized list — and its memoized items —
+  // dozens of times per second for busy streams. Instead, each item
+  // subscribes to *its own* connection via `useStreamConnection(id)` below,
+  // so only rows whose stream actually changed re-render.
+  //
   // Memoize visible columns to avoid filtering on every render
   const visibleColumns = useMemo(
     () => columns.filter((col) => col.visible),
@@ -35,6 +39,7 @@ export function RequestList({ requests }: RequestListProps) {
     [requests]
   );
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual manages scroll state internally and is intentionally kept outside React Compiler memoization.
   const virtualizer = useVirtualizer({
     count: requests.length,
     getScrollElement: () => parentRef.current,
@@ -98,13 +103,11 @@ export function RequestList({ requests }: RequestListProps) {
           {virtualItems.map((virtualRow) => {
             const request = requests[virtualRow.index];
             if (!request) return null;
-            
-            // Only look up stream connection for stream protocols
-            const streamConnection = 
-              (request.protocol === "websocket" || request.protocol === "sse")
-                ? streamConnections.get(request.id)
-                : undefined;
-            
+
+            // Each item subscribes to its own stream connection internally;
+            // see RequestListItem. Only rows that are actually streams pay
+            // the subscription cost, and only the affected row re-renders
+            // when a frame arrives.
             return (
               <RequestListItem
                 key={virtualRow.key}
@@ -114,7 +117,6 @@ export function RequestList({ requests }: RequestListProps) {
                 translateY={virtualRow.start}
                 height={ROW_HEIGHT}
                 columns={visibleColumns}
-                streamConnection={streamConnection}
               />
             );
           })}

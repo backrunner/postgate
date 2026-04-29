@@ -71,18 +71,217 @@ interface StreamEndedEventPayload {
 let _startingProxy = false;
 // Module-level flag to ensure auto-start only happens once
 let _autoStarted = false;
+// Module-level flag to ensure Tauri event listeners are installed exactly
+// once for the entire app lifetime. Multiple components call `useProxy()`
+// (Header, CapturePage, Toolbar) and previously each would register its
+// own set of three listeners, causing every proxy:request / stream event
+// to be processed 3+ times per dispatch — 3× IPC deserialize, 3× Zustand
+// set() fan-out, 3× pending-queue push. Registering once globally fixes
+// that and is also correct in semantics: these events have nothing to do
+// with any individual component's lifetime.
+let _listenersInstalled = false;
+/** Promise tracking the one-shot installation so concurrent first calls
+ *  all await the same set of listeners. */
+let _listenersInstallPromise: Promise<void> | null = null;
+/** Cleanup handle, mostly for completeness — in practice the listeners
+ *  live until the window closes (which terminates the JS runtime anyway).
+ *  Exposed so HMR or future tear-down paths can reset cleanly. */
+let _listenersCleanup: (() => void) | null = null;
+
+/** Single shared ticker that prunes idle stream connections. One ticker
+ *  per app session — previously this was per-useProxy-mount, which meant
+ *  multiple intervals running in parallel when useProxy was used in 3+
+ *  components. */
+let _pruneTicker: ReturnType<typeof setInterval> | null = null;
+let _visibilityHandler: (() => void) | null = null;
+
+/**
+ * Install the proxy event listeners exactly once per app session.
+ * Idempotent; safe to call from any number of components in any order.
+ */
+function installProxyListeners(): Promise<void> {
+  if (_listenersInstalled) return Promise.resolve();
+  if (_listenersInstallPromise) return _listenersInstallPromise;
+
+  _listenersInstallPromise = (async () => {
+    const unlisteners: UnlistenFn[] = [];
+    try {
+      // We read the store lazily inside each handler via `.getState()` so
+      // we don't need to capture actions/state refs up front. That keeps
+      // the install path completely decoupled from React's render cycle.
+      unlisteners.push(
+        await listen<RequestEvent>("proxy:request", (event) => {
+          const { isPaused, queueRequest, queueUpdate } =
+            useCaptureStore.getState();
+          if (isPaused) return;
+
+          const { id, eventType, data } = event.payload;
+
+          if (eventType === "started") {
+            const request: CapturedRequest = {
+              id: data.id,
+              timestamp: data.timestamp,
+              method: data.method,
+              url: data.url,
+              host: data.host,
+              path: data.path,
+              requestHeaders: data.requestHeaders || {},
+              requestBody: null,
+              responseStatus: null,
+              responseHeaders: null,
+              responseBody: null,
+              durationMs: null,
+              matchedRules: data.matchedRules || [],
+              protocol: mapProtocol(data.protocol),
+              tlsInfo: data.tlsVersion
+                ? { version: data.tlsVersion, cipher: "", serverName: data.host }
+                : null,
+              contentType: data.contentType || null,
+              requestSize: data.requestSize,
+              responseSize: null,
+              remoteAddr: data.remoteAddr || null,
+            };
+            queueRequest(request);
+          } else if (
+            eventType === "completed" ||
+            eventType === "response_received"
+          ) {
+            queueUpdate(id, {
+              responseStatus: data.responseStatus,
+              responseHeaders: data.responseHeaders,
+              durationMs: data.durationMs,
+              matchedRules: data.matchedRules || [],
+              contentType: data.contentType,
+              responseSize: data.responseSize,
+            });
+          } else if (eventType === "error") {
+            queueUpdate(id, {
+              durationMs: data.durationMs,
+            });
+          }
+        })
+      );
+
+      unlisteners.push(
+        await listen<StreamMessageEventPayload>(
+          "proxy:stream-message",
+          (event) => {
+            const { isPaused } = useCaptureStore.getState();
+            if (isPaused) return;
+
+            const { connectionId, message } = event.payload;
+            useStreamStore.getState().addMessage({
+              connectionId,
+              message: {
+                id: message.id,
+                timestamp: message.timestamp,
+                direction: message.direction as StreamDirection,
+                messageType: message.messageType as StreamMessageType,
+                data: message.data,
+                isBase64: message.isBase64,
+                size: message.size,
+              },
+            });
+          }
+        )
+      );
+
+      unlisteners.push(
+        await listen<StreamEndedEventPayload>(
+          "proxy:stream-ended",
+          (event) => {
+            const { connectionId, messageCount, totalBytes, durationMs, closeReason } =
+              event.payload;
+            useStreamStore.getState().endStream({
+              connectionId,
+              messageCount,
+              totalBytes,
+              durationMs,
+              closeReason,
+            });
+          }
+        )
+      );
+
+      _listenersInstalled = true;
+      _listenersCleanup = () => {
+        for (const fn of unlisteners) fn();
+        _listenersInstalled = false;
+        _listenersCleanup = null;
+        _listenersInstallPromise = null;
+      };
+    } catch (error) {
+      console.error("Failed to install proxy event listeners:", error);
+      // Roll back whatever did install so the next call can retry.
+      for (const fn of unlisteners) fn();
+      _listenersInstallPromise = null;
+      throw error;
+    }
+  })();
+
+  return _listenersInstallPromise;
+}
+
+/** Exposed for tests / HMR. No-op if listeners aren't installed. */
+export function __uninstallProxyListeners() {
+  _listenersCleanup?.();
+  if (_pruneTicker !== null) {
+    clearInterval(_pruneTicker);
+    _pruneTicker = null;
+  }
+  if (_visibilityHandler && typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", _visibilityHandler);
+    _visibilityHandler = null;
+  }
+}
+
+/** Single shared ticker that prunes idle stream connections. One ticker
+ *  per app session — previously this was per-useProxy-mount, which meant
+ *  multiple intervals running in parallel when useProxy was used in 3+
+ *  components. */
+function ensurePruneTicker() {
+  if (_pruneTicker !== null) return;
+  // Slow cadence (60s) — pruneIdle itself is cheap (one Map walk) and
+  // stream connections have minute-scale TTLs, so sub-minute ticks would
+  // just be wasted wakeups, especially when the window is backgrounded
+  // (browser throttles timers to ≥1s anyway, so we won't oversample).
+  _pruneTicker = setInterval(() => {
+    useStreamStore.getState().pruneIdle();
+  }, 60 * 1000);
+
+  // Also prune when the window comes back to the foreground. While the
+  // window is minimized or in the background, Chromium throttles timers
+  // aggressively (often to once per minute), so a user who leaves
+  // PostGate in the background for hours and returns may briefly see a
+  // backlog of long-dead SSE/WS connections before the next tick fires.
+  // Running pruneIdle on visibility-change catches that up immediately.
+  // Also handled by the `MAX_CONNECTIONS` cap inside `addMessage`, but
+  // proactively pruning keeps the UI snappier on re-activation.
+  if (typeof document !== "undefined" && !_visibilityHandler) {
+    _visibilityHandler = () => {
+      if (document.visibilityState === "visible") {
+        useStreamStore.getState().pruneIdle();
+      }
+    };
+    document.addEventListener("visibilitychange", _visibilityHandler);
+  }
+}
 
 /**
  * Hook to manage proxy state and listen for events.
- * Safe to call from multiple components - event listeners are set up per instance,
- * but auto-start only happens once globally.
+ * Safe to call from multiple components — listeners are installed exactly
+ * once globally (see `installProxyListeners`), and auto-start also runs
+ * only once across the whole app.
  */
 export function useProxy() {
-  const { setStatus, setError, config } = useProxyStore();
-  const queueRequest = useCaptureStore((state) => state.queueRequest);
-  const queueUpdate = useCaptureStore((state) => state.queueUpdate);
-  const isPaused = useCaptureStore((state) => state.isPaused);
-  const { addMessage, endStream } = useStreamStore();
+  // Use narrow selectors: `useProxyStore()` / `useStreamStore()` without a
+  // selector subscribes the hook's consumer to the entire state, which means
+  // any update (stream connections rebuilding per SSE/WS frame, proxy config
+  // write, etc.) re-renders every component that calls `useProxy`. We only
+  // need action refs + scalar status flags here, all of which are stable.
+  const setStatus = useProxyStore((state) => state.setStatus);
+  const setError = useProxyStore((state) => state.setError);
+  const config = useProxyStore((state) => state.config);
 
   // Start proxy (with guard against concurrent calls)
   const startProxy = useCallback(async (proxyConfig?: Partial<ProxyConfig>) => {
@@ -152,128 +351,13 @@ export function useProxy() {
     }
   }, [setStatus]);
 
-  // Listen for proxy events
+  // Install the global proxy event listeners (once per app), and ensure
+  // the idle-stream pruner is running. Both are idempotent — this effect
+  // runs per-mount but the underlying work happens only once globally.
   useEffect(() => {
-    // `cancelled` guards against the race where the effect is cleaned up
-    // before any of the `await listen()` promises resolve. Without this,
-    // an in-flight listen() can install a listener AFTER cleanup ran,
-    // leaving it orphaned for the rest of the page's lifetime — i.e. a
-    // permanent per-remount leak.
-    let cancelled = false;
-    const unlisteners: UnlistenFn[] = [];
-
-    const register = async (fn: Promise<UnlistenFn>) => {
-      const unlisten = await fn;
-      if (cancelled) {
-        // Effect already torn down — drop the listener we just installed.
-        unlisten();
-        return;
-      }
-      unlisteners.push(unlisten);
-    };
-
-    // Fire-and-forget; errors are logged but shouldn't block the others.
-    Promise.all([
-      register(
-        listen<RequestEvent>("proxy:request", (event) => {
-          if (isPaused) return;
-
-          const { id, eventType, data } = event.payload;
-
-          if (eventType === "started") {
-            // Add new request (queued for batching)
-            const request: CapturedRequest = {
-              id: data.id,
-              timestamp: data.timestamp,
-              method: data.method,
-              url: data.url,
-              host: data.host,
-              path: data.path,
-              requestHeaders: data.requestHeaders || {},
-              requestBody: null,
-              responseStatus: null,
-              responseHeaders: null,
-              responseBody: null,
-              durationMs: null,
-              matchedRules: data.matchedRules || [],
-              protocol: mapProtocol(data.protocol),
-              tlsInfo: data.tlsVersion
-                ? { version: data.tlsVersion, cipher: "", serverName: data.host }
-                : null,
-              contentType: data.contentType || null,
-              requestSize: data.requestSize,
-              responseSize: null,
-              remoteAddr: data.remoteAddr || null,
-            };
-            queueRequest(request);
-          } else if (eventType === "completed" || eventType === "response_received") {
-            // Update existing request (queued for batching)
-            queueUpdate(id, {
-              responseStatus: data.responseStatus,
-              responseHeaders: data.responseHeaders,
-              durationMs: data.durationMs,
-              matchedRules: data.matchedRules || [],
-              contentType: data.contentType,
-              responseSize: data.responseSize,
-            });
-          } else if (eventType === "error") {
-            // Update with error (queued for batching)
-            queueUpdate(id, {
-              durationMs: data.durationMs,
-            });
-          }
-        })
-      ),
-      register(
-        listen<StreamMessageEventPayload>("proxy:stream-message", (event) => {
-          if (isPaused) return;
-
-          const { connectionId, message } = event.payload;
-          addMessage({
-            connectionId,
-            message: {
-              id: message.id,
-              timestamp: message.timestamp,
-              direction: message.direction as StreamDirection,
-              messageType: message.messageType as StreamMessageType,
-              data: message.data,
-              isBase64: message.isBase64,
-              size: message.size,
-            },
-          });
-        })
-      ),
-      register(
-        listen<StreamEndedEventPayload>("proxy:stream-ended", (event) => {
-          const { connectionId, messageCount, totalBytes, durationMs, closeReason } = event.payload;
-          endStream({
-            connectionId,
-            messageCount,
-            totalBytes,
-            durationMs,
-            closeReason,
-          });
-        })
-      ),
-    ]).catch((error) => {
-      console.error("Failed to register proxy event listeners:", error);
-    });
-
-    // Prune idle stream connections on a slow cadence. The store tracks
-    // per-connection `lastActivityAt`; ending a SSE/WS stream doesn't
-    // automatically drop it (the user may still want to inspect history),
-    // so without this sweep ended streams linger until the user manually
-    // clears, which is the dominant leak path for long-lived tabs.
-    const pruneInterval = setInterval(() => {
-      useStreamStore.getState().pruneIdle();
-    }, 60 * 1000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(pruneInterval);
-      for (const unlisten of unlisteners) unlisten();
-    };
-  }, [queueRequest, queueUpdate, addMessage, endStream, isPaused]);
+    installProxyListeners();
+    ensurePruneTicker();
+  }, []);
 
   // Auto-start proxy on first mount (only once globally)
   useEffect(() => {

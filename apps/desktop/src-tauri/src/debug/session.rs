@@ -3,7 +3,7 @@
 use super::types::*;
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -38,10 +38,6 @@ pub struct SessionManager {
     event_tx: broadcast::Sender<DebugEvent>,
     log_counter: AtomicUsize,
     max_logs_per_session: usize,
-    /// Monotonic wall-clock (epoch-ms) for the most recent activity across
-    /// all sessions. Used to skip the cleanup sweep when the manager is
-    /// completely idle.
-    last_activity_ms: AtomicI64,
 }
 
 impl SessionManager {
@@ -55,7 +51,6 @@ impl SessionManager {
             event_tx,
             log_counter: AtomicUsize::new(0),
             max_logs_per_session: 10000,
-            last_activity_ms: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
         });
 
         Self::start_cleanup_task(&manager);
@@ -105,7 +100,6 @@ impl SessionManager {
         self.sessions.insert(session.id.clone(), session.clone());
         self.console_logs.insert(session.id.clone(), Vec::new());
         self.page_errors.insert(session.id.clone(), Vec::new());
-        self.last_activity_ms.store(now, Ordering::Relaxed);
 
         // Enforce hard cap on creation so a page opening thousands of
         // short-lived debug sessions can't blow memory before the reaper
@@ -143,7 +137,6 @@ impl SessionManager {
         if let Some(mut session) = self.sessions.get_mut(session_id) {
             session.last_activity = now;
         }
-        self.last_activity_ms.store(now, Ordering::Relaxed);
     }
 
     /// Add a console log
@@ -354,7 +347,6 @@ impl Default for SessionManager {
             event_tx,
             log_counter: AtomicUsize::new(0),
             max_logs_per_session: 10000,
-            last_activity_ms: AtomicI64::new(chrono::Utc::now().timestamp_millis()),
         }
     }
 }

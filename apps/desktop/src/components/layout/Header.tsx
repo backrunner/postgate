@@ -13,8 +13,15 @@ import { useProxy } from "@/hooks/useProxy";
 import { cn } from "@/lib/utils";
 
 export function Header() {
-  const { status, config, error: proxyError } = useProxyStore();
-  const { theme, setTheme } = useThemeStore();
+  // Narrow selectors: without them, `useProxyStore()` / `useThemeStore()`
+  // subscribe this component to EVERY field in those stores. Any change
+  // (the frontend store is small, so less impactful than capture/stream,
+  // but the principle is the same) would re-render the whole header.
+  const status = useProxyStore((state) => state.status);
+  const config = useProxyStore((state) => state.config);
+  const proxyError = useProxyStore((state) => state.error);
+  const theme = useThemeStore((state) => state.theme);
+  const setTheme = useThemeStore((state) => state.setTheme);
   const { startProxy, stopProxy } = useProxy();
 
   const handleToggleProxy = async () => {

@@ -1,7 +1,7 @@
 import { memo, CSSProperties } from "react";
 import { CapturedRequest } from "@/stores/capture";
 import { ColumnConfig } from "@/stores/columns";
-import { StreamConnection } from "@/stores/stream";
+import { StreamConnection, useStreamStore } from "@/stores/stream";
 
 // Pre-computed class mappings for zero runtime lookup
 const METHOD_CLASSES: Record<string, string> = {
@@ -78,7 +78,6 @@ interface RequestListItemProps {
   translateY: number;
   height: number;
   columns: ColumnConfig[];
-  streamConnection?: StreamConnection;
 }
 
 // Optimized comparison - check primitives first, skip deep object comparisons
@@ -89,15 +88,6 @@ const areEqual = (prev: RequestListItemProps, next: RequestListItemProps): boole
   if (prev.height !== next.height) return false;
   if (prev.columns !== next.columns) return false;
   if (prev.onSelect !== next.onSelect) return false;
-  
-  // Stream connection check (shallow)
-  if (prev.streamConnection !== next.streamConnection) {
-    // Only re-render if relevant fields changed
-    const p = prev.streamConnection;
-    const n = next.streamConnection;
-    if (!p || !n) return false;
-    if (p.isEnded !== n.isEnded || p.messageCount !== n.messageCount) return false;
-  }
   
   // Request comparison - only fields that affect display
   const p = prev.request;
@@ -124,10 +114,21 @@ export const RequestListItem = memo(function RequestListItem({
   translateY,
   height,
   columns,
-  streamConnection,
 }: RequestListItemProps) {
   const hasMatchedRules = request.matchedRules.length > 0;
-  
+
+  // Subscribe to ONLY this row's stream connection. For non-stream protocols
+  // the selector always returns `undefined`, so those rows never re-render
+  // when other streams update. For stream rows, only the row whose
+  // connection actually changed will re-render — see RequestList for why
+  // we do per-row subscription instead of pulling the whole Map into the
+  // parent.
+  const isStream =
+    request.protocol === "websocket" || request.protocol === "sse";
+  const streamConnection = useStreamStore((state) =>
+    isStream ? state.connections.get(request.id) : undefined
+  );
+
   // Use pre-computed class strings
   const rowClass = isSelected ? ROW_SELECTED : hasMatchedRules ? ROW_MATCHED : ROW_NORMAL;
   

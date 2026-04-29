@@ -28,10 +28,21 @@ interface NetworkAddress {
 }
 
 export function Toolbar() {
-  const { isPaused, clearRequests, filter, setFilter, resetFilter, addRequests } =
-    useCaptureStore();
+  // Narrow selectors to avoid subscribing this toolbar to EVERY field of
+  // the capture / proxy stores. Without them, every `queueRequest` batch
+  // flush (which mutates `requestMap`) would re-render the toolbar and
+  // its children, compounding with the list below on busy capture.
+  const isPaused = useCaptureStore((state) => state.isPaused);
+  const clearRequests = useCaptureStore((state) => state.clearRequests);
+  const filter = useCaptureStore((state) => state.filter);
+  const setFilter = useCaptureStore((state) => state.setFilter);
+  const resetFilter = useCaptureStore((state) => state.resetFilter);
+  const addRequests = useCaptureStore((state) => state.addRequests);
   const requests = useRequests();
-  const { status, config, error: proxyError, setError } = useProxyStore();
+  const status = useProxyStore((state) => state.status);
+  const config = useProxyStore((state) => state.config);
+  const proxyError = useProxyStore((state) => state.error);
+  const setError = useProxyStore((state) => state.setError);
   const { startProxy, stopProxy } = useProxy();
   const [showFilters, setShowFilters] = useState(false);
   const [isImporting, setIsImporting] = useState(false);

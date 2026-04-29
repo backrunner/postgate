@@ -20,22 +20,45 @@ export function TitleBar() {
 
   useEffect(() => {
     const appWindow = getCurrentWindow();
-    
-    appWindow.isMaximized().then(setIsMaximized);
-    appWindow.isFocused().then(setIsFocused);
-    
-    const unlistenResize = appWindow.onResized(async () => {
-      const maximized = await appWindow.isMaximized();
-      setIsMaximized(maximized);
+    // `cancelled` handles the race where the component unmounts before
+    // the async `onResized` / `onFocusChanged` promises resolve. Without
+    // this guard, the unlisten function is installed AFTER cleanup runs
+    // and then leaks for the rest of the window's life (compounded by
+    // React 19 StrictMode's double-mount in dev). We also defensively
+    // skip re-queries that would race with unmount.
+    let cancelled = false;
+    const unlisteners: Array<() => void> = [];
+
+    appWindow.isMaximized().then((m) => {
+      if (!cancelled) setIsMaximized(m);
+    });
+    appWindow.isFocused().then((f) => {
+      if (!cancelled) setIsFocused(f);
     });
 
-    const unlistenFocus = appWindow.onFocusChanged(({ payload: focused }) => {
-      setIsFocused(focused);
-    });
+    appWindow
+      .onResized(async () => {
+        if (cancelled) return;
+        const maximized = await appWindow.isMaximized();
+        if (!cancelled) setIsMaximized(maximized);
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisteners.push(fn);
+      });
+
+    appWindow
+      .onFocusChanged(({ payload: focused }) => {
+        if (!cancelled) setIsFocused(focused);
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisteners.push(fn);
+      });
 
     return () => {
-      unlistenResize.then(fn => fn());
-      unlistenFocus.then(fn => fn());
+      cancelled = true;
+      unlisteners.forEach((fn) => fn());
     };
   }, []);
 

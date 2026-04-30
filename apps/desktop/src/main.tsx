@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import "./index.css";
 
 // 显示主窗口
@@ -26,9 +27,11 @@ function onAppRendered() {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ErrorBoundary>
   </React.StrictMode>
 );
 

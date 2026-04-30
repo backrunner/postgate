@@ -260,6 +260,7 @@ function ensurePruneTicker() {
   if (typeof document !== "undefined" && !_visibilityHandler) {
     _visibilityHandler = () => {
       if (document.visibilityState === "visible") {
+        useCaptureStore.getState().flushPending();
         useStreamStore.getState().pruneIdle();
       }
     };

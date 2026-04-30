@@ -38,6 +38,17 @@ pub struct AppState {
     /// Async channel for offloading `app_handle.emit` + persistence off the
     /// proxy hot path. Populated on first use via `ensure_emit_worker`.
     emit_tx: OnceLock<mpsc::Sender<CapturedRequestEvent>>,
+    /// Bounded channel for captured metadata persistence. Kept separate from
+    /// UI emits so a slow WebView/IPC pipe cannot delay SQLite rows that body
+    /// persistence depends on.
+    request_persist_tx: OnceLock<mpsc::Sender<CapturedRequestData>>,
+    /// Bounded channel for body persistence. Body writes can involve SQLite
+    /// and filesystem IO; spawning one task per body lets slow disks create an
+    /// unbounded backlog that eventually steals runtime capacity from proxying.
+    body_persist_tx: OnceLock<mpsc::Sender<BodyPersistJob>>,
+    /// Bounded channel for high-frequency SSE/WebSocket UI events. Stream
+    /// frames must never wait on the Tauri IPC pipe.
+    stream_tx: OnceLock<mpsc::Sender<StreamUiEvent>>,
     /// Running count of request events dropped because `emit_tx` was full
     /// or because the broadcast channel had no capacity. Previously each
     /// drop emitted its own tracing::warn, which at 100 req/s turned into
@@ -55,7 +66,9 @@ impl AppState {
         let (request_tx, _) = broadcast::channel(10000);
 
         // Get app data directory
-        let data_dir = app_handle.path().app_data_dir()
+        let data_dir = app_handle
+            .path()
+            .app_data_dir()
             .unwrap_or_else(|_| PathBuf::from("."));
 
         let plugins_dir = data_dir.join("plugins");
@@ -80,6 +93,9 @@ impl AppState {
             captured_storage: tokio::sync::RwLock::new(None),
             persistence_enabled: AtomicBool::new(false),
             emit_tx: OnceLock::new(),
+            request_persist_tx: OnceLock::new(),
+            body_persist_tx: OnceLock::new(),
+            stream_tx: OnceLock::new(),
             dropped_events: AtomicU64::new(0),
             last_drop_warn_ms: AtomicI64::new(0),
         }
@@ -98,7 +114,7 @@ impl AppState {
         // Initialize database
         let db_path = self.data_dir.join("postgate.db");
         let db = std::sync::Arc::new(Database::new(&db_path).await?);
-        
+
         {
             let mut guard = self.database.write().await;
             *guard = Some(db.clone());
@@ -124,7 +140,8 @@ impl AppState {
     }
 
     /// Get or initialize captured request storage
-    pub async fn get_captured_storage(&self) -> crate::error::Result<Arc<CapturedRequestStorage>> {        // Check if already initialized
+    pub async fn get_captured_storage(&self) -> crate::error::Result<Arc<CapturedRequestStorage>> {
+        // Check if already initialized
         {
             let guard = self.captured_storage.read().await;
             if let Some(ref storage) = *guard {
@@ -134,7 +151,10 @@ impl AppState {
 
         // Initialize storage
         let db = self.get_database().await?;
-        let storage = Arc::new(CapturedRequestStorage::new(db.pool().clone(), &self.data_dir));
+        let storage = Arc::new(CapturedRequestStorage::new(
+            db.pool().clone(),
+            &self.data_dir,
+        ));
 
         {
             let mut guard = self.captured_storage.write().await;
@@ -190,6 +210,15 @@ impl AppState {
             }
         }
 
+        if self.is_persistence_enabled()
+            && self
+                .ensure_request_persist_worker()
+                .try_send(event.data.clone())
+                .is_err()
+        {
+            self.record_drop();
+        }
+
         let tx = self.ensure_emit_worker();
         // try_send keeps the hot path non-blocking. If the worker is saturated
         // (e.g. frontend paused), drop the event rather than back-pressure the
@@ -236,7 +265,7 @@ impl AppState {
             tracing::warn!(
                 dropped = count,
                 window_ms = DROP_LOG_INTERVAL_MS,
-                "emit queue saturated — dropping request events (UI may be paused or lagging)"
+                "capture queue saturated — dropping non-critical UI/persistence events"
             );
         }
     }
@@ -244,11 +273,7 @@ impl AppState {
     /// Emit a request event only if capture is enabled for this request.
     /// Used to implement whistle `disable://capture` — the request still
     /// proxies normally, but no UI / persistence trace is left.
-    pub fn emit_request_event_if(
-        self: &Arc<Self>,
-        capture: bool,
-        event: &CapturedRequestEvent,
-    ) {
+    pub fn emit_request_event_if(self: &Arc<Self>, capture: bool, event: &CapturedRequestEvent) {
         if !capture {
             return;
         }
@@ -269,10 +294,20 @@ impl AppState {
                     if let Err(e) = this.app_handle.emit("proxy:request", &event) {
                         tracing::warn!("Failed to emit request event: {}", e);
                     }
-                    if this.is_persistence_enabled() {
-                        if let Err(e) = this.persist_request(event.data).await {
-                            tracing::warn!("Failed to persist captured request: {}", e);
-                        }
+                }
+            });
+            tx
+        })
+    }
+
+    fn ensure_request_persist_worker(self: &Arc<Self>) -> &mpsc::Sender<CapturedRequestData> {
+        self.request_persist_tx.get_or_init(|| {
+            let (tx, mut rx) = mpsc::channel::<CapturedRequestData>(4096);
+            let this = self.clone();
+            tokio::spawn(async move {
+                while let Some(data) = rx.recv().await {
+                    if let Err(e) = this.persist_request(data).await {
+                        tracing::warn!("Failed to persist captured request: {}", e);
                     }
                 }
             });
@@ -289,17 +324,48 @@ impl AppState {
     }
 
     /// Persist body data asynchronously
-    pub fn persist_body(self: &Arc<Self>, request_id: String, body: bytes::Bytes, is_request: bool) {
+    pub fn persist_body(
+        self: &Arc<Self>,
+        request_id: String,
+        body: bytes::Bytes,
+        is_request: bool,
+    ) {
         if !self.is_persistence_enabled() {
             return;
         }
 
-        let this = self.clone();
-        tokio::spawn(async move {
-            if let Err(e) = this.persist_body_internal(request_id, body, is_request).await {
-                tracing::warn!("Failed to persist body: {}", e);
-            }
-        });
+        let tx = self.ensure_body_persist_worker();
+        if tx
+            .try_send(BodyPersistJob {
+                request_id,
+                body,
+                is_request,
+            })
+            .is_err()
+        {
+            self.record_drop();
+        }
+    }
+
+    fn ensure_body_persist_worker(self: &Arc<Self>) -> &mpsc::Sender<BodyPersistJob> {
+        self.body_persist_tx.get_or_init(|| {
+            // Each item may hold up to MAX_BODY_SIZE bytes, so keep this
+            // intentionally small. Saturation drops history bodies rather than
+            // allowing disk IO to degrade the live proxy.
+            let (tx, mut rx) = mpsc::channel::<BodyPersistJob>(64);
+            let this = self.clone();
+            tokio::spawn(async move {
+                while let Some(job) = rx.recv().await {
+                    if let Err(e) = this
+                        .persist_body_internal(job.request_id, job.body, job.is_request)
+                        .await
+                    {
+                        tracing::warn!("Failed to persist body: {}", e);
+                    }
+                }
+            });
+            tx
+        })
     }
 
     async fn persist_body_internal(
@@ -318,7 +384,7 @@ impl AppState {
     /// Start the debug WebSocket server
     pub async fn start_debug_server(&self, port: u16) -> Result<(), String> {
         let mut server_guard = self.debug_server.write().await;
-        
+
         if server_guard.is_some() {
             return Err("Debug server is already running".to_string());
         }
@@ -336,7 +402,7 @@ impl AppState {
     /// Stop the debug server
     pub async fn stop_debug_server(&self) {
         let mut server_guard = self.debug_server.write().await;
-        
+
         if let Some(server) = server_guard.take() {
             server.stop().await;
         }
@@ -347,7 +413,7 @@ impl AppState {
     /// Get debug server status
     pub async fn get_debug_status(&self) -> Result<DebugStatus, String> {
         let server_guard = self.debug_server.read().await;
-        
+
         if let Some(ref server) = *server_guard {
             Ok(server.get_status().await)
         } else {
@@ -366,9 +432,15 @@ impl AppState {
     }
 
     /// Get console logs
-    pub fn get_console_logs(&self, session_id: Option<&str>, limit: Option<usize>, offset: Option<usize>) -> Vec<ConsoleLog> {
+    pub fn get_console_logs(
+        &self,
+        session_id: Option<&str>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Vec<ConsoleLog> {
         if let Some(sid) = session_id {
-            self.debug_session_manager.get_console_logs(sid, limit, offset)
+            self.debug_session_manager
+                .get_console_logs(sid, limit, offset)
         } else {
             self.debug_session_manager.get_all_console_logs(limit)
         }
@@ -401,18 +473,55 @@ impl AppState {
     // ==================== Streaming Events (SSE/WebSocket) ====================
 
     /// Emit a stream message event to the frontend
-    pub fn emit_stream_message(&self, event: &StreamMessageEvent) {
-        if let Err(e) = self.app_handle.emit("proxy:stream-message", event) {
-            tracing::warn!("Failed to emit stream message event: {}", e);
+    pub fn emit_stream_message(self: &Arc<Self>, event: &StreamMessageEvent) {
+        let tx = self.ensure_stream_worker();
+        if tx.try_send(StreamUiEvent::Message(event.clone())).is_err() {
+            self.record_drop();
         }
     }
 
     /// Emit a stream ended event to the frontend
-    pub fn emit_stream_ended(&self, event: &StreamEndedEvent) {
-        if let Err(e) = self.app_handle.emit("proxy:stream-ended", event) {
-            tracing::warn!("Failed to emit stream ended event: {}", e);
+    pub fn emit_stream_ended(self: &Arc<Self>, event: &StreamEndedEvent) {
+        let tx = self.ensure_stream_worker();
+        if tx.try_send(StreamUiEvent::Ended(event.clone())).is_err() {
+            self.record_drop();
         }
     }
+
+    fn ensure_stream_worker(self: &Arc<Self>) -> &mpsc::Sender<StreamUiEvent> {
+        self.stream_tx.get_or_init(|| {
+            let (tx, mut rx) = mpsc::channel::<StreamUiEvent>(4096);
+            let app_handle = self.app_handle.clone();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        StreamUiEvent::Message(event) => {
+                            if let Err(e) = app_handle.emit("proxy:stream-message", &event) {
+                                tracing::warn!("Failed to emit stream message event: {}", e);
+                            }
+                        }
+                        StreamUiEvent::Ended(event) => {
+                            if let Err(e) = app_handle.emit("proxy:stream-ended", &event) {
+                                tracing::warn!("Failed to emit stream ended event: {}", e);
+                            }
+                        }
+                    }
+                }
+            });
+            tx
+        })
+    }
+}
+
+struct BodyPersistJob {
+    request_id: String,
+    body: bytes::Bytes,
+    is_request: bool,
+}
+
+enum StreamUiEvent {
+    Message(StreamMessageEvent),
+    Ended(StreamEndedEvent),
 }
 
 /// Event sent when a request is captured or updated
@@ -514,7 +623,7 @@ pub enum StreamDirection {
 pub enum StreamMessageType {
     // SSE types
     SseEvent,
-    
+
     // WebSocket types
     WsText,
     WsBinary,

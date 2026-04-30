@@ -1,12 +1,16 @@
 use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
-use dashmap::DashMap;
 use hyper_util::rt::TokioIo;
+use moka::sync::Cache;
 use rustls::pki_types::ServerName;
 use rustls::ServerConfig;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor as TokioTlsAcceptor;
+
+const SERVER_CONFIG_CACHE_MAX_CAPACITY: u64 = 1000;
+const SERVER_CONFIG_CACHE_TTL_HOURS: u64 = 23;
 
 /// Global cache of pre-built rustls `ServerConfig`s keyed by `(host, h2)`.
 ///
@@ -14,9 +18,14 @@ use tokio_rustls::TlsAcceptor as TokioTlsAcceptor;
 /// the private key and hashing the ALPN list; doing it per CONNECT is pure
 /// overhead. The underlying `CertifiedKey` is already cached in `ca.rs`, we
 /// just bolt another cache on top to skip the rustls builder path entirely.
-fn server_config_cache() -> &'static DashMap<(String, bool), Arc<ServerConfig>> {
-    static CACHE: OnceLock<DashMap<(String, bool), Arc<ServerConfig>>> = OnceLock::new();
-    CACHE.get_or_init(DashMap::new)
+fn server_config_cache() -> &'static Cache<(String, bool), Arc<ServerConfig>> {
+    static CACHE: OnceLock<Cache<(String, bool), Arc<ServerConfig>>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Cache::builder()
+            .max_capacity(SERVER_CONFIG_CACHE_MAX_CAPACITY)
+            .time_to_live(Duration::from_secs(SERVER_CONFIG_CACHE_TTL_HOURS * 3600))
+            .build()
+    })
 }
 
 /// TLS acceptor for MITM connections
@@ -37,15 +46,13 @@ impl TlsAcceptor {
         let cache_key = (host.to_string(), enable_http2);
         if let Some(existing) = cache.get(&cache_key) {
             return Ok(Self {
-                inner: TokioTlsAcceptor::from(existing.clone()),
+                inner: TokioTlsAcceptor::from(existing),
             });
         }
 
         let certified_key = ca.get_cert_for_host(host)?;
 
-        let key = certified_key
-            .key
-            .clone_key();
+        let key = certified_key.key.clone_key();
 
         let mut config = ServerConfig::builder()
             .with_no_client_auth()
@@ -70,11 +77,14 @@ impl TlsAcceptor {
     /// changes or certificates are rotated.
     #[allow(dead_code)]
     pub fn clear_cache() {
-        server_config_cache().clear();
+        server_config_cache().invalidate_all();
     }
 
     /// Accept a TLS connection from a TokioIo-wrapped stream
-    pub async fn accept<S>(&self, stream: TokioIo<S>) -> Result<tokio_rustls::server::TlsStream<TokioIo<S>>>
+    pub async fn accept<S>(
+        &self,
+        stream: TokioIo<S>,
+    ) -> Result<tokio_rustls::server::TlsStream<TokioIo<S>>>
     where
         TokioIo<S>: AsyncRead + AsyncWrite + Unpin,
     {

@@ -104,7 +104,7 @@ interface CaptureState {
   clearHistory: () => Promise<void>;
   // Batching helpers for high-frequency updates
   _pendingRequests: CapturedRequest[];
-  _pendingUpdates: Array<{ id: string; update: Partial<CapturedRequest> }>;
+  _pendingUpdates: Map<string, Partial<CapturedRequest>>;
   _flushTimer: ReturnType<typeof setTimeout> | null;
   queueRequest: (request: CapturedRequest) => void;
   queueUpdate: (id: string, update: Partial<CapturedRequest>) => void;
@@ -120,6 +120,35 @@ const defaultFilter: FilterOptions = {
   hasRules: null,
   protocols: [],
 };
+
+const FLUSH_DELAY_MS = 16;
+const PENDING_UPDATE_MULTIPLIER = 2;
+const PENDING_REQUEST_TRIM_BATCH = 1000;
+
+function trimPendingRequests(
+  requests: CapturedRequest[],
+  maxRequests: number
+): void {
+  if (requests.length > maxRequests + PENDING_REQUEST_TRIM_BATCH) {
+    const overflow = requests.length - maxRequests;
+    // Keep the newest queued requests. Trim in chunks instead of shifting on
+    // every event once capped; otherwise long background captures pay O(n)
+    // array movement per incoming request.
+    requests.splice(0, overflow);
+  }
+}
+
+function trimPendingUpdates(
+  updates: Map<string, Partial<CapturedRequest>>,
+  maxRequests: number
+): void {
+  const maxPendingUpdates = maxRequests * PENDING_UPDATE_MULTIPLIER;
+  while (updates.size > maxPendingUpdates) {
+    const oldestId = updates.keys().next().value;
+    if (oldestId === undefined) return;
+    updates.delete(oldestId);
+  }
+}
 
 function mapProtocol(protocol: string): Protocol {
   switch (protocol.toLowerCase()) {
@@ -184,7 +213,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   
   // Batching state
   _pendingRequests: [],
-  _pendingUpdates: [],
+  _pendingUpdates: new Map(),
   _flushTimer: null,
 
   addRequest: (request) => {
@@ -279,12 +308,13 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
     
     const state = get();
     state._pendingRequests.push(request);
+    trimPendingRequests(state._pendingRequests, state.maxRequests);
     
     // Schedule flush if not already scheduled
     if (!state._flushTimer) {
       const timer = setTimeout(() => {
         get().flushPending();
-      }, 16); // ~1 frame at 60fps
+      }, FLUSH_DELAY_MS); // ~1 frame at 60fps
       
       set({ _flushTimer: timer });
     }
@@ -293,13 +323,17 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   // Queue an update for batched processing
   queueUpdate: (id, update) => {
     const state = get();
-    state._pendingUpdates.push({ id, update });
+    state._pendingUpdates.set(id, {
+      ...state._pendingUpdates.get(id),
+      ...update,
+    });
+    trimPendingUpdates(state._pendingUpdates, state.maxRequests);
     
     // Schedule flush if not already scheduled
     if (!state._flushTimer) {
       const timer = setTimeout(() => {
         get().flushPending();
-      }, 16);
+      }, FLUSH_DELAY_MS);
       
       set({ _flushTimer: timer });
     }
@@ -309,11 +343,14 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   flushPending: () => {
     const state = get();
     const pendingRequests = [...state._pendingRequests];
-    const pendingUpdates = [...state._pendingUpdates];
+    const pendingUpdates = Array.from(state._pendingUpdates, ([id, update]) => ({
+      id,
+      update,
+    }));
     
     // Clear pending arrays and timer
     state._pendingRequests.length = 0;
-    state._pendingUpdates.length = 0;
+    state._pendingUpdates.clear();
     if (state._flushTimer) {
       clearTimeout(state._flushTimer);
     }
@@ -325,7 +362,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
     
     set((currentState) => {
       const newMap = new Map(currentState.requestMap);
-      const newIds = [...currentState.requestIds];
+      const addedIds: string[] = [];
       
       // Process new requests (sorted by timestamp, newest first)
       if (pendingRequests.length > 0) {
@@ -334,10 +371,14 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
         for (const request of sortedRequests) {
           if (!newMap.has(request.id)) {
             newMap.set(request.id, request);
-            newIds.unshift(request.id);
+            addedIds.push(request.id);
           }
         }
       }
+
+      const newIds = addedIds.length > 0
+        ? [...addedIds, ...currentState.requestIds]
+        : [...currentState.requestIds];
       
       // Process updates
       for (const { id, update } of pendingUpdates) {
@@ -375,7 +416,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
         clearTimeout(state._flushTimer);
       }
       state._pendingRequests.length = 0;
-      state._pendingUpdates.length = 0;
+      state._pendingUpdates.clear();
       return {
         requestMap: new Map(),
         requestIds: [],
@@ -441,12 +482,20 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   clearHistory: async () => {
     try {
       await invoke("clear_captured_history");
-      set({
-        requestMap: new Map(),
-        requestIds: [],
-        selectedId: null,
-        historyLoaded: false,
-        historyTotal: 0,
+      set((state) => {
+        if (state._flushTimer) {
+          clearTimeout(state._flushTimer);
+        }
+        state._pendingRequests.length = 0;
+        state._pendingUpdates.clear();
+        return {
+          requestMap: new Map(),
+          requestIds: [],
+          selectedId: null,
+          historyLoaded: false,
+          historyTotal: 0,
+          _flushTimer: null,
+        };
       });
     } catch (e) {
       console.error("Failed to clear history:", e);

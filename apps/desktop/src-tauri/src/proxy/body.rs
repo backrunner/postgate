@@ -130,12 +130,7 @@ impl BodyStorage {
 
     /// Insert a body under a fresh sequence number and, if necessary, evict
     /// older entries to stay within both the entry and byte budgets.
-    fn insert(
-        &self,
-        map: &DashMap<String, (u64, CapturedBody)>,
-        id: &str,
-        body: CapturedBody,
-    ) {
+    fn insert(&self, map: &DashMap<String, (u64, CapturedBody)>, id: &str, body: CapturedBody) {
         let seq = self.next_seq();
         let new_size = body.data.len();
 
@@ -183,7 +178,15 @@ impl BodyStorage {
             for entry in resp.iter() {
                 victims.push((entry.value().0, false, entry.key().clone()));
             }
-            victims.sort_unstable_by_key(|(seq, _, _)| *seq);
+            if victims.len() > target_drop {
+                // We only need the oldest batch, not a fully sorted list.
+                // `select_nth_unstable_by_key` keeps eviction O(n) instead of
+                // O(n log n) when the cache hovers around its byte budget.
+                victims.select_nth_unstable_by_key(target_drop, |(seq, _, _)| *seq);
+                victims.truncate(target_drop);
+            } else {
+                victims.sort_unstable_by_key(|(seq, _, _)| *seq);
+            }
 
             let mut dropped = 0usize;
             for (_, is_req, key) in victims {

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tokio::time::{sleep, Duration};
 
 /// Threshold for inline body storage (64KB)
 const INLINE_BODY_THRESHOLD: usize = 64 * 1024;
@@ -71,12 +72,31 @@ impl CapturedRequestStorage {
 
         sqlx::query(
             r#"
-            INSERT OR REPLACE INTO captured_requests 
+            INSERT INTO captured_requests
             (id, timestamp, method, url, host, path, protocol, 
              request_headers, request_size, response_status, response_headers, 
              response_size, content_type, duration_ms, matched_rules, 
              error, tls_version, remote_addr, is_complete, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                timestamp = excluded.timestamp,
+                method = excluded.method,
+                url = excluded.url,
+                host = excluded.host,
+                path = excluded.path,
+                protocol = excluded.protocol,
+                request_headers = COALESCE(excluded.request_headers, captured_requests.request_headers),
+                request_size = excluded.request_size,
+                response_status = excluded.response_status,
+                response_headers = excluded.response_headers,
+                response_size = excluded.response_size,
+                content_type = COALESCE(excluded.content_type, captured_requests.content_type),
+                duration_ms = excluded.duration_ms,
+                matched_rules = excluded.matched_rules,
+                error = excluded.error,
+                tls_version = COALESCE(excluded.tls_version, captured_requests.tls_version),
+                remote_addr = COALESCE(excluded.remote_addr, captured_requests.remote_addr),
+                is_complete = excluded.is_complete
             "#,
         )
         .bind(&data.id)
@@ -116,10 +136,7 @@ impl CapturedRequestStorage {
                 "response_body_inline"
             };
             let query = format!("UPDATE captured_requests SET {} = ? WHERE id = ?", column);
-            sqlx::query(&query)
-                .bind(body.as_ref())
-                .bind(request_id)
-                .execute(&self.pool)
+            self.update_body_column(&query, body.to_vec(), request_id)
                 .await
                 .map_err(|e| {
                     PostGateError::Storage(format!("Failed to save body inline: {}", e))
@@ -127,14 +144,19 @@ impl CapturedRequestStorage {
         } else {
             // File storage
             let dir = self.bodies_dir.join(request_id);
-            std::fs::create_dir_all(&dir)?;
             let filename = if is_request {
                 "request.bin"
             } else {
                 "response.bin"
             };
             let path = dir.join(filename);
-            std::fs::write(&path, body.as_ref())?;
+
+            if !self.wait_for_request_row(request_id).await? {
+                return Ok(());
+            }
+
+            tokio::fs::create_dir_all(&dir).await?;
+            tokio::fs::write(&path, body.as_ref()).await?;
 
             let column = if is_request {
                 "request_body_path"
@@ -142,17 +164,64 @@ impl CapturedRequestStorage {
                 "response_body_path"
             };
             let query = format!("UPDATE captured_requests SET {} = ? WHERE id = ?", column);
-            sqlx::query(&query)
-                .bind(path.to_string_lossy().to_string())
-                .bind(request_id)
-                .execute(&self.pool)
+            let updated = self
+                .update_body_column(&query, path.to_string_lossy().to_string(), request_id)
                 .await
-                .map_err(|e| {
-                    PostGateError::Storage(format!("Failed to save body path: {}", e))
-                })?;
+                .map_err(|e| PostGateError::Storage(format!("Failed to save body path: {}", e)))?;
+            if !updated {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
         }
 
         Ok(())
+    }
+
+    async fn update_body_column<'a, T>(
+        &self,
+        query: &'a str,
+        value: T,
+        request_id: &'a str,
+    ) -> std::result::Result<bool, sqlx::Error>
+    where
+        T: sqlx::Encode<'a, sqlx::Sqlite> + sqlx::Type<sqlx::Sqlite> + Clone + Send + 'a,
+    {
+        // Body jobs can race ahead of the metadata worker. Retry briefly so
+        // persistence stays best-effort without coupling body IO to the proxy
+        // hot path.
+        for attempt in 0..3 {
+            let result = sqlx::query(query)
+                .bind(value.clone())
+                .bind(request_id)
+                .execute(&self.pool)
+                .await?;
+            if result.rows_affected() > 0 {
+                return Ok(true);
+            }
+            if attempt < 2 {
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+        Ok(false)
+    }
+
+    async fn wait_for_request_row(
+        &self,
+        request_id: &str,
+    ) -> std::result::Result<bool, sqlx::Error> {
+        for attempt in 0..3 {
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM captured_requests WHERE id = ?")
+                    .bind(request_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
+            if exists.is_some() {
+                return Ok(true);
+            }
+            if attempt < 2 {
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+        Ok(false)
     }
 
     /// Get paginated captured requests
@@ -220,7 +289,7 @@ impl CapturedRequestStorage {
         match row {
             Some((Some(inline_data), _)) => Ok(Some(Bytes::from(inline_data))),
             Some((None, Some(path))) => {
-                let data = std::fs::read(&path)?;
+                let data = tokio::fs::read(&path).await?;
                 Ok(Some(Bytes::from(data)))
             }
             _ => Ok(None),
@@ -236,7 +305,7 @@ impl CapturedRequestStorage {
 
         // Clean up files
         if self.bodies_dir.exists() {
-            std::fs::remove_dir_all(&self.bodies_dir)?;
+            tokio::fs::remove_dir_all(&self.bodies_dir).await?;
         }
 
         Ok(())
@@ -256,7 +325,7 @@ impl CapturedRequestStorage {
         for (id,) in &ids {
             let dir = self.bodies_dir.join(id);
             if dir.exists() {
-                let _ = std::fs::remove_dir_all(&dir);
+                let _ = tokio::fs::remove_dir_all(&dir).await;
             }
         }
 

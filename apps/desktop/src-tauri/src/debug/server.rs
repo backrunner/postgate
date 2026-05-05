@@ -1,13 +1,13 @@
 // WebSocket server for debug connections with HTTP /json/list endpoint
 
-use super::types::*;
 use super::session::SessionManager;
+use super::types::*;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -79,9 +79,9 @@ impl DebugServer {
         // Peek at the first few bytes to detect if it's an HTTP request or WebSocket upgrade
         let mut buf = [0u8; 1024];
         let n = stream.peek(&mut buf).await.map_err(|e| e.to_string())?;
-        
+
         let request_line = String::from_utf8_lossy(&buf[..n]);
-        
+
         // Check if it's an HTTP GET request for /json endpoints
         if request_line.starts_with("GET /json") {
             return self.handle_http_request(stream).await;
@@ -96,11 +96,11 @@ impl DebugServer {
         let mut buf = [0u8; 4096];
         let n = stream.read(&mut buf).await.map_err(|e| e.to_string())?;
         let request = String::from_utf8_lossy(&buf[..n]);
-        
+
         // Parse the request line
         let first_line = request.lines().next().unwrap_or("");
         let path = first_line.split_whitespace().nth(1).unwrap_or("/");
-        
+
         let config = self.config.read().await;
         let port = config.port;
         drop(config);
@@ -135,9 +135,7 @@ impl DebugServer {
                 });
                 ("200 OK", serde_json::to_string_pretty(&version).unwrap())
             }
-            _ => {
-                ("404 Not Found", "Not Found".to_string())
-            }
+            _ => ("404 Not Found", "Not Found".to_string()),
         };
 
         let response = format!(
@@ -147,8 +145,11 @@ impl DebugServer {
             body
         );
 
-        stream.write_all(response.as_bytes()).await.map_err(|e| e.to_string())?;
-        
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+
         Ok(())
     }
 
@@ -195,22 +196,20 @@ impl DebugServer {
             };
 
             match msg {
-                Message::Text(text) => {
-                    match serde_json::from_str::<ClientMessage>(&text) {
-                        Ok(client_msg) => {
-                            let response = self.handle_message(client_msg, &mut session_id).await;
-                            if let Some(resp) = response {
-                                let json = serde_json::to_string(&resp).unwrap();
-                                if ws_sender.send(Message::Text(json.into())).await.is_err() {
-                                    break;
-                                }
+                Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(client_msg) => {
+                        let response = self.handle_message(client_msg, &mut session_id).await;
+                        if let Some(resp) = response {
+                            let json = serde_json::to_string(&resp).unwrap();
+                            if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                                break;
                             }
                         }
-                        Err(e) => {
-                            warn!("Failed to parse client message: {} - {}", e, text);
-                        }
                     }
-                }
+                    Err(e) => {
+                        warn!("Failed to parse client message: {} - {}", e, text);
+                    }
+                },
                 Message::Binary(_) => {
                     // Binary messages not supported yet
                 }
@@ -245,22 +244,37 @@ impl DebugServer {
         drop(config);
 
         match msg {
-            ClientMessage::Hello { url, title, user_agent, cdp_enabled } => {
+            ClientMessage::Hello {
+                url,
+                title,
+                user_agent,
+                cdp_enabled,
+            } => {
                 let session = self.session_manager.create_session(
-                    url, 
-                    title, 
-                    user_agent, 
+                    url,
+                    title,
+                    user_agent,
                     cdp_enabled.unwrap_or(false),
-                    port
+                    port,
                 );
                 *session_id = Some(session.id.clone());
-                info!("Debug session started: {} (CDP: {})", session.id, session.cdp_enabled);
+                info!(
+                    "Debug session started: {} (CDP: {})",
+                    session.id, session.cdp_enabled
+                );
                 Some(ServerMessage::Welcome {
                     session_id: session.id,
                 })
             }
 
-            ClientMessage::Console { level, args, stack, source_url, line, column } => {
+            ClientMessage::Console {
+                level,
+                args,
+                stack,
+                source_url,
+                line,
+                column,
+            } => {
                 if let Some(sid) = session_id {
                     let log = ConsoleLog {
                         id: Uuid::new_v4().to_string(),
@@ -278,7 +292,14 @@ impl DebugServer {
                 None
             }
 
-            ClientMessage::Error { error_type, message, stack, source_url, line, column } => {
+            ClientMessage::Error {
+                error_type,
+                message,
+                stack,
+                source_url,
+                line,
+                column,
+            } => {
                 if let Some(sid) = session_id {
                     let error = PageError {
                         id: Uuid::new_v4().to_string(),
@@ -296,7 +317,18 @@ impl DebugServer {
                 None
             }
 
-            ClientMessage::Network { id, phase, method, url, request_headers, request_body, status, response_headers, duration_ms, initiator } => {
+            ClientMessage::Network {
+                id,
+                phase,
+                method,
+                url,
+                request_headers,
+                request_body,
+                status,
+                response_headers,
+                duration_ms,
+                initiator,
+            } => {
                 if let Some(sid) = session_id {
                     if phase == "start" {
                         let request = PageNetworkRequest {
@@ -331,9 +363,7 @@ impl DebugServer {
                 None
             }
 
-            ClientMessage::Ping => {
-                Some(ServerMessage::Pong)
-            }
+            ClientMessage::Ping => Some(ServerMessage::Pong),
         }
     }
 
@@ -348,9 +378,7 @@ fn parse_console_arg(value: serde_json::Value) -> ConsoleArg {
     match value {
         serde_json::Value::Null => ConsoleArg::Null,
         serde_json::Value::Bool(b) => ConsoleArg::Boolean(b),
-        serde_json::Value::Number(n) => {
-            ConsoleArg::Number(n.as_f64().unwrap_or(0.0))
-        }
+        serde_json::Value::Number(n) => ConsoleArg::Number(n.as_f64().unwrap_or(0.0)),
         serde_json::Value::String(s) => {
             if s == "__undefined__" {
                 ConsoleArg::Undefined
@@ -373,18 +401,41 @@ fn parse_console_arg(value: serde_json::Value) -> ConsoleArg {
                 match t.as_str() {
                     "error" => {
                         return ConsoleArg::Error {
-                            name: obj.get("name").and_then(|v| v.as_str()).unwrap_or("Error").to_string(),
-                            message: obj.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            stack: obj.get("stack").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            name: obj
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Error")
+                                .to_string(),
+                            message: obj
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            stack: obj
+                                .get("stack")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                         };
                     }
                     "element" => {
                         return ConsoleArg::Element {
-                            tag: obj.get("tag").and_then(|v| v.as_str()).unwrap_or("unknown").to_string(),
-                            id: obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                            classes: obj.get("classes")
+                            tag: obj
+                                .get("tag")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            id: obj
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            classes: obj
+                                .get("classes")
                                 .and_then(|v| v.as_array())
-                                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
                                 .unwrap_or_default(),
                         };
                     }

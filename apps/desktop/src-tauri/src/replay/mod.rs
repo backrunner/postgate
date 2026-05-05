@@ -2,8 +2,8 @@
 //!
 //! This module provides functionality for saving, organizing, and replaying HTTP requests.
 
-mod types;
 mod executor;
+mod types;
 
-pub use types::*;
 pub use executor::*;
+pub use types::*;

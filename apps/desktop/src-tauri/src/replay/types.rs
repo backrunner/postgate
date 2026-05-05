@@ -39,46 +39,35 @@ pub struct KeyValuePair {
 }
 
 /// Request body types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RequestBody {
     #[serde(rename = "none")]
+    #[default]
     None,
-    
+
     #[serde(rename = "raw")]
     Raw {
         content: String,
         #[serde(rename = "contentType")]
         content_type: String,
     },
-    
+
     #[serde(rename = "json")]
-    Json {
-        content: String,
-    },
-    
+    Json { content: String },
+
     #[serde(rename = "form-data")]
-    FormData {
-        fields: Vec<FormDataField>,
-    },
-    
+    FormData { fields: Vec<FormDataField> },
+
     #[serde(rename = "x-www-form-urlencoded")]
-    UrlEncoded {
-        fields: Vec<KeyValuePair>,
-    },
-    
+    UrlEncoded { fields: Vec<KeyValuePair> },
+
     #[serde(rename = "binary")]
     Binary {
         #[serde(rename = "fileName")]
         file_name: Option<String>,
         data: Option<String>, // Base64 encoded
     },
-}
-
-impl Default for RequestBody {
-    fn default() -> Self {
-        RequestBody::None
-    }
 }
 
 /// Form data field (can be text or file)

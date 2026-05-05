@@ -15,17 +15,13 @@ pub async fn start_debug_server(
 }
 
 #[tauri::command]
-pub async fn stop_debug_server(
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+pub async fn stop_debug_server(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.stop_debug_server().await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn get_debug_status(
-    state: State<'_, Arc<AppState>>,
-) -> Result<DebugStatus, String> {
+pub async fn get_debug_status(state: State<'_, Arc<AppState>>) -> Result<DebugStatus, String> {
     state.get_debug_status().await
 }
 
@@ -64,9 +60,7 @@ pub async fn get_page_errors(
 }
 
 #[tauri::command]
-pub async fn clear_all_debug_data(
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+pub async fn clear_all_debug_data(state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.clear_all_debug_data();
     Ok(())
 }

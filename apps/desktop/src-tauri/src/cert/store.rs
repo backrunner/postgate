@@ -62,9 +62,7 @@ impl CertStore {
             temp_path_str
         );
 
-        let output = Command::new("osascript")
-            .args(["-e", &script])
-            .output()?;
+        let output = Command::new("osascript").args(["-e", &script]).output()?;
 
         // Clean up temp file
         let _ = std::fs::remove_file(&temp_path);
@@ -78,11 +76,13 @@ impl CertStore {
                 ));
             }
             // Check for authorization denied (common in dev mode)
-            if stderr.contains("authorization was denied") || stderr.contains("no user interaction") {
+            if stderr.contains("authorization was denied") || stderr.contains("no user interaction")
+            {
                 return Err(PostGateError::Certificate(
                     "Cannot install certificate in development mode. Please either: \
                     1) Build and run the packaged .app, or \
-                    2) Export the certificate and install manually via Keychain Access".into(),
+                    2) Export the certificate and install manually via Keychain Access"
+                        .into(),
                 ));
             }
             return Err(PostGateError::Certificate(format!(
@@ -105,12 +105,7 @@ impl CertStore {
 
         // Use certutil to add to root store
         let output = Command::new("certutil")
-            .args([
-                "-addstore",
-                "-user",
-                "ROOT",
-                temp_path.to_str().unwrap(),
-            ])
+            .args(["-addstore", "-user", "ROOT", temp_path.to_str().unwrap()])
             .output()?;
 
         // Clean up temp file

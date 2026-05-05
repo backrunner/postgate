@@ -46,10 +46,7 @@ pub async fn install_ca_certificate(state: State<'_, Arc<AppState>>) -> Result<b
 
 /// Export the CA certificate to a file
 #[tauri::command]
-pub async fn export_ca_certificate(
-    path: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<bool> {
+pub async fn export_ca_certificate(path: String, state: State<'_, Arc<AppState>>) -> Result<bool> {
     let ca = state.get_or_init_ca()?;
     let pem = ca.get_ca_pem();
 

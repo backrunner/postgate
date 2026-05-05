@@ -69,11 +69,7 @@ pub struct PluginOpState {
 // ============================================================================
 
 #[op2(fast)]
-fn op_log(
-    state: &mut OpState,
-    #[string] level: String,
-    #[string] message: String,
-) {
+fn op_log(state: &mut OpState, #[string] level: String, #[string] message: String) {
     let op_state = state.borrow::<PluginOpState>();
     let plugin_id = &op_state.plugin_id;
 
@@ -170,9 +166,7 @@ async fn op_storage_has(
 
 #[op2]
 #[serde]
-async fn op_storage_keys(
-    state: Rc<RefCell<OpState>>,
-) -> Result<Vec<String>, PluginOpError> {
+async fn op_storage_keys(state: Rc<RefCell<OpState>>) -> Result<Vec<String>, PluginOpError> {
     let storage = {
         let state = state.borrow();
         let op_state = state.borrow::<PluginOpState>();
@@ -186,9 +180,7 @@ async fn op_storage_keys(
 }
 
 #[op2]
-async fn op_storage_clear(
-    state: Rc<RefCell<OpState>>,
-) -> Result<(), PluginOpError> {
+async fn op_storage_clear(state: Rc<RefCell<OpState>>) -> Result<(), PluginOpError> {
     let storage = {
         let state = state.borrow();
         let op_state = state.borrow::<PluginOpState>();
@@ -207,10 +199,7 @@ async fn op_storage_clear(
 // ============================================================================
 
 #[op2]
-fn op_ui_register_panel(
-    state: &mut OpState,
-    #[serde] panel: PluginPanel,
-) {
+fn op_ui_register_panel(state: &mut OpState, #[serde] panel: PluginPanel) {
     use tauri::Emitter;
     let op_state = state.borrow::<PluginOpState>();
 
@@ -226,10 +215,7 @@ fn op_ui_register_panel(
 }
 
 #[op2(fast)]
-fn op_ui_unregister_panel(
-    state: &mut OpState,
-    #[string] panel_id: String,
-) {
+fn op_ui_unregister_panel(state: &mut OpState, #[string] panel_id: String) {
     use tauri::Emitter;
     let op_state = state.borrow::<PluginOpState>();
 
@@ -239,9 +225,9 @@ fn op_ui_unregister_panel(
     }
 
     // Send event to runtime
-    let _ = op_state.event_sender.send(PluginEvent::PanelUnregistered {
-        panel_id,
-    });
+    let _ = op_state
+        .event_sender
+        .send(PluginEvent::PanelUnregistered { panel_id });
 }
 
 #[op2]
@@ -315,14 +301,9 @@ fn op_lifecycle_loaded(state: &mut OpState) {
 }
 
 #[op2(fast)]
-fn op_lifecycle_error(
-    state: &mut OpState,
-    #[string] message: String,
-) {
+fn op_lifecycle_error(state: &mut OpState, #[string] message: String) {
     let op_state = state.borrow::<PluginOpState>();
-    let _ = op_state
-        .event_sender
-        .send(PluginEvent::Error { message });
+    let _ = op_state.event_sender.send(PluginEvent::Error { message });
 }
 
 // ============================================================================

@@ -83,9 +83,17 @@ pub enum ConsoleArg {
     #[serde(rename = "symbol")]
     Symbol(String),
     #[serde(rename = "error")]
-    Error { name: String, message: String, stack: Option<String> },
+    Error {
+        name: String,
+        message: String,
+        stack: Option<String>,
+    },
     #[serde(rename = "element")]
-    Element { tag: String, id: Option<String>, classes: Vec<String> },
+    Element {
+        tag: String,
+        id: Option<String>,
+        classes: Vec<String>,
+    },
     #[serde(rename = "circular")]
     Circular,
     #[serde(rename = "truncated")]
@@ -180,9 +188,7 @@ pub enum ClientMessage {
         initiator: Option<String>,
     },
     #[serde(rename = "cdp")]
-    Cdp {
-        message: serde_json::Value,
-    },
+    Cdp { message: serde_json::Value },
     #[serde(rename = "ping")]
     Ping,
 }
@@ -192,18 +198,11 @@ pub enum ClientMessage {
 #[serde(tag = "type")]
 pub enum ServerMessage {
     #[serde(rename = "welcome")]
-    Welcome {
-        session_id: String,
-    },
+    Welcome { session_id: String },
     #[serde(rename = "eval")]
-    Eval {
-        id: String,
-        code: String,
-    },
+    Eval { id: String, code: String },
     #[serde(rename = "cdp")]
-    Cdp {
-        message: serde_json::Value,
-    },
+    Cdp { message: serde_json::Value },
     #[serde(rename = "pong")]
     Pong,
 }

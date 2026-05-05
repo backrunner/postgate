@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use serde::Deserialize;
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -54,8 +54,11 @@ impl PluginManager {
     pub async fn init(&self) -> Result<()> {
         // Create plugins directory if it doesn't exist
         if !self.plugins_dir.exists() {
-            tokio::fs::create_dir_all(&self.plugins_dir).await
-                .map_err(|e| PostGateError::Plugin(format!("Failed to create plugins directory: {}", e)))?;
+            tokio::fs::create_dir_all(&self.plugins_dir)
+                .await
+                .map_err(|e| {
+                    PostGateError::Plugin(format!("Failed to create plugins directory: {}", e))
+                })?;
         }
 
         // Discover plugins
@@ -68,14 +71,17 @@ impl PluginManager {
     pub async fn discover_plugins(&self) -> Result<Vec<PluginInfo>> {
         self.plugins.clear();
 
-        let mut entries = tokio::fs::read_dir(&self.plugins_dir).await
-            .map_err(|e| PostGateError::Plugin(format!("Failed to read plugins directory: {}", e)))?;
+        let mut entries = tokio::fs::read_dir(&self.plugins_dir).await.map_err(|e| {
+            PostGateError::Plugin(format!("Failed to read plugins directory: {}", e))
+        })?;
 
-        while let Some(entry) = entries.next_entry().await
+        while let Some(entry) = entries
+            .next_entry()
+            .await
             .map_err(|e| PostGateError::Plugin(format!("Failed to read directory entry: {}", e)))?
         {
             let path = entry.path();
-            
+
             if !path.is_dir() {
                 continue;
             }
@@ -102,9 +108,10 @@ impl PluginManager {
     }
 
     /// Parse plugin info from package.json
-    async fn parse_plugin_info(&self, plugin_path: &PathBuf) -> Result<PluginInfo> {
+    async fn parse_plugin_info(&self, plugin_path: &Path) -> Result<PluginInfo> {
         let package_json_path = plugin_path.join("package.json");
-        let content = tokio::fs::read_to_string(&package_json_path).await
+        let content = tokio::fs::read_to_string(&package_json_path)
+            .await
             .map_err(|e| PostGateError::Plugin(format!("Failed to read package.json: {}", e)))?;
 
         let package: PackageJson = serde_json::from_str(&content)
@@ -112,23 +119,35 @@ impl PluginManager {
 
         // Validate plugin name
         let id = if package.name.starts_with("postgate-plugin-") {
-            package.name.strip_prefix("postgate-plugin-").unwrap().to_string()
+            package
+                .name
+                .strip_prefix("postgate-plugin-")
+                .unwrap()
+                .to_string()
         } else if package.name.starts_with("@postgate/plugin-") {
-            package.name.strip_prefix("@postgate/plugin-").unwrap().to_string()
+            package
+                .name
+                .strip_prefix("@postgate/plugin-")
+                .unwrap()
+                .to_string()
         } else {
             return Err(PostGateError::Plugin(
-                "Plugin name must start with 'postgate-plugin-' or '@postgate/plugin-'".into()
+                "Plugin name must start with 'postgate-plugin-' or '@postgate/plugin-'".into(),
             ));
         };
 
         // Determine entry point
-        let entry = package.main
+        let entry = package
+            .main
             .or(package.module)
             .unwrap_or_else(|| "index.js".to_string());
 
         let entry_path = plugin_path.join(&entry);
         if !entry_path.exists() {
-            return Err(PostGateError::Plugin(format!("Entry point not found: {}", entry)));
+            return Err(PostGateError::Plugin(format!(
+                "Entry point not found: {}",
+                entry
+            )));
         }
 
         Ok(PluginInfo {
@@ -156,7 +175,9 @@ impl PluginManager {
 
     /// Load a plugin
     pub async fn load_plugin(&self, id: &str, config: HashMap<String, String>) -> Result<()> {
-        let info = self.plugins.get(id)
+        let info = self
+            .plugins
+            .get(id)
             .ok_or_else(|| PostGateError::Plugin(format!("Plugin not found: {}", id)))?
             .clone();
 
@@ -165,13 +186,17 @@ impl PluginManager {
         }
 
         // Ensure we have a database pool
-        let db_pool = self.db_pool.clone()
+        let db_pool = self
+            .db_pool
+            .clone()
             .ok_or_else(|| PostGateError::Plugin("Database pool not initialized".into()))?;
 
         let plugin_path = PathBuf::from(&info.path).join(&info.entry);
-        
+
         let mut runtime = PluginRuntime::new(id.to_string(), plugin_path);
-        runtime.start(config, db_pool, self.app_handle.clone()).await?;
+        runtime
+            .start(config, db_pool, self.app_handle.clone())
+            .await?;
 
         // Update plugin state
         if let Some(mut entry) = self.plugins.get_mut(id) {
@@ -191,7 +216,7 @@ impl PluginManager {
     /// Unload a plugin
     pub async fn unload_plugin(&self, id: &str) -> Result<()> {
         let mut runtimes = self.runtimes.write().await;
-        
+
         if let Some(mut runtime) = runtimes.remove(id) {
             runtime.stop().await?;
         }
@@ -232,8 +257,9 @@ impl PluginManager {
         context: PluginRequestContext,
     ) -> Result<Option<PluginResponse>> {
         let runtimes = self.runtimes.read().await;
-        
-        let runtime = runtimes.get(plugin_id)
+
+        let runtime = runtimes
+            .get(plugin_id)
             .ok_or_else(|| PostGateError::Plugin(format!("Plugin not loaded: {}", plugin_id)))?;
 
         runtime.handle_request(request, context).await
@@ -248,8 +274,9 @@ impl PluginManager {
         context: PluginRequestContext,
     ) -> Result<PluginResponse> {
         let runtimes = self.runtimes.read().await;
-        
-        let runtime = runtimes.get(plugin_id)
+
+        let runtime = runtimes
+            .get(plugin_id)
             .ok_or_else(|| PostGateError::Plugin(format!("Plugin not loaded: {}", plugin_id)))?;
 
         runtime.handle_response(request, response, context).await
@@ -273,7 +300,7 @@ impl PluginManager {
     /// Shutdown all plugins
     pub async fn shutdown(&self) -> Result<()> {
         let mut runtimes = self.runtimes.write().await;
-        
+
         for (id, mut runtime) in runtimes.drain() {
             if let Err(e) = runtime.stop().await {
                 tracing::warn!("Error stopping plugin {}: {}", id, e);
@@ -308,7 +335,7 @@ mod tests {
         // Create a mock plugin
         let plugin_dir = plugins_dir.join("postgate-plugin-test");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        
+
         let package_json = r#"{
             "name": "postgate-plugin-test",
             "version": "1.0.0",

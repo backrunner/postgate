@@ -131,7 +131,10 @@ pub enum StorageOp {
     #[serde(rename = "get")]
     Get { key: String },
     #[serde(rename = "set")]
-    Set { key: String, value: serde_json::Value },
+    Set {
+        key: String,
+        value: serde_json::Value,
+    },
     #[serde(rename = "delete")]
     Delete { key: String },
     #[serde(rename = "has")]

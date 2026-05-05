@@ -2,8 +2,8 @@
 
 use super::types::*;
 use dashmap::DashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -82,7 +82,14 @@ impl SessionManager {
     }
 
     /// Create a new debug session
-    pub fn create_session(&self, url: String, title: Option<String>, user_agent: Option<String>, cdp_enabled: bool, port: u16) -> DebugSession {
+    pub fn create_session(
+        &self,
+        url: String,
+        title: Option<String>,
+        user_agent: Option<String>,
+        cdp_enabled: bool,
+        port: u16,
+    ) -> DebugSession {
         let now = chrono::Utc::now().timestamp_millis();
         let id = Uuid::new_v4().to_string();
         let session = DebugSession {
@@ -108,7 +115,9 @@ impl SessionManager {
             self.enforce_session_cap();
         }
 
-        let _ = self.event_tx.send(DebugEvent::SessionConnected(session.clone()));
+        let _ = self
+            .event_tx
+            .send(DebugEvent::SessionConnected(session.clone()));
 
         session
     }
@@ -119,7 +128,9 @@ impl SessionManager {
             session.is_connected = false;
             session.last_activity = chrono::Utc::now().timestamp_millis();
         }
-        let _ = self.event_tx.send(DebugEvent::SessionDisconnected(session_id.to_string()));
+        let _ = self
+            .event_tx
+            .send(DebugEvent::SessionDisconnected(session_id.to_string()));
     }
 
     /// Remove a session completely
@@ -128,7 +139,8 @@ impl SessionManager {
         self.console_logs.remove(session_id);
         self.page_errors.remove(session_id);
         // Remove network requests for this session
-        self.network_requests.retain(|_, v| v.session_id != session_id);
+        self.network_requests
+            .retain(|_, v| v.session_id != session_id);
     }
 
     /// Update session activity timestamp
@@ -171,15 +183,23 @@ impl SessionManager {
         self.update_activity(&request.session_id);
         let id = request.id.clone();
 
-        let _ = self.event_tx.send(DebugEvent::NetworkRequest(request.clone()));
+        let _ = self
+            .event_tx
+            .send(DebugEvent::NetworkRequest(request.clone()));
         self.network_requests.insert(id, request);
     }
 
     /// Update an existing network request (e.g., when response arrives)
-    pub fn update_network_request(&self, request_id: &str, update: impl FnOnce(&mut PageNetworkRequest)) {
+    pub fn update_network_request(
+        &self,
+        request_id: &str,
+        update: impl FnOnce(&mut PageNetworkRequest),
+    ) {
         if let Some(mut request) = self.network_requests.get_mut(request_id) {
             update(&mut request);
-            let _ = self.event_tx.send(DebugEvent::NetworkRequest(request.clone()));
+            let _ = self
+                .event_tx
+                .send(DebugEvent::NetworkRequest(request.clone()));
         }
     }
 
@@ -194,24 +214,26 @@ impl SessionManager {
     }
 
     /// Get console logs for a session
-    pub fn get_console_logs(&self, session_id: &str, limit: Option<usize>, offset: Option<usize>) -> Vec<ConsoleLog> {
+    pub fn get_console_logs(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Vec<ConsoleLog> {
         self.console_logs
             .get(session_id)
             .map(|logs| {
                 let offset = offset.unwrap_or(0);
                 let limit = limit.unwrap_or(logs.len());
-                logs.iter()
-                    .skip(offset)
-                    .take(limit)
-                    .cloned()
-                    .collect()
+                logs.iter().skip(offset).take(limit).cloned().collect()
             })
             .unwrap_or_default()
     }
 
     /// Get all console logs across all sessions
     pub fn get_all_console_logs(&self, limit: Option<usize>) -> Vec<ConsoleLog> {
-        let mut all_logs: Vec<ConsoleLog> = self.console_logs
+        let mut all_logs: Vec<ConsoleLog> = self
+            .console_logs
             .iter()
             .flat_map(|r| r.value().clone())
             .collect();
@@ -251,8 +273,12 @@ impl SessionManager {
 
     /// Clear all data for all sessions
     pub fn clear_all(&self) {
-        self.console_logs.iter_mut().for_each(|mut r| r.value_mut().clear());
-        self.page_errors.iter_mut().for_each(|mut r| r.value_mut().clear());
+        self.console_logs
+            .iter_mut()
+            .for_each(|mut r| r.value_mut().clear());
+        self.page_errors
+            .iter_mut()
+            .for_each(|mut r| r.value_mut().clear());
         self.network_requests.clear();
         self.log_counter.store(0, Ordering::Relaxed);
     }
@@ -319,7 +345,13 @@ impl SessionManager {
         let mut candidates: Vec<(String, bool, i64)> = self
             .sessions
             .iter()
-            .map(|r| (r.key().clone(), r.value().is_connected, r.value().last_activity))
+            .map(|r| {
+                (
+                    r.key().clone(),
+                    r.value().is_connected,
+                    r.value().last_activity,
+                )
+            })
             .collect();
 
         // Sort: disconnected before connected, then oldest activity first.

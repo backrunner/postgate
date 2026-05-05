@@ -210,10 +210,7 @@ pub async fn clear_captured_history_before(
 
 /// Set persistence enabled/disabled
 #[tauri::command]
-pub async fn set_persistence_enabled(
-    enabled: bool,
-    state: State<'_, Arc<AppState>>,
-) -> Result<()> {
+pub async fn set_persistence_enabled(enabled: bool, state: State<'_, Arc<AppState>>) -> Result<()> {
     state.set_persistence_enabled(enabled);
     Ok(())
 }

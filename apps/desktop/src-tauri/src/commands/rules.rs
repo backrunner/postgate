@@ -31,15 +31,15 @@ pub async fn get_rule_groups(state: State<'_, Arc<AppState>>) -> Result<Vec<Rule
         // Load from database
         let db = state.get_database().await?;
         let db_groups = db.get_rule_groups().await?;
-        
+
         // Populate the in-memory engine
         for group in &db_groups {
             state.rule_engine.upsert_group(group.clone());
         }
-        
+
         return Ok(db_groups);
     }
-    
+
     Ok(groups)
 }
 
@@ -89,11 +89,11 @@ pub async fn save_rule_group(
 pub async fn delete_rule_group(id: String, state: State<'_, Arc<AppState>>) -> Result<bool> {
     // Remove from in-memory engine
     let removed = state.rule_engine.remove_group(&id);
-    
+
     // Delete from database
     let db = state.get_database().await?;
     db.delete_rule_group(&id).await?;
-    
+
     Ok(removed.is_some())
 }
 
@@ -106,7 +106,7 @@ pub async fn toggle_rule_group(
 ) -> Result<bool> {
     // Toggle in memory
     let toggled = state.rule_engine.toggle_group(&id, enabled);
-    
+
     if toggled {
         // Persist the updated state to database
         if let Some(group) = state.rule_engine.get_group(&id) {
@@ -114,7 +114,7 @@ pub async fn toggle_rule_group(
             db.save_rule_group(&group).await?;
         }
     }
-    
+
     Ok(toggled)
 }
 

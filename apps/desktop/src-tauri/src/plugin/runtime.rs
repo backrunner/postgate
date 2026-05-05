@@ -89,7 +89,14 @@ impl PluginRuntime {
 
         // Spawn a dedicated OS thread to hold the JsRuntime (V8 isolate is !Send)
         std::thread::spawn(move || {
-            Self::run_plugin_thread(op_state, plugin_source, plugin_id, config_json, call_rx, init_tx);
+            Self::run_plugin_thread(
+                op_state,
+                plugin_source,
+                plugin_id,
+                config_json,
+                call_rx,
+                init_tx,
+            );
         });
 
         // Wait for the thread to finish initialization
@@ -234,14 +241,21 @@ impl PluginRuntime {
             return Err(PostGateError::Plugin("Plugin not loaded".into()));
         }
 
-        let tx = self.call_tx.as_ref()
+        let tx = self
+            .call_tx
+            .as_ref()
             .ok_or_else(|| PostGateError::Plugin("Plugin thread not running".into()))?;
 
         let (respond_to, respond_rx) = oneshot::channel();
-        tx.send(JsCall::HandleRequest { request, context, respond_to })
-            .map_err(|e| PostGateError::Plugin(format!("Send failed: {}", e)))?;
+        tx.send(JsCall::HandleRequest {
+            request,
+            context,
+            respond_to,
+        })
+        .map_err(|e| PostGateError::Plugin(format!("Send failed: {}", e)))?;
 
-        respond_rx.await
+        respond_rx
+            .await
             .map_err(|e| PostGateError::Plugin(format!("Receive failed: {}", e)))?
     }
 
@@ -256,14 +270,22 @@ impl PluginRuntime {
             return Ok(response);
         }
 
-        let tx = self.call_tx.as_ref()
+        let tx = self
+            .call_tx
+            .as_ref()
             .ok_or_else(|| PostGateError::Plugin("Plugin thread not running".into()))?;
 
         let (respond_to, respond_rx) = oneshot::channel();
-        tx.send(JsCall::HandleResponse { request, response, context, respond_to })
-            .map_err(|e| PostGateError::Plugin(format!("Send failed: {}", e)))?;
+        tx.send(JsCall::HandleResponse {
+            request,
+            response,
+            context,
+            respond_to,
+        })
+        .map_err(|e| PostGateError::Plugin(format!("Send failed: {}", e)))?;
 
-        respond_rx.await
+        respond_rx
+            .await
             .map_err(|e| PostGateError::Plugin(format!("Receive failed: {}", e)))?
     }
 
@@ -331,10 +353,12 @@ async fn execute_handle_request(
         return Ok(None);
     }
 
-    let str_local = deno_core::v8::Local::<deno_core::v8::String>::try_from(local)
-        .map_err(|_| PostGateError::Plugin("Plugin handleRequest did not return a JSON string".into()))?;
+    let str_local =
+        deno_core::v8::Local::<deno_core::v8::String>::try_from(local).map_err(|_| {
+            PostGateError::Plugin("Plugin handleRequest did not return a JSON string".into())
+        })?;
 
-    let rust_str = str_local.to_rust_string_lossy(&**pin_scope);
+    let rust_str = str_local.to_rust_string_lossy(pin_scope);
     let response: Option<PluginResponse> = serde_json::from_str(&rust_str)
         .map_err(|e| PostGateError::Plugin(format!("handleRequest JSON parse error: {}", e)))?;
 
@@ -385,10 +409,12 @@ async fn execute_handle_response(
         return Ok(response);
     }
 
-    let str_local = deno_core::v8::Local::<deno_core::v8::String>::try_from(local)
-        .map_err(|_| PostGateError::Plugin("Plugin handleResponse did not return a JSON string".into()))?;
+    let str_local =
+        deno_core::v8::Local::<deno_core::v8::String>::try_from(local).map_err(|_| {
+            PostGateError::Plugin("Plugin handleResponse did not return a JSON string".into())
+        })?;
 
-    let rust_str = str_local.to_rust_string_lossy(&**pin_scope);
+    let rust_str = str_local.to_rust_string_lossy(pin_scope);
     let modified: Option<PluginResponse> = serde_json::from_str(&rust_str)
         .map_err(|e| PostGateError::Plugin(format!("handleResponse JSON parse error: {}", e)))?;
 

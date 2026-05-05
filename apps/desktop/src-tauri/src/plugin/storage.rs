@@ -36,7 +36,9 @@ impl PluginStorage {
         )
         .execute(pool)
         .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to create plugin_storage table: {}", e)))?;
+        .map_err(|e| {
+            PostGateError::Storage(format!("Failed to create plugin_storage table: {}", e))
+        })?;
 
         // Create index for faster lookups
         sqlx::query(
@@ -51,19 +53,21 @@ impl PluginStorage {
 
     /// Get a value from storage
     pub async fn get(&self, key: &str) -> Result<Option<serde_json::Value>> {
-        let row: Option<(String,)> = sqlx::query_as(
-            "SELECT value FROM plugin_storage WHERE plugin_id = ? AND key = ?"
-        )
-        .bind(&self.plugin_id)
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to get storage value: {}", e)))?;
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM plugin_storage WHERE plugin_id = ? AND key = ?")
+                .bind(&self.plugin_id)
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| {
+                    PostGateError::Storage(format!("Failed to get storage value: {}", e))
+                })?;
 
         match row {
             Some((value_str,)) => {
-                let value: serde_json::Value = serde_json::from_str(&value_str)
-                    .map_err(|e| PostGateError::Storage(format!("Failed to parse stored value: {}", e)))?;
+                let value: serde_json::Value = serde_json::from_str(&value_str).map_err(|e| {
+                    PostGateError::Storage(format!("Failed to parse stored value: {}", e))
+                })?;
                 Ok(Some(value))
             }
             None => Ok(None),
@@ -83,7 +87,7 @@ impl PluginStorage {
             ON CONFLICT(plugin_id, key) DO UPDATE SET
                 value = excluded.value,
                 updated_at = excluded.updated_at
-            "#
+            "#,
         )
         .bind(&self.plugin_id)
         .bind(key)
@@ -99,67 +103,67 @@ impl PluginStorage {
 
     /// Delete a value from storage
     pub async fn delete(&self, key: &str) -> Result<bool> {
-        let result = sqlx::query(
-            "DELETE FROM plugin_storage WHERE plugin_id = ? AND key = ?"
-        )
-        .bind(&self.plugin_id)
-        .bind(key)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to delete storage value: {}", e)))?;
+        let result = sqlx::query("DELETE FROM plugin_storage WHERE plugin_id = ? AND key = ?")
+            .bind(&self.plugin_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                PostGateError::Storage(format!("Failed to delete storage value: {}", e))
+            })?;
 
         Ok(result.rows_affected() > 0)
     }
 
     /// Check if a key exists in storage
     pub async fn has(&self, key: &str) -> Result<bool> {
-        let row: Option<(i32,)> = sqlx::query_as(
-            "SELECT 1 FROM plugin_storage WHERE plugin_id = ? AND key = ?"
-        )
-        .bind(&self.plugin_id)
-        .bind(key)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to check storage key: {}", e)))?;
+        let row: Option<(i32,)> =
+            sqlx::query_as("SELECT 1 FROM plugin_storage WHERE plugin_id = ? AND key = ?")
+                .bind(&self.plugin_id)
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| {
+                    PostGateError::Storage(format!("Failed to check storage key: {}", e))
+                })?;
 
         Ok(row.is_some())
     }
 
     /// Get all keys in storage for this plugin
     pub async fn keys(&self) -> Result<Vec<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT key FROM plugin_storage WHERE plugin_id = ? ORDER BY key"
-        )
-        .bind(&self.plugin_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to list storage keys: {}", e)))?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT key FROM plugin_storage WHERE plugin_id = ? ORDER BY key")
+                .bind(&self.plugin_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| {
+                    PostGateError::Storage(format!("Failed to list storage keys: {}", e))
+                })?;
 
         Ok(rows.into_iter().map(|(k,)| k).collect())
     }
 
     /// Clear all storage for this plugin
     pub async fn clear(&self) -> Result<u64> {
-        let result = sqlx::query(
-            "DELETE FROM plugin_storage WHERE plugin_id = ?"
-        )
-        .bind(&self.plugin_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to clear storage: {}", e)))?;
+        let result = sqlx::query("DELETE FROM plugin_storage WHERE plugin_id = ?")
+            .bind(&self.plugin_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Failed to clear storage: {}", e)))?;
 
         Ok(result.rows_affected())
     }
 
     /// Clear all storage for a specific plugin (static method for cleanup)
     pub async fn clear_plugin_storage(pool: &SqlitePool, plugin_id: &str) -> Result<u64> {
-        let result = sqlx::query(
-            "DELETE FROM plugin_storage WHERE plugin_id = ?"
-        )
-        .bind(plugin_id)
-        .execute(pool)
-        .await
-        .map_err(|e| PostGateError::Storage(format!("Failed to clear plugin storage: {}", e)))?;
+        let result = sqlx::query("DELETE FROM plugin_storage WHERE plugin_id = ?")
+            .bind(plugin_id)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                PostGateError::Storage(format!("Failed to clear plugin storage: {}", e))
+            })?;
 
         Ok(result.rows_affected())
     }
@@ -197,7 +201,10 @@ mod tests {
         assert!(!storage.has("nonexistent").await.unwrap());
 
         // Test keys
-        storage.set("another-key", &serde_json::json!("value")).await.unwrap();
+        storage
+            .set("another-key", &serde_json::json!("value"))
+            .await
+            .unwrap();
         let keys = storage.keys().await.unwrap();
         assert_eq!(keys.len(), 2);
 

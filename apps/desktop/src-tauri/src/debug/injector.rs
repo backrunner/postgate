@@ -298,9 +298,7 @@ impl ScriptInjector {
         let script = self.get_inject_script();
 
         // Try to inject after <head>
-        let head_regex = HEAD_REGEX.get_or_init(|| {
-            Regex::new(r"(?i)(<head[^>]*>)").unwrap()
-        });
+        let head_regex = HEAD_REGEX.get_or_init(|| Regex::new(r"(?i)(<head[^>]*>)").unwrap());
 
         if let Some(caps) = head_regex.captures(html) {
             if let Some(m) = caps.get(1) {
@@ -314,9 +312,7 @@ impl ScriptInjector {
         }
 
         // Fallback: inject after <body>
-        let body_regex = BODY_REGEX.get_or_init(|| {
-            Regex::new(r"(?i)(<body[^>]*>)").unwrap()
-        });
+        let body_regex = BODY_REGEX.get_or_init(|| Regex::new(r"(?i)(<body[^>]*>)").unwrap());
 
         if let Some(caps) = body_regex.captures(html) {
             if let Some(m) = caps.get(1) {
@@ -354,7 +350,7 @@ mod tests {
         let injector = ScriptInjector::new(9229);
         let html = "<html><head><title>Test</title></head><body>Hello</body></html>";
         let result = injector.inject_into_html(html);
-        
+
         assert!(result.contains("data-postgate-inject"));
         assert!(result.contains("<head><script"));
         assert!(result.contains("chobitsu"));
@@ -365,7 +361,7 @@ mod tests {
         let injector = ScriptInjector::new(9229);
         let html = "<html><body>Hello</body></html>";
         let result = injector.inject_into_html(html);
-        
+
         assert!(result.contains("data-postgate-inject"));
         assert!(result.contains("<body><script"));
     }
@@ -373,8 +369,12 @@ mod tests {
     #[test]
     fn test_is_html_content_type() {
         assert!(ScriptInjector::is_html_content_type("text/html"));
-        assert!(ScriptInjector::is_html_content_type("text/html; charset=utf-8"));
-        assert!(ScriptInjector::is_html_content_type("application/xhtml+xml"));
+        assert!(ScriptInjector::is_html_content_type(
+            "text/html; charset=utf-8"
+        ));
+        assert!(ScriptInjector::is_html_content_type(
+            "application/xhtml+xml"
+        ));
         assert!(!ScriptInjector::is_html_content_type("application/json"));
     }
 
@@ -383,7 +383,7 @@ mod tests {
         let injector = ScriptInjector::new(9229);
         let html = "<html><head></head><body>Hello</body></html>";
         let injected = injector.inject_into_html(html);
-        
+
         assert!(ScriptInjector::is_already_injected(&injected));
         assert!(!ScriptInjector::is_already_injected(html));
     }

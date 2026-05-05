@@ -9,18 +9,14 @@ use tauri::State;
 
 /// Get list of all discovered plugins
 #[tauri::command]
-pub async fn get_plugins(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<PluginInfo>> {
+pub async fn get_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<PluginInfo>> {
     let manager = state.plugin_manager.read().await;
     Ok(manager.get_plugins())
 }
 
 /// Discover plugins in the plugins directory
 #[tauri::command]
-pub async fn discover_plugins(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<PluginInfo>> {
+pub async fn discover_plugins(state: State<'_, Arc<AppState>>) -> Result<Vec<PluginInfo>> {
     let manager = state.plugin_manager.read().await;
     manager.discover_plugins().await
 }
@@ -33,15 +29,14 @@ pub async fn load_plugin(
     config: Option<HashMap<String, String>>,
 ) -> Result<()> {
     let manager = state.plugin_manager.read().await;
-    manager.load_plugin(&plugin_id, config.unwrap_or_default()).await
+    manager
+        .load_plugin(&plugin_id, config.unwrap_or_default())
+        .await
 }
 
 /// Unload a plugin
 #[tauri::command]
-pub async fn unload_plugin(
-    state: State<'_, Arc<AppState>>,
-    plugin_id: String,
-) -> Result<()> {
+pub async fn unload_plugin(state: State<'_, Arc<AppState>>, plugin_id: String) -> Result<()> {
     let manager = state.plugin_manager.read().await;
     manager.unload_plugin(&plugin_id).await
 }
@@ -69,18 +64,14 @@ pub async fn get_plugin(
 
 /// Get all registered UI panels from plugins
 #[tauri::command]
-pub async fn get_plugin_panels(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<PluginPanel>> {
+pub async fn get_plugin_panels(state: State<'_, Arc<AppState>>) -> Result<Vec<PluginPanel>> {
     let manager = state.plugin_manager.read().await;
     Ok(manager.get_panels())
 }
 
 /// Get the plugins directory path
 #[tauri::command]
-pub async fn get_plugins_dir(
-    state: State<'_, Arc<AppState>>,
-) -> Result<String> {
+pub async fn get_plugins_dir(state: State<'_, Arc<AppState>>) -> Result<String> {
     Ok(state.plugins_dir.to_string_lossy().to_string())
 }
 
@@ -91,7 +82,9 @@ pub async fn install_plugin_from_npm(
     package_name: String,
 ) -> Result<PluginInfo> {
     // Validate package name format
-    if !package_name.starts_with("postgate-plugin-") && !package_name.starts_with("@postgate/plugin-") {
+    if !package_name.starts_with("postgate-plugin-")
+        && !package_name.starts_with("@postgate/plugin-")
+    {
         return Err(PostGateError::Plugin(
             format!("Invalid package name '{}'. Plugin names must start with 'postgate-plugin-' or '@postgate/plugin-'", package_name)
         ));
@@ -105,7 +98,7 @@ pub async fn install_plugin_from_npm(
 
     // Run npm pack to download the package
     let output = tokio::process::Command::new("npm")
-        .args(&[
+        .args([
             "pack",
             &package_name,
             "--pack-destination",
@@ -113,19 +106,30 @@ pub async fn install_plugin_from_npm(
         ])
         .output()
         .await
-        .map_err(|e| PostGateError::Plugin(format!("Failed to run npm pack: {}. Make sure npm is installed.", e)))?;
+        .map_err(|e| {
+            PostGateError::Plugin(format!(
+                "Failed to run npm pack: {}. Make sure npm is installed.",
+                e
+            ))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(PostGateError::Plugin(format!("npm pack failed: {}", stderr)));
+        return Err(PostGateError::Plugin(format!(
+            "npm pack failed: {}",
+            stderr
+        )));
     }
 
     // Find the downloaded .tgz file
     let mut tgz_file = None;
-    let mut entries = tokio::fs::read_dir(temp_dir.path()).await
+    let mut entries = tokio::fs::read_dir(temp_dir.path())
+        .await
         .map_err(|e| PostGateError::Plugin(format!("Failed to read temp dir: {}", e)))?;
 
-    while let Some(entry) = entries.next_entry().await
+    while let Some(entry) = entries
+        .next_entry()
+        .await
         .map_err(|e| PostGateError::Plugin(format!("Failed to read temp dir entry: {}", e)))?
     {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -135,11 +139,13 @@ pub async fn install_plugin_from_npm(
         }
     }
 
-    let tgz_path = tgz_file.ok_or_else(|| PostGateError::Plugin("npm pack did not produce a .tgz file".into()))?;
+    let tgz_path = tgz_file
+        .ok_or_else(|| PostGateError::Plugin("npm pack did not produce a .tgz file".into()))?;
 
     // Extract the tarball
     let extract_dir = temp_dir.path().join("extracted");
-    tokio::fs::create_dir_all(&extract_dir).await
+    tokio::fs::create_dir_all(&extract_dir)
+        .await
         .map_err(|e| PostGateError::Plugin(format!("Failed to create extract dir: {}", e)))?;
 
     // Decompress and extract in a blocking task
@@ -150,25 +156,31 @@ pub async fn install_plugin_from_npm(
             .map_err(|e| PostGateError::Plugin(format!("Failed to open .tgz: {}", e)))?;
         let decoder = flate2::read::GzDecoder::new(file);
         let mut archive = tar::Archive::new(decoder);
-        archive.unpack(&extract_dir_clone)
+        archive
+            .unpack(&extract_dir_clone)
             .map_err(|e| PostGateError::Plugin(format!("Failed to extract .tgz: {}", e)))?;
         Ok::<(), PostGateError>(())
-    }).await
+    })
+    .await
     .map_err(|e| PostGateError::Plugin(format!("Extract task failed: {}", e)))??;
 
     // Find the extracted package directory (usually "package/")
     let package_dir = extract_dir.join("package");
     if !package_dir.exists() {
-        return Err(PostGateError::Plugin("Extracted tarball did not contain a 'package' directory".into()));
+        return Err(PostGateError::Plugin(
+            "Extracted tarball did not contain a 'package' directory".into(),
+        ));
     }
 
     // Read and validate package.json
     let package_json_path = package_dir.join("package.json");
-    let package_json_content = tokio::fs::read_to_string(&package_json_path).await
+    let package_json_content = tokio::fs::read_to_string(&package_json_path)
+        .await
         .map_err(|e| PostGateError::Plugin(format!("Failed to read package.json: {}", e)))?;
     let package: serde_json::Value = serde_json::from_str(&package_json_content)
         .map_err(|e| PostGateError::Plugin(format!("Invalid package.json: {}", e)))?;
-    let actual_name = package.get("name")
+    let actual_name = package
+        .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| PostGateError::Plugin("package.json missing name field".into()))?;
 
@@ -182,21 +194,28 @@ pub async fn install_plugin_from_npm(
 
     // Remove existing plugin directory if it exists
     if target_dir.exists() {
-        tokio::fs::remove_dir_all(&target_dir).await
-            .map_err(|e| PostGateError::Plugin(format!("Failed to remove existing plugin: {}", e)))?;
+        tokio::fs::remove_dir_all(&target_dir).await.map_err(|e| {
+            PostGateError::Plugin(format!("Failed to remove existing plugin: {}", e))
+        })?;
     }
 
     // Move the extracted package to the plugins directory
-    tokio::fs::rename(&package_dir, &target_dir).await
-        .map_err(|e| PostGateError::Plugin(format!("Failed to move plugin to plugins dir: {}", e)))?;
+    tokio::fs::rename(&package_dir, &target_dir)
+        .await
+        .map_err(|e| {
+            PostGateError::Plugin(format!("Failed to move plugin to plugins dir: {}", e))
+        })?;
 
     // Rediscover plugins and return the installed plugin info
     let manager = state.plugin_manager.read().await;
     let plugins = manager.discover_plugins().await?;
 
-    plugins.into_iter()
+    plugins
+        .into_iter()
         .find(|p| p.name == actual_name)
-        .ok_or_else(|| PostGateError::Plugin("Plugin installed but not found after discovery".into()))
+        .ok_or_else(|| {
+            PostGateError::Plugin("Plugin installed but not found after discovery".into())
+        })
 }
 
 /// Install a plugin from a local directory path
@@ -209,21 +228,28 @@ pub async fn install_plugin_from_path(
 
     // Validate source path
     if !source.exists() || !source.is_dir() {
-        return Err(PostGateError::Plugin(format!("Source path '{}' does not exist or is not a directory", source_path)));
+        return Err(PostGateError::Plugin(format!(
+            "Source path '{}' does not exist or is not a directory",
+            source_path
+        )));
     }
 
     // Read and validate package.json
     let package_json_path = source.join("package.json");
-    let package_json_content = tokio::fs::read_to_string(&package_json_path).await
+    let package_json_content = tokio::fs::read_to_string(&package_json_path)
+        .await
         .map_err(|e| PostGateError::Plugin(format!("Failed to read package.json: {}", e)))?;
     let package: serde_json::Value = serde_json::from_str(&package_json_content)
         .map_err(|e| PostGateError::Plugin(format!("Invalid package.json: {}", e)))?;
-    let package_name = package.get("name")
+    let package_name = package
+        .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| PostGateError::Plugin("package.json missing name field".into()))?;
 
     // Validate plugin name
-    if !package_name.starts_with("postgate-plugin-") && !package_name.starts_with("@postgate/plugin-") {
+    if !package_name.starts_with("postgate-plugin-")
+        && !package_name.starts_with("@postgate/plugin-")
+    {
         return Err(PostGateError::Plugin(
             format!("Invalid package name '{}'. Plugin names must start with 'postgate-plugin-' or '@postgate/plugin-'", package_name)
         ));
@@ -239,19 +265,22 @@ pub async fn install_plugin_from_path(
 
     // Remove existing plugin directory if it exists
     if target_dir.exists() {
-        tokio::fs::remove_dir_all(&target_dir).await
-            .map_err(|e| PostGateError::Plugin(format!("Failed to remove existing plugin: {}", e)))?;
+        tokio::fs::remove_dir_all(&target_dir).await.map_err(|e| {
+            PostGateError::Plugin(format!("Failed to remove existing plugin: {}", e))
+        })?;
     }
 
     // Copy the source directory to the plugins directory
-    copy_dir_recursive(&source, &target_dir).await
+    copy_dir_recursive(&source, &target_dir)
+        .await
         .map_err(|e| PostGateError::Plugin(format!("Failed to copy plugin directory: {}", e)))?;
 
     // Rediscover plugins and return the installed plugin info
     let manager = state.plugin_manager.read().await;
     let plugins = manager.discover_plugins().await?;
 
-    plugins.into_iter()
+    plugins
+        .into_iter()
         .find(|p| p.name == package_name)
         .ok_or_else(|| PostGateError::Plugin("Plugin copied but not found after discovery".into()))
 }
@@ -267,10 +296,7 @@ pub async fn install_plugin(
 
 /// Uninstall a plugin (remove from plugins directory)
 #[tauri::command]
-pub async fn uninstall_plugin(
-    state: State<'_, Arc<AppState>>,
-    plugin_id: String,
-) -> Result<()> {
+pub async fn uninstall_plugin(state: State<'_, Arc<AppState>>, plugin_id: String) -> Result<()> {
     // First unload the plugin
     {
         let manager = state.plugin_manager.read().await;
@@ -280,14 +306,18 @@ pub async fn uninstall_plugin(
     // Get plugin info to find the path
     let plugin_path = {
         let manager = state.plugin_manager.read().await;
-        manager.get_plugin(&plugin_id)
+        manager
+            .get_plugin(&plugin_id)
             .map(|p| p.path.clone())
-            .ok_or_else(|| crate::error::PostGateError::NotFound(format!("Plugin not found: {}", plugin_id)))?
+            .ok_or_else(|| {
+                crate::error::PostGateError::NotFound(format!("Plugin not found: {}", plugin_id))
+            })?
     };
 
     // Remove the plugin directory
-    tokio::fs::remove_dir_all(&plugin_path).await
-        .map_err(|e| crate::error::PostGateError::Plugin(format!("Failed to remove plugin: {}", e)))?;
+    tokio::fs::remove_dir_all(&plugin_path).await.map_err(|e| {
+        crate::error::PostGateError::Plugin(format!("Failed to remove plugin: {}", e))
+    })?;
 
     // Rediscover plugins
     {

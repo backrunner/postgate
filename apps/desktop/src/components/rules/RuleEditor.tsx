@@ -42,7 +42,7 @@ export function RuleEditor({ className }: RuleEditorProps) {
   const { editorContent, setEditorContent, parseContent, parseResult, saveCurrentGroup, isDirty } = useRulesStore();
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
-  const parseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const parseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep a live handle on isDirty + save fn so Monaco's addCommand closure
   // (which is only registered once at mount) can always read the latest

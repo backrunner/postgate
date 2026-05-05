@@ -906,8 +906,8 @@ function ResponseBodyView({ body, contentType }: ResponseBodyViewProps) {
     }
 
     const isJsonContent = contentType?.includes("json") || false;
-    let html = "";
 
+    let html: string;
     if (isJsonContent) {
       try {
         const parsed = JSON.parse(body);

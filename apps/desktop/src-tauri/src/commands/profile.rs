@@ -1,0 +1,848 @@
+use crate::cert::CertificateAuthority;
+use crate::error::{PostGateError, Result};
+use crate::replay::{Collection, SavedRequest};
+use crate::rules::{parse_rules_with_inline, RuleGroup};
+use crate::state::AppState;
+use crate::values::ValueEntry;
+use reqwest::Method;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tauri::State;
+
+const PROFILE_FORMAT: &str = "postgate.profile";
+const PROFILE_VERSION: u16 = 1;
+const SYNC_FILE_NAME: &str = "postgate-profile.json";
+const SYNC_CONFIG_FILE_NAME: &str = "sync-config.json";
+const ICLOUD_RELATIVE_PATH: &str = "Documents/PostGate";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileOptions {
+    #[serde(default = "default_true")]
+    pub include_rules: bool,
+    #[serde(default = "default_true")]
+    pub include_values: bool,
+    #[serde(default = "default_true")]
+    pub include_replay: bool,
+    #[serde(default = "default_true")]
+    pub include_certificate: bool,
+    #[serde(default = "default_true")]
+    pub include_app_settings: bool,
+    #[serde(default = "default_true")]
+    pub include_sync_settings: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOptions {
+    #[serde(default)]
+    pub profile_options: ProfileOptions,
+    #[serde(default = "default_true")]
+    pub replace_existing: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileExportInput {
+    pub path: String,
+    #[serde(default)]
+    pub app_settings: Option<AppSettings>,
+    #[serde(default)]
+    pub sync_settings: Option<SyncSettings>,
+    #[serde(default)]
+    pub options: ProfileOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileImportInput {
+    pub path: String,
+    #[serde(default)]
+    pub options: ImportOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSnapshot {
+    pub format: String,
+    pub version: u16,
+    pub exported_at: i64,
+    #[serde(default)]
+    pub app_settings: Option<AppSettings>,
+    #[serde(default)]
+    pub sync_settings: Option<SyncSettings>,
+    #[serde(default)]
+    pub rules: Vec<RuleGroupBackup>,
+    #[serde(default)]
+    pub values: Vec<ValueEntry>,
+    #[serde(default)]
+    pub replay: Option<ReplayBackup>,
+    #[serde(default)]
+    pub certificate: Option<CertificateBackup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleGroupBackup {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub priority: i32,
+    pub raw_content: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayBackup {
+    #[serde(default)]
+    pub collections: Vec<Collection>,
+    #[serde(default)]
+    pub saved_requests: Vec<SavedRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateBackup {
+    pub cert_pem: String,
+    pub key_pem: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(default)]
+    pub proxy: Option<ProxySettings>,
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub columns: Option<serde_json::Value>,
+    #[serde(default)]
+    pub updates: Option<UpdateSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxySettings {
+    pub port: u16,
+    #[serde(default = "default_true")]
+    pub enable_http2: bool,
+    #[serde(default)]
+    pub enable_quic: bool,
+    #[serde(default)]
+    pub quic_port: Option<u16>,
+    #[serde(default = "default_debug_port")]
+    pub debug_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSettings {
+    pub auto_check: bool,
+    pub auto_download: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSettings {
+    pub enabled: bool,
+    pub provider: SyncProvider,
+    #[serde(default)]
+    pub remote_path: Option<String>,
+    #[serde(default)]
+    pub webdav: Option<WebDavSettings>,
+    #[serde(default)]
+    pub last_synced_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncProvider {
+    #[default]
+    Icloud,
+    Webdav,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WebDavSettings {
+    pub endpoint: String,
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSummary {
+    pub exported_at: i64,
+    pub rule_groups: usize,
+    pub values: usize,
+    pub collections: usize,
+    pub saved_requests: usize,
+    pub includes_certificate: bool,
+    pub includes_app_settings: bool,
+    pub includes_sync_settings: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub summary: ProfileSummary,
+    #[serde(default)]
+    pub app_settings: Option<AppSettings>,
+    #[serde(default)]
+    pub sync_settings: Option<SyncSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatus {
+    pub config: SyncSettings,
+    pub local_path: String,
+    pub remote_available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncPullResult {
+    pub import_result: ImportResult,
+    pub path: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_debug_port() -> u16 {
+    9229
+}
+
+impl Default for ProfileOptions {
+    fn default() -> Self {
+        Self {
+            include_rules: true,
+            include_values: true,
+            include_replay: true,
+            include_certificate: true,
+            include_app_settings: true,
+            include_sync_settings: true,
+        }
+    }
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        Self {
+            profile_options: ProfileOptions::default(),
+            replace_existing: true,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn export_profile(
+    input: ProfileExportInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProfileSummary> {
+    let snapshot = build_snapshot(
+        &state,
+        input.options,
+        input.app_settings,
+        input.sync_settings,
+    )
+    .await?;
+    write_snapshot(Path::new(&input.path), &snapshot).await?;
+    Ok(snapshot_summary(&snapshot))
+}
+
+#[tauri::command]
+pub async fn inspect_profile(path: String) -> Result<ProfileSummary> {
+    let snapshot = read_snapshot(Path::new(&path)).await?;
+    Ok(snapshot_summary(&snapshot))
+}
+
+#[tauri::command]
+pub async fn import_profile(
+    input: ProfileImportInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ImportResult> {
+    let snapshot = read_snapshot(Path::new(&input.path)).await?;
+    apply_snapshot(&state, &snapshot, &input.options).await
+}
+
+#[tauri::command]
+pub async fn get_sync_status(state: State<'_, Arc<AppState>>) -> Result<SyncStatus> {
+    let config = read_sync_config(&state).await?.unwrap_or_default();
+    let local_path = sync_location(&state, &config)?;
+    let remote_available = sync_snapshot_exists(&config, &local_path)
+        .await
+        .unwrap_or(false);
+
+    Ok(SyncStatus {
+        config,
+        local_path,
+        remote_available,
+    })
+}
+
+#[tauri::command]
+pub async fn save_sync_settings(
+    settings: SyncSettings,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SyncStatus> {
+    validate_sync_settings(&settings)?;
+    write_sync_config(&state, &settings).await?;
+    let local_path = sync_location(&state, &settings)?;
+    let remote_available = sync_snapshot_exists(&settings, &local_path)
+        .await
+        .unwrap_or(false);
+
+    Ok(SyncStatus {
+        config: settings,
+        local_path,
+        remote_available,
+    })
+}
+
+#[tauri::command]
+pub async fn push_sync_profile(
+    app_settings: Option<AppSettings>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProfileSummary> {
+    let mut sync_settings = read_sync_config(&state).await?.unwrap_or_default();
+    validate_sync_settings(&sync_settings)?;
+    sync_settings.last_synced_at = Some(chrono::Utc::now().timestamp_millis());
+    write_sync_config(&state, &sync_settings).await?;
+
+    let snapshot = build_snapshot(
+        &state,
+        ProfileOptions::default(),
+        app_settings,
+        Some(sync_settings.clone()),
+    )
+    .await?;
+    let path = sync_location(&state, &sync_settings)?;
+    write_sync_snapshot(&sync_settings, &path, &snapshot).await?;
+    Ok(snapshot_summary(&snapshot))
+}
+
+#[tauri::command]
+pub async fn pull_sync_profile(state: State<'_, Arc<AppState>>) -> Result<SyncPullResult> {
+    let mut sync_settings = read_sync_config(&state).await?.unwrap_or_default();
+    validate_sync_settings(&sync_settings)?;
+    let path = sync_location(&state, &sync_settings)?;
+    let snapshot = read_sync_snapshot(&sync_settings, &path).await?;
+
+    sync_settings.last_synced_at = Some(chrono::Utc::now().timestamp_millis());
+    write_sync_config(&state, &sync_settings).await?;
+
+    let options = ImportOptions::default();
+    let import_result = apply_snapshot(&state, &snapshot, &options).await?;
+    write_sync_config(&state, &sync_settings).await?;
+
+    Ok(SyncPullResult {
+        import_result,
+        path,
+    })
+}
+
+async fn build_snapshot(
+    state: &Arc<AppState>,
+    options: ProfileOptions,
+    app_settings: Option<AppSettings>,
+    sync_settings: Option<SyncSettings>,
+) -> Result<ProfileSnapshot> {
+    let db = state.get_database().await?;
+
+    let rules = if options.include_rules {
+        db.get_rule_groups()
+            .await?
+            .into_iter()
+            .map(RuleGroupBackup::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let values = if options.include_values {
+        state.ensure_values_loaded().await?;
+        db.list_values().await?
+    } else {
+        Vec::new()
+    };
+
+    let replay = if options.include_replay {
+        Some(ReplayBackup {
+            collections: db.get_collections().await?,
+            saved_requests: db.get_saved_requests().await?,
+        })
+    } else {
+        None
+    };
+
+    let certificate = if options.include_certificate {
+        let ca = state.get_or_init_ca()?;
+        Some(CertificateBackup {
+            cert_pem: ca.get_ca_pem().to_string(),
+            key_pem: ca.get_ca_key_pem(),
+        })
+    } else {
+        None
+    };
+
+    Ok(ProfileSnapshot {
+        format: PROFILE_FORMAT.to_string(),
+        version: PROFILE_VERSION,
+        exported_at: chrono::Utc::now().timestamp_millis(),
+        app_settings: options
+            .include_app_settings
+            .then_some(app_settings)
+            .flatten(),
+        sync_settings: options
+            .include_sync_settings
+            .then_some(sync_settings)
+            .flatten(),
+        rules,
+        values,
+        replay,
+        certificate,
+    })
+}
+
+async fn apply_snapshot(
+    state: &Arc<AppState>,
+    snapshot: &ProfileSnapshot,
+    options: &ImportOptions,
+) -> Result<ImportResult> {
+    validate_snapshot(snapshot)?;
+    let db = state.get_database().await?;
+    let profile_options = &options.profile_options;
+
+    if profile_options.include_rules {
+        let restored_groups = snapshot
+            .rules
+            .iter()
+            .map(RuleGroupBackup::to_rule_group)
+            .collect::<Result<Vec<_>>>()?;
+
+        if options.replace_existing {
+            db.clear_rule_groups().await?;
+            for group in state.rule_engine.get_all_groups() {
+                state.rule_engine.remove_group(&group.id);
+            }
+        }
+
+        for group in restored_groups {
+            db.save_rule_group(&group).await?;
+            state.rule_engine.upsert_group(group);
+        }
+    }
+
+    if profile_options.include_values {
+        if options.replace_existing {
+            db.clear_values().await?;
+            state.values_store.clear();
+        } else {
+            state.ensure_values_loaded().await?;
+        }
+
+        for value in &snapshot.values {
+            let saved = db.upsert_value(&value.name, &value.content).await?;
+            state.values_store.insert(saved.name, saved.content);
+        }
+    }
+
+    if profile_options.include_replay {
+        if let Some(replay) = &snapshot.replay {
+            if options.replace_existing {
+                db.clear_replay_data().await?;
+            }
+            for collection in &replay.collections {
+                db.save_collection(collection).await?;
+            }
+            for request in &replay.saved_requests {
+                db.save_request(request).await?;
+            }
+        }
+    }
+
+    if profile_options.include_certificate {
+        if let Some(certificate) = &snapshot.certificate {
+            let ca =
+                CertificateAuthority::load_from_pem(&certificate.cert_pem, &certificate.key_pem)?;
+            ca.save_to_files(&state.data_dir)?;
+            let mut ca_guard = state.ca.write();
+            *ca_guard = Some(ca);
+        }
+    }
+
+    if profile_options.include_sync_settings {
+        if let Some(sync_settings) = &snapshot.sync_settings {
+            write_sync_config(state, sync_settings).await?;
+        }
+    }
+
+    Ok(ImportResult {
+        summary: snapshot_summary(snapshot),
+        app_settings: profile_options
+            .include_app_settings
+            .then_some(snapshot.app_settings.clone())
+            .flatten(),
+        sync_settings: profile_options
+            .include_sync_settings
+            .then_some(snapshot.sync_settings.clone())
+            .flatten(),
+    })
+}
+
+fn validate_snapshot(snapshot: &ProfileSnapshot) -> Result<()> {
+    if snapshot.format != PROFILE_FORMAT {
+        return Err(PostGateError::InvalidState(format!(
+            "Unsupported profile format '{}'",
+            snapshot.format
+        )));
+    }
+
+    if snapshot.version > PROFILE_VERSION {
+        return Err(PostGateError::InvalidState(format!(
+            "Profile version {} is newer than this app supports",
+            snapshot.version
+        )));
+    }
+
+    Ok(())
+}
+
+async fn read_snapshot(path: &Path) -> Result<ProfileSnapshot> {
+    let content = tokio::fs::read_to_string(path).await?;
+    let snapshot: ProfileSnapshot = serde_json::from_str(&content)?;
+    validate_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
+async fn write_snapshot(path: &Path, snapshot: &ProfileSnapshot) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let content = serde_json::to_string_pretty(snapshot)?;
+    tokio::fs::write(path, content).await?;
+    Ok(())
+}
+
+fn snapshot_summary(snapshot: &ProfileSnapshot) -> ProfileSummary {
+    let (collections, saved_requests) = snapshot
+        .replay
+        .as_ref()
+        .map(|replay| (replay.collections.len(), replay.saved_requests.len()))
+        .unwrap_or((0, 0));
+
+    ProfileSummary {
+        exported_at: snapshot.exported_at,
+        rule_groups: snapshot.rules.len(),
+        values: snapshot.values.len(),
+        collections,
+        saved_requests,
+        includes_certificate: snapshot.certificate.is_some(),
+        includes_app_settings: snapshot.app_settings.is_some(),
+        includes_sync_settings: snapshot.sync_settings.is_some(),
+    }
+}
+
+async fn read_sync_config(state: &Arc<AppState>) -> Result<Option<SyncSettings>> {
+    let path = sync_config_path(state)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = tokio::fs::read_to_string(path).await?;
+    Ok(Some(serde_json::from_str(&content)?))
+}
+
+async fn write_sync_config(state: &Arc<AppState>, settings: &SyncSettings) -> Result<()> {
+    validate_sync_settings(settings)?;
+    let path = sync_config_path(state)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, serde_json::to_string_pretty(settings)?).await?;
+    Ok(())
+}
+
+fn sync_config_path(state: &Arc<AppState>) -> Result<PathBuf> {
+    Ok(state.data_dir.join(SYNC_CONFIG_FILE_NAME))
+}
+
+fn sync_location(state: &Arc<AppState>, settings: &SyncSettings) -> Result<String> {
+    match settings.provider {
+        SyncProvider::Icloud => {
+            let base = settings
+                .remote_path
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .or_else(default_icloud_directory)
+                .unwrap_or_else(|| state.data_dir.join("sync"));
+            Ok(base.join(SYNC_FILE_NAME).to_string_lossy().to_string())
+        }
+        SyncProvider::Webdav => {
+            let webdav = settings.webdav.as_ref().ok_or_else(|| {
+                PostGateError::InvalidState("WebDAV settings are required".into())
+            })?;
+            Ok(webdav_snapshot_url(
+                &webdav.endpoint,
+                settings.remote_path.as_deref(),
+            ))
+        }
+    }
+}
+
+fn validate_sync_settings(settings: &SyncSettings) -> Result<()> {
+    if settings.provider == SyncProvider::Webdav {
+        let webdav = settings
+            .webdav
+            .as_ref()
+            .ok_or_else(|| PostGateError::InvalidState("WebDAV settings are required".into()))?;
+        if webdav.endpoint.trim().is_empty() {
+            return Err(PostGateError::InvalidState(
+                "WebDAV endpoint is required".into(),
+            ));
+        }
+        let parsed = url::Url::parse(webdav.endpoint.trim())
+            .map_err(|e| PostGateError::InvalidState(format!("Invalid WebDAV endpoint: {}", e)))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(PostGateError::InvalidState(
+                "WebDAV endpoint must start with http:// or https://".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn sync_snapshot_exists(settings: &SyncSettings, location: &str) -> Result<bool> {
+    match settings.provider {
+        SyncProvider::Icloud => Ok(Path::new(location).exists()),
+        SyncProvider::Webdav => {
+            let response = webdav_request(settings, Method::HEAD, location)?
+                .send()
+                .await
+                .map_err(|e| PostGateError::Storage(format!("WebDAV check failed: {}", e)))?;
+
+            if response.status().is_success() {
+                Ok(true)
+            } else if response.status().as_u16() == 404 {
+                Ok(false)
+            } else {
+                Err(PostGateError::Storage(format!(
+                    "WebDAV check failed with status {}",
+                    response.status()
+                )))
+            }
+        }
+    }
+}
+
+async fn read_sync_snapshot(settings: &SyncSettings, location: &str) -> Result<ProfileSnapshot> {
+    match settings.provider {
+        SyncProvider::Icloud => read_snapshot(Path::new(location)).await,
+        SyncProvider::Webdav => {
+            let response = webdav_request(settings, Method::GET, location)?
+                .send()
+                .await
+                .map_err(|e| PostGateError::Storage(format!("WebDAV download failed: {}", e)))?;
+            if !response.status().is_success() {
+                return Err(PostGateError::Storage(format!(
+                    "WebDAV download failed with status {}",
+                    response.status()
+                )));
+            }
+            let content = response.text().await.map_err(|e| {
+                PostGateError::Storage(format!("Failed to read WebDAV response: {}", e))
+            })?;
+            let snapshot: ProfileSnapshot = serde_json::from_str(&content)?;
+            validate_snapshot(&snapshot)?;
+            Ok(snapshot)
+        }
+    }
+}
+
+async fn write_sync_snapshot(
+    settings: &SyncSettings,
+    location: &str,
+    snapshot: &ProfileSnapshot,
+) -> Result<()> {
+    match settings.provider {
+        SyncProvider::Icloud => write_snapshot(Path::new(location), snapshot).await,
+        SyncProvider::Webdav => {
+            let content = serde_json::to_string_pretty(snapshot)?;
+            ensure_webdav_collections(settings).await?;
+            let response = webdav_request(settings, Method::PUT, location)?
+                .header("content-type", "application/json")
+                .body(content)
+                .send()
+                .await
+                .map_err(|e| PostGateError::Storage(format!("WebDAV upload failed: {}", e)))?;
+
+            if !response.status().is_success() {
+                return Err(PostGateError::Storage(format!(
+                    "WebDAV upload failed with status {}",
+                    response.status()
+                )));
+            }
+
+            Ok(())
+        }
+    }
+}
+
+async fn ensure_webdav_collections(settings: &SyncSettings) -> Result<()> {
+    if settings.provider != SyncProvider::Webdav {
+        return Ok(());
+    }
+
+    let webdav = settings
+        .webdav
+        .as_ref()
+        .ok_or_else(|| PostGateError::InvalidState("WebDAV settings are required".into()))?;
+    let mkcol = Method::from_bytes(b"MKCOL")
+        .map_err(|e| PostGateError::Storage(format!("Invalid WebDAV method: {}", e)))?;
+
+    for url in webdav_collection_urls(&webdav.endpoint, settings.remote_path.as_deref()) {
+        let response = webdav_request(settings, mkcol.clone(), &url)?
+            .send()
+            .await
+            .map_err(|e| PostGateError::Storage(format!("WebDAV MKCOL failed: {}", e)))?;
+        let code = response.status().as_u16();
+        if !(response.status().is_success() || matches!(code, 405 | 409)) {
+            return Err(PostGateError::Storage(format!(
+                "WebDAV MKCOL failed for {} with status {}",
+                url,
+                response.status()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn webdav_request(
+    settings: &SyncSettings,
+    method: Method,
+    url: &str,
+) -> Result<reqwest::RequestBuilder> {
+    let client = reqwest::Client::new();
+    let builder = client.request(method, url);
+
+    if let Some(webdav) = &settings.webdav {
+        if !webdav.username.is_empty() || !webdav.password.is_empty() {
+            return Ok(builder.basic_auth(&webdav.username, Some(&webdav.password)));
+        }
+    }
+
+    Ok(builder)
+}
+
+fn webdav_snapshot_url(endpoint: &str, remote_path: Option<&str>) -> String {
+    let mut base = endpoint.trim().trim_end_matches('/').to_string();
+    let path = remote_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(SYNC_FILE_NAME)
+        .trim_start_matches('/');
+
+    if path.ends_with(".json") {
+        append_encoded_webdav_path(&mut base, path);
+    } else {
+        append_encoded_webdav_path(&mut base, path.trim_end_matches('/'));
+        base.push('/');
+        base.push_str(SYNC_FILE_NAME);
+    }
+
+    base
+}
+
+fn webdav_collection_urls(endpoint: &str, remote_path: Option<&str>) -> Vec<String> {
+    let path = remote_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    if path.is_empty() {
+        return Vec::new();
+    }
+
+    let mut segments: Vec<&str> = path
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments
+        .last()
+        .is_some_and(|segment| segment.ends_with(".json"))
+    {
+        segments.pop();
+    }
+
+    let mut current = endpoint.trim().trim_end_matches('/').to_string();
+    segments
+        .into_iter()
+        .map(|segment| {
+            current.push('/');
+            append_encoded_webdav_segment(&mut current, segment);
+            current.clone()
+        })
+        .collect()
+}
+
+fn append_encoded_webdav_path(base: &mut String, path: &str) {
+    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+        base.push('/');
+        append_encoded_webdav_segment(base, segment);
+    }
+}
+
+fn append_encoded_webdav_segment(base: &mut String, segment: &str) {
+    let encoded = urlencoding::encode(segment);
+    base.push_str(encoded.as_ref());
+}
+
+fn default_icloud_directory() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).map(|home| {
+        home.join("Library/Mobile Documents/com~apple~CloudDocs")
+            .join(ICLOUD_RELATIVE_PATH)
+    })
+}
+
+impl From<RuleGroup> for RuleGroupBackup {
+    fn from(group: RuleGroup) -> Self {
+        Self {
+            id: group.id,
+            name: group.name,
+            enabled: group.enabled,
+            priority: group.priority,
+            raw_content: group.raw_content,
+            created_at: group.created_at,
+            updated_at: group.updated_at,
+        }
+    }
+}
+
+impl RuleGroupBackup {
+    fn to_rule_group(&self) -> Result<RuleGroup> {
+        let (rules, inline_values) = parse_rules_with_inline(&self.raw_content)?;
+        Ok(RuleGroup {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            enabled: self.enabled,
+            priority: self.priority,
+            rules,
+            raw_content: self.raw_content.clone(),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            inline_values,
+        })
+    }
+}

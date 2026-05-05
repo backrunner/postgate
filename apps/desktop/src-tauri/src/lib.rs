@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod cert;
 mod commands;
 mod debug;
@@ -6,8 +8,8 @@ mod plugin;
 mod proxy;
 mod replay;
 mod rules;
-mod storage;
 mod state;
+mod storage;
 mod values;
 
 use state::AppState;
@@ -41,10 +43,10 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
-            
+
             // Initialize app state
             let state = Arc::new(AppState::new(app_handle.clone()));
-            
+
             // Initialize plugin system asynchronously
             let state_clone = state.clone();
             tauri::async_runtime::spawn(async move {
@@ -52,7 +54,7 @@ pub fn run() {
                     tracing::error!("Failed to initialize plugin system: {}", e);
                 }
             });
-            
+
             app.manage(state);
 
             tracing::info!("PostGate initialized successfully");
@@ -125,6 +127,13 @@ pub fn run() {
             commands::values::save_value,
             commands::values::delete_value,
             commands::values::rename_value,
+            commands::profile::export_profile,
+            commands::profile::inspect_profile,
+            commands::profile::import_profile,
+            commands::profile::get_sync_status,
+            commands::profile::save_sync_settings,
+            commands::profile::push_sync_profile,
+            commands::profile::pull_sync_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

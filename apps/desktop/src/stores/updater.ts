@@ -33,10 +33,14 @@ interface UpdaterState {
   
   // Actions
   fetchCurrentVersion: () => Promise<void>;
-  checkForUpdates: () => Promise<boolean>;
+  checkForUpdates: (options?: CheckForUpdatesOptions) => Promise<boolean>;
   downloadAndInstall: () => Promise<void>;
   setAutoCheck: (enabled: boolean) => void;
   setAutoDownload: (enabled: boolean) => void;
+}
+
+interface CheckForUpdatesOptions {
+  silent?: boolean;
 }
 
 // Store the update object for later use
@@ -66,8 +70,12 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     }
   },
 
-  checkForUpdates: async () => {
-    set({ isChecking: true, error: null });
+  checkForUpdates: async (options = {}) => {
+    const { silent = false } = options;
+    set((state) => ({
+      isChecking: true,
+      error: silent ? state.error : null,
+    }));
     
     try {
       const update = await check();
@@ -101,11 +109,10 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
         return false;
       }
     } catch (e) {
-      set({
-        error: String(e),
+      set((state) => ({
+        error: silent ? state.error : String(e),
         isChecking: false,
-        lastChecked: Date.now(),
-      });
+      }));
       return false;
     }
   },
@@ -186,9 +193,9 @@ export function initUpdaterSettings() {
   store.fetchCurrentVersion();
   
   // Auto-check for updates on startup if enabled
-  if (store.autoCheck) {
+  if (useUpdaterStore.getState().autoCheck) {
     setTimeout(() => {
-      store.checkForUpdates();
+      store.checkForUpdates({ silent: true });
     }, 3000); // Delay 3 seconds after startup
   }
 }

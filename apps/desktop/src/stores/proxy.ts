@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 
 export type ProxyStatus = "stopped" | "starting" | "running" | "stopping" | "error";
 
@@ -19,17 +20,32 @@ interface ProxyState {
   setError: (error: string | null) => void;
 }
 
-export const useProxyStore = create<ProxyState>()((set) => ({
-  status: "stopped",
-  config: {
-    port: 8899,
-    enableHttp2: true,
-    enableQuic: false,
-    quicPort: null,
-    debugPort: 9229,
-  },
-  error: null,
-  setStatus: (status) => set({ status }),
-  setConfig: (config) => set((state) => ({ config: { ...state.config, ...config } })),
-  setError: (error) => set({ error }),
-}));
+export const useProxyStore = create<ProxyState>()(
+  persist(
+    (set) => ({
+      status: "stopped",
+      config: {
+        port: 8899,
+        enableHttp2: true,
+        enableQuic: false,
+        quicPort: null,
+        debugPort: 9229,
+      },
+      error: null,
+      setStatus: (status) => set({ status }),
+      setConfig: (config) =>
+        set((state) => ({ config: { ...state.config, ...config } })),
+      setError: (error) => set({ error }),
+    }),
+    {
+      name: "postgate-proxy",
+      partialize: (state) => ({ config: state.config }),
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          state.status = "stopped";
+          state.error = null;
+        }
+      },
+    },
+  ),
+);

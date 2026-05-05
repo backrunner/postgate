@@ -16,6 +16,8 @@
     "core:resources:default",
     "core:menu:default",
     "core:tray:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
     "updater:default",
     "process:allow-restart",
     "process:allow-exit"

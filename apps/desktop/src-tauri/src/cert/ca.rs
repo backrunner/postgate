@@ -52,8 +52,9 @@ impl CertificateAuthority {
 
         // Create issuer from the generated CA for signing host certs
         let cert_der_ref = CertificateDer::from(ca_cert_der.as_slice());
-        let ca_issuer = Issuer::from_ca_cert_der(&cert_der_ref, issuer_key_pair)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to create CA issuer: {}", e)))?;
+        let ca_issuer = Issuer::from_ca_cert_der(&cert_der_ref, issuer_key_pair).map_err(|e| {
+            PostGateError::Certificate(format!("Failed to create CA issuer: {}", e))
+        })?;
 
         Ok(Self {
             ca_cert_der,
@@ -103,28 +104,37 @@ impl CertificateAuthority {
         let cert_pem = std::fs::read_to_string(cert_path)?;
         let key_pem = std::fs::read_to_string(key_path)?;
 
+        Self::load_from_pem(&cert_pem, &key_pem)
+    }
+
+    /// Load CA from PEM strings.
+    pub fn load_from_pem(cert_pem: &str, key_pem: &str) -> Result<Self> {
         // Parse the key pair from PEM
-        let key_pair = KeyPair::from_pem(&key_pem)
+        let key_pair = KeyPair::from_pem(key_pem)
             .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA key: {}", e)))?;
 
         // Parse certificate PEM to get DER bytes
-        let pem_parsed = pem::parse(&cert_pem)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to parse CA cert PEM: {}", e)))?;
-        
+        let pem_parsed = pem::parse(cert_pem).map_err(|e| {
+            PostGateError::Certificate(format!("Failed to parse CA cert PEM: {}", e))
+        })?;
+
         let cert_der_bytes = pem_parsed.contents().to_vec();
         let cert_der_ref = CertificateDer::from(cert_der_bytes.as_slice());
 
         // Parse using x509-parser to validate and extract info
-        let (_, x509_cert) = x509_parser::parse_x509_certificate(&cert_der_bytes)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to parse X509 certificate: {}", e)))?;
+        let (_, x509_cert) = x509_parser::parse_x509_certificate(&cert_der_bytes).map_err(|e| {
+            PostGateError::Certificate(format!("Failed to parse X509 certificate: {}", e))
+        })?;
 
         // Create a second KeyPair for the Issuer (KeyPair doesn't implement Clone in rcgen 0.14)
-        let issuer_key_pair = KeyPair::from_pem(&key_pem)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to re-parse CA key for issuer: {}", e)))?;
+        let issuer_key_pair = KeyPair::from_pem(key_pem).map_err(|e| {
+            PostGateError::Certificate(format!("Failed to re-parse CA key for issuer: {}", e))
+        })?;
 
         // Create Issuer from the existing CA certificate for signing host certs (rcgen 0.14+)
-        let ca_issuer = Issuer::from_ca_cert_der(&cert_der_ref, issuer_key_pair)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to create CA issuer: {}", e)))?;
+        let ca_issuer = Issuer::from_ca_cert_der(&cert_der_ref, issuer_key_pair).map_err(|e| {
+            PostGateError::Certificate(format!("Failed to create CA issuer: {}", e))
+        })?;
 
         // Verify the loaded certificate is a CA
         if !x509_cert.is_ca() {
@@ -135,7 +145,7 @@ impl CertificateAuthority {
 
         Ok(Self {
             ca_cert_der: cert_der_bytes,
-            ca_cert_pem: cert_pem,
+            ca_cert_pem: cert_pem.to_string(),
             ca_key_pair: Arc::new(key_pair),
             ca_issuer: Arc::new(ca_issuer),
             cert_cache: Self::create_cache(),
@@ -196,13 +206,14 @@ impl CertificateAuthority {
         ];
 
         // Generate key pair
-        let key_pair = KeyPair::generate()
-            .map_err(|e| PostGateError::Certificate(format!("Failed to generate key pair: {}", e)))?;
+        let key_pair = KeyPair::generate().map_err(|e| {
+            PostGateError::Certificate(format!("Failed to generate key pair: {}", e))
+        })?;
 
         // Generate certificate
-        let cert = params
-            .self_signed(&key_pair)
-            .map_err(|e| PostGateError::Certificate(format!("Failed to generate CA cert: {}", e)))?;
+        let cert = params.self_signed(&key_pair).map_err(|e| {
+            PostGateError::Certificate(format!("Failed to generate CA cert: {}", e))
+        })?;
 
         let cert_der = cert.der().to_vec();
         let cert_pem = cert.pem();
@@ -222,7 +233,8 @@ impl CertificateAuthority {
         let certified_key = Arc::new(certified_key);
 
         // Cache it (with automatic TTL and LRU eviction)
-        self.cert_cache.insert(host.to_string(), certified_key.clone());
+        self.cert_cache
+            .insert(host.to_string(), certified_key.clone());
 
         Ok(certified_key)
     }
@@ -262,8 +274,9 @@ impl CertificateAuthority {
         ];
 
         // Generate key pair for host
-        let key_pair = KeyPair::generate()
-            .map_err(|e| PostGateError::Certificate(format!("Failed to generate host key: {}", e)))?;
+        let key_pair = KeyPair::generate().map_err(|e| {
+            PostGateError::Certificate(format!("Failed to generate host key: {}", e))
+        })?;
 
         // Sign with CA using the Issuer (rcgen 0.14+)
         let cert = params
@@ -284,6 +297,11 @@ impl CertificateAuthority {
     /// Get CA certificate in PEM format
     pub fn get_ca_pem(&self) -> &str {
         &self.ca_cert_pem
+    }
+
+    /// Get CA private key in PEM format.
+    pub fn get_ca_key_pem(&self) -> String {
+        self.ca_key_pair.serialize_pem()
     }
 
     /// Get CA certificate in DER format

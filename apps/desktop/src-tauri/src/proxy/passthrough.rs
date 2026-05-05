@@ -9,9 +9,7 @@
 
 use crate::proxy::body::{BodyStorage, CapturedBody, MAX_BODY_SIZE};
 use crate::rules::ResponseModification;
-use crate::state::{
-    AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType,
-};
+use crate::state::{AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use bytes::{Bytes, BytesMut};
 use hyper::body::{Body, Frame, Incoming, SizeHint};
 use std::collections::HashMap;

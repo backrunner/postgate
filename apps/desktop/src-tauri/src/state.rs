@@ -201,13 +201,11 @@ impl AppState {
         // Broadcast for in-process subscribers — skip the clone cost if no
         // one is listening (there are currently no subscribers in tree, but
         // the API is retained for future use).
-        if self.request_tx.receiver_count() > 0 {
-            if self.request_tx.send(event.clone()).is_err() {
-                // Broadcast fails only if all receivers have dropped since
-                // we last checked — no real user-visible problem, so just
-                // bump the drop counter silently.
-                self.record_drop();
-            }
+        if self.request_tx.receiver_count() > 0 && self.request_tx.send(event.clone()).is_err() {
+            // Broadcast fails only if all receivers have dropped since
+            // we last checked — no real user-visible problem, so just
+            // bump the drop counter silently.
+            self.record_drop();
         }
 
         if self.is_persistence_enabled()

@@ -23,7 +23,7 @@ impl ConnectionPool {
     /// Create a new connection pool
     pub fn new(_config: PoolConfig) -> Result<Self> {
         let tls_connector = create_tls_connector()?;
-        
+
         Ok(Self {
             _tls_connector: tls_connector,
         })
@@ -41,7 +41,10 @@ impl ConnectionPool {
 }
 
 /// Start a background task to periodically clean up expired connections
-pub fn start_cleanup_task(pool: Arc<ConnectionPool>, interval: Duration) -> tokio::task::JoinHandle<()> {
+pub fn start_cleanup_task(
+    pool: Arc<ConnectionPool>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval_timer = tokio::time::interval(interval);
         loop {
@@ -59,7 +62,7 @@ mod tests {
     async fn test_pool_creation() {
         // Install the default crypto provider for rustls
         let _ = rustls::crypto::ring::default_provider().install_default();
-        
+
         let pool = ConnectionPool::new(PoolConfig::default());
         assert!(pool.is_ok());
     }

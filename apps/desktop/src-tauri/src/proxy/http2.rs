@@ -12,15 +12,14 @@ use crate::debug::ScriptInjector;
 use crate::error::{PostGateError, Result};
 use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
 use crate::proxy::body::{CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::error_page::ProxyErrorKind;
 use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
 use crate::proxy::headers::{
     apply_headers_to_response_builder_h2, build_forward_request_headers,
     build_forward_response_headers, flat_to_headermap, headermap_to_flat,
 };
-use crate::rules::{
-    apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
-};
+use crate::rules::{apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx};
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
 use bytes::Bytes;
@@ -43,12 +42,7 @@ pub fn should_use_http2(alpn: Option<&[u8]>) -> bool {
 fn is_h2_forbidden_header(name: &str) -> bool {
     matches!(
         name,
-        "connection"
-            | "keep-alive"
-            | "proxy-connection"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host" // h2 uses :authority instead
+        "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade" | "host" // h2 uses :authority instead
     )
 }
 
@@ -77,15 +71,16 @@ where
         .map_err(|e| PostGateError::Proxy(format!("H2 handshake error: {}", e)))?;
 
     while let Some(result) = connection.accept().await {
-        let (request, respond) = result
-            .map_err(|e| PostGateError::Proxy(format!("H2 accept error: {}", e)))?;
+        let (request, respond) =
+            result.map_err(|e| PostGateError::Proxy(format!("H2 accept error: {}", e)))?;
 
         let host = host.clone();
         let ctx = ctx.clone();
         let tls_ver = tls_version.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_http2_request(request, respond, &host, port, ctx, &tls_ver).await {
+            if let Err(e) = handle_http2_request(request, respond, &host, port, ctx, &tls_ver).await
+            {
                 tracing::error!("HTTP/2 request error: {}", e);
             }
         });
@@ -154,10 +149,13 @@ async fn handle_http2_request(
     });
 
     // Match rules
-    let matched_rules = ctx
-        .rule_engine
-        .match_request(&method_str, host, &path, "https", port, &request_headers);
-    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.rule.raw_line.clone()).collect();
+    let matched_rules =
+        ctx.rule_engine
+            .match_request(&method_str, host, &path, "https", port, &request_headers);
+    let matched_rule_ids: Vec<String> = matched_rules
+        .iter()
+        .map(|r| r.rule.raw_line.clone())
+        .collect();
 
     // Collect request body from H2 stream
     let (parts, body) = request.into_parts();
@@ -167,7 +165,8 @@ async fn handle_http2_request(
     ctx.body_storage
         .store_request_body(&request_id, request_body.clone())
         .await;
-    ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
+    ctx.app_state
+        .persist_body(request_id.clone(), request_body.data.clone(), true);
 
     // Build resolver context for whistle `{name}` references.
     let _ = ctx.app_state.ensure_values_loaded().await;
@@ -202,7 +201,7 @@ async fn handle_http2_request(
     // closes the stream without sending a response.
     if crate::rules::should_abort(&request_modification) {
         tracing::debug!("abort:// matched for {}; closing h2 stream", url);
-        let _ = respond.send_reset(h2::Reason::CANCEL);
+        respond.send_reset(h2::Reason::CANCEL);
         return Ok(());
     }
 
@@ -217,8 +216,11 @@ async fn handle_http2_request(
             size: short_circuit.body.len(),
             truncated: false,
         };
-        ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
-        ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
+        ctx.body_storage
+            .store_response_body(&request_id, response_body.clone())
+            .await;
+        ctx.app_state
+            .persist_body(request_id.clone(), response_body.data.clone(), false);
 
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
             id: request_id.clone(),
@@ -277,9 +279,9 @@ async fn handle_http2_request(
 
         let plugin_context = PluginRequestContext {
             rule_config: match &plugin_info.config {
-                serde_json::Value::Object(map) => map.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
+                serde_json::Value::Object(map) => {
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                }
                 _ => std::collections::HashMap::new(),
             },
             matched_pattern: url.clone(),
@@ -293,11 +295,13 @@ async fn handle_http2_request(
             Ok(Some(modified)) => {
                 let duration = start_time.elapsed().as_millis() as u64;
                 let decoded_body = if modified.body_base64 {
-                    modified.body.as_ref()
-                        .and_then(|b| base64::Engine::decode(
-                            &base64::engine::general_purpose::STANDARD,
-                            b,
-                        ).ok())
+                    modified
+                        .body
+                        .as_ref()
+                        .and_then(|b| {
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b)
+                                .ok()
+                        })
                         .map(Bytes::from)
                 } else {
                     modified.body.as_ref().map(|b| Bytes::from(b.clone()))
@@ -309,8 +313,11 @@ async fn handle_http2_request(
                     size: body_bytes.len(),
                     truncated: false,
                 };
-                ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
-                ctx.app_state.persist_body(request_id.clone(), body_bytes.clone(), false);
+                ctx.body_storage
+                    .store_response_body(&request_id, response_body.clone())
+                    .await;
+                ctx.app_state
+                    .persist_body(request_id.clone(), body_bytes.clone(), false);
 
                 ctx.app_state.emit_request_event(&CapturedRequestEvent {
                     id: request_id.clone(),
@@ -344,7 +351,11 @@ async fn handle_http2_request(
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("Plugin handleRequest failed for {}: {}", plugin_info.name, e);
+                tracing::warn!(
+                    "Plugin handleRequest failed for {}: {}",
+                    plugin_info.name,
+                    e
+                );
             }
         }
     }
@@ -358,7 +369,10 @@ async fn handle_http2_request(
     // All forwarding goes through the shared pooled client in ProxyContext so
     // we reuse TCP + TLS connections (including h2 multiplexing) across every
     // proxied request.
-    let body_to_send = request_modification.body.clone().unwrap_or(request_body.data.clone());
+    let body_to_send = request_modification
+        .body
+        .clone()
+        .unwrap_or(request_body.data.clone());
 
     let absolute_url: std::result::Result<String, PostGateError> =
         if let Some(target_host) = &request_modification.target_host {
@@ -457,12 +471,12 @@ async fn handle_http2_request(
                 // Send headers to the h2 client (no end-of-stream yet)
                 let builder = Response::builder().status(final_status);
                 let builder = apply_headers_to_response_builder_h2(builder, &final_header_map);
-                let h2_response = builder
-                    .body(())
-                    .map_err(|e| PostGateError::Proxy(format!("Failed to build response: {}", e)))?;
-                let mut send_stream = respond
-                    .send_response(h2_response, false)
-                    .map_err(|e| PostGateError::Proxy(format!("Failed to send h2 headers: {}", e)))?;
+                let h2_response = builder.body(()).map_err(|e| {
+                    PostGateError::Proxy(format!("Failed to build response: {}", e))
+                })?;
+                let mut send_stream = respond.send_response(h2_response, false).map_err(|e| {
+                    PostGateError::Proxy(format!("Failed to send h2 headers: {}", e))
+                })?;
 
                 // Pump upstream body → h2 client; capture a copy for the UI.
                 let pump_meta = super::passthrough::PassthroughMeta {
@@ -519,11 +533,12 @@ async fn handle_http2_request(
                     },
                 });
 
-                let mut err_headers: HashMap<String, String> = HashMap::new();
-                err_headers.insert("content-type".into(), "text/plain; charset=utf-8".into());
-                let body = Bytes::from(format!("Proxy error: {}", e));
-                err_headers.insert("content-length".into(), body.len().to_string());
-                let _ = send_h2_response(&mut respond, 502, &err_headers, body);
+                let _ = send_h2_error_response(
+                    &mut respond,
+                    502,
+                    ProxyErrorKind::Upstream,
+                    &e.to_string(),
+                );
                 return Ok(());
             }
         }
@@ -581,71 +596,84 @@ async fn handle_http2_request(
             );
 
             // Apply plugin handleResponse if a plugin was matched
-            let (plugin_modified_body, plugin_modified_headers) = if let Some(ref plugin_info) =
-                request_modification.plugin
-            {
-                let plugin_request = PluginRequest {
-                    id: request_id.clone(),
-                    method: method_str.clone(),
-                    url: url.clone(),
-                    host: host.to_string(),
-                    path: path.clone(),
-                    query: extract_query_params(&url),
-                    headers: request_headers.clone(),
-                    body: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &request_body.data,
-                    )),
-                    body_base64: true,
-                    timestamp,
-                };
+            let (plugin_modified_body, plugin_modified_headers) =
+                if let Some(ref plugin_info) = request_modification.plugin {
+                    let plugin_request = PluginRequest {
+                        id: request_id.clone(),
+                        method: method_str.clone(),
+                        url: url.clone(),
+                        host: host.to_string(),
+                        path: path.clone(),
+                        query: extract_query_params(&url),
+                        headers: request_headers.clone(),
+                        body: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &request_body.data,
+                        )),
+                        body_base64: true,
+                        timestamp,
+                    };
 
-                let plugin_response = PluginResponse {
-                    status,
-                    headers: upstream_headers.clone(),
-                    body: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &response_body.data,
-                    )),
-                    body_base64: true,
-                };
+                    let plugin_response = PluginResponse {
+                        status,
+                        headers: upstream_headers.clone(),
+                        body: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &response_body.data,
+                        )),
+                        body_base64: true,
+                    };
 
-                let plugin_context = PluginRequestContext {
-                    rule_config: match &plugin_info.config {
-                        serde_json::Value::Object(map) => map.iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                        _ => std::collections::HashMap::new(),
-                    },
-                    matched_pattern: url.clone(),
-                };
+                    let plugin_context = PluginRequestContext {
+                        rule_config: match &plugin_info.config {
+                            serde_json::Value::Object(map) => {
+                                map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                            }
+                            _ => std::collections::HashMap::new(),
+                        },
+                        matched_pattern: url.clone(),
+                    };
 
-                let plugin_manager = ctx.app_state.plugin_manager.read().await;
-                match plugin_manager
-                    .handle_response(&plugin_info.name, plugin_request, plugin_response, plugin_context)
-                    .await
-                {
-                    Ok(modified) => {
-                        let decoded_body = if modified.body_base64 {
-                            modified.body.as_ref()
-                                .and_then(|b| base64::Engine::decode(
-                                    &base64::engine::general_purpose::STANDARD,
-                                    b,
-                                ).ok())
-                                .map(Bytes::from)
-                        } else {
-                            modified.body.as_ref().map(|b| Bytes::from(b.clone()))
-                        };
-                        (decoded_body, Some(modified.headers))
+                    let plugin_manager = ctx.app_state.plugin_manager.read().await;
+                    match plugin_manager
+                        .handle_response(
+                            &plugin_info.name,
+                            plugin_request,
+                            plugin_response,
+                            plugin_context,
+                        )
+                        .await
+                    {
+                        Ok(modified) => {
+                            let decoded_body = if modified.body_base64 {
+                                modified
+                                    .body
+                                    .as_ref()
+                                    .and_then(|b| {
+                                        base64::Engine::decode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            b,
+                                        )
+                                        .ok()
+                                    })
+                                    .map(Bytes::from)
+                            } else {
+                                modified.body.as_ref().map(|b| Bytes::from(b.clone()))
+                            };
+                            (decoded_body, Some(modified.headers))
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Plugin handleResponse failed for {}: {}",
+                                plugin_info.name,
+                                e
+                            );
+                            (None, None)
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("Plugin handleResponse failed for {}: {}", plugin_info.name, e);
-                        (None, None)
-                    }
-                }
-            } else {
-                (None, None)
-            };
+                } else {
+                    (None, None)
+                };
 
             // Apply response delay if specified
             if let Some(delay_ms) = response_modification.delay_ms {
@@ -657,8 +685,8 @@ async fn handle_http2_request(
                 .or(response_modification.body.clone())
                 .unwrap_or(response_body.data.clone());
             let plugin_replaced_headers = plugin_modified_headers.is_some();
-            let headers_source = plugin_modified_headers
-                .unwrap_or_else(|| response_modification.headers.clone());
+            let headers_source =
+                plugin_modified_headers.unwrap_or_else(|| response_modification.headers.clone());
 
             // Inject debug script if enabled
             if response_modification.inject_debug {
@@ -702,7 +730,11 @@ async fn handle_http2_request(
                 &base_headers,
                 &base_flat,
                 &modified_for_finalize,
-                if body_was_modified { Some(final_body.len()) } else { None },
+                if body_was_modified {
+                    Some(final_body.len())
+                } else {
+                    None
+                },
             );
             let final_headers = headermap_to_flat(&final_header_map);
 
@@ -714,8 +746,11 @@ async fn handle_http2_request(
                 size: final_body.len(),
                 truncated: response_body.truncated,
             };
-            ctx.body_storage.store_response_body(&request_id, stored_body.clone()).await;
-            ctx.app_state.persist_body(request_id.clone(), stored_body.data.clone(), false);
+            ctx.body_storage
+                .store_response_body(&request_id, stored_body.clone())
+                .await;
+            ctx.app_state
+                .persist_body(request_id.clone(), stored_body.data.clone(), false);
 
             // Emit completion event
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -769,12 +804,9 @@ async fn handle_http2_request(
                 },
             });
 
-            let mut err_headers: HashMap<String, String> = HashMap::new();
-            err_headers.insert("content-type".into(), "text/plain; charset=utf-8".into());
-            let body = Bytes::from(format!("Proxy error: {}", e));
-            err_headers.insert("content-length".into(), body.len().to_string());
             // Best-effort; if sending the error itself fails, there's nothing to do.
-            let _ = send_h2_response(&mut respond, 502, &err_headers, body);
+            let _ =
+                send_h2_error_response(&mut respond, 502, ProxyErrorKind::Upstream, &e.to_string());
         }
     }
 
@@ -812,6 +844,17 @@ fn send_h2_response(
             .map_err(|e| PostGateError::Proxy(format!("Failed to send h2 response body: {}", e)))?;
     }
     Ok(())
+}
+
+fn send_h2_error_response(
+    respond: &mut SendResponse<Bytes>,
+    status: u16,
+    kind: ProxyErrorKind,
+    message: &str,
+) -> Result<()> {
+    let body = crate::proxy::error_page::html_error_body(status, kind, message);
+    let headers = crate::proxy::error_page::html_error_headers(body.len());
+    send_h2_response(respond, status, &headers, body)
 }
 
 /// Same as [`send_h2_response`] but takes a fully-built `HeaderMap` so
@@ -931,7 +974,8 @@ async fn pump_incoming_into_h2(
     let mut truncated = false;
 
     while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| PostGateError::Proxy(format!("Upstream body error: {}", e)))?;
+        let frame =
+            frame.map_err(|e| PostGateError::Proxy(format!("Upstream body error: {}", e)))?;
         if let Some(chunk) = frame.data_ref() {
             total_bytes += chunk.len() as u64;
 

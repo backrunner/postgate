@@ -11,7 +11,7 @@ pub use applicator::{
     UpstreamProxy, UpstreamProxyKind,
 };
 #[allow(unused_imports)]
-pub use engine::{RuleEngine, MatchedRule};
+pub use engine::{MatchedRule, RuleEngine};
 pub use parser::{parse_rules, parse_rules_with_inline};
 #[allow(unused_imports)]
-pub use types::{Rule, RuleGroup, RuleAction};
+pub use types::{Rule, RuleAction, RuleGroup};

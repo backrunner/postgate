@@ -11,8 +11,8 @@
 //! - host://127.0.0.1:8080 example.com (reverse syntax)
 
 use super::types::{
-    BodyContent, CookieOptions, HeaderModifications, Pattern, ProxyAuth, Rule, RuleAction,
-    RuleFilters, UrlParamModifications, parse_regex_with_flags,
+    parse_regex_with_flags, BodyContent, CookieOptions, HeaderModifications, Pattern, ProxyAuth,
+    Rule, RuleAction, RuleFilters, UrlParamModifications,
 };
 use crate::error::{PostGateError, Result};
 use regex::Regex;
@@ -177,7 +177,11 @@ fn parse_normal_syntax(tokens: &[String], raw_line: &str) -> Result<Vec<Rule>> {
     Ok(vec![Rule {
         id: Uuid::new_v4().to_string(),
         pattern,
-        filters: if filters.is_empty() { None } else { Some(filters) },
+        filters: if filters.is_empty() {
+            None
+        } else {
+            Some(filters)
+        },
         actions,
         enabled: true,
         priority: 0,
@@ -188,7 +192,11 @@ fn parse_normal_syntax(tokens: &[String], raw_line: &str) -> Result<Vec<Rule>> {
 
 /// Reverse syntax: tokens before pattern_index are operators, tokens at/after are patterns.
 /// Generate cross-product: each operator × each pattern.
-fn parse_reverse_syntax(tokens: &[String], pattern_index: usize, raw_line: &str) -> Result<Vec<Rule>> {
+fn parse_reverse_syntax(
+    tokens: &[String],
+    pattern_index: usize,
+    raw_line: &str,
+) -> Result<Vec<Rule>> {
     let mut operators = Vec::new();
     let mut patterns = Vec::new();
     let mut filters = RuleFilters::default();
@@ -230,7 +238,11 @@ fn parse_reverse_syntax(tokens: &[String], pattern_index: usize, raw_line: &str)
                 rules.push(Rule {
                     id: Uuid::new_v4().to_string(),
                     pattern,
-                    filters: if filters.is_empty() { None } else { Some(filters.clone()) },
+                    filters: if filters.is_empty() {
+                        None
+                    } else {
+                        Some(filters.clone())
+                    },
                     actions: vec![action.clone()],
                     enabled: true,
                     priority: 0,
@@ -302,8 +314,10 @@ fn is_pattern_token(token: &str) -> bool {
         return true;
     }
     // Web protocol URL (http://, https://, ws://, wss://, tunnel://)
-    if token.starts_with("http://") || token.starts_with("https://")
-        || token.starts_with("ws://") || token.starts_with("wss://")
+    if token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("ws://")
+        || token.starts_with("wss://")
         || token.starts_with("tunnel://")
     {
         return true;
@@ -333,7 +347,9 @@ fn is_regex_pattern(s: &str) -> bool {
         let end = end + 1;
         // After closing /, only valid flags
         let flags = &s[end + 1..];
-        return flags.chars().all(|c| matches!(c, 'i' | 'u' | 'g' | 'm' | 's'));
+        return flags
+            .chars()
+            .all(|c| matches!(c, 'i' | 'u' | 'g' | 'm' | 's'));
     }
     false
 }
@@ -365,26 +381,97 @@ fn has_protocol(token: &str) -> bool {
         // Check if it's a known action protocol (not a web URL protocol)
         matches!(
             proto.as_str(),
-            "host" | "file" | "redirect" | "statuscode" | "status" | "replacestatus"
-            | "reqheaders" | "reqheader" | "reqbody" | "urlparams" | "pathreplace" | "urlreplace"
-            | "method" | "ua" | "useragent" | "referer" | "referrer" | "auth"
-            | "reqcookies" | "reqcookie" | "forwardedfor" | "xff" | "reqreplace"
-            | "resheaders" | "resheader" | "resbody" | "htmlbody" | "cssbody" | "jsbody"
-            | "resreplace" | "rescookies" | "rescookie" | "restype" | "contenttype"
-            | "rescharset" | "charset" | "attachment" | "download"
-            | "htmlappend" | "htmlprepend" | "jsappend" | "jsprepend"
-            | "cssappend" | "cssprepend" | "html" | "js" | "css"
-            | "reqcors" | "rescors" | "cors"
-            | "reqdelay" | "delay" | "resdelay" | "reqspeed" | "resspeed" | "speed"
-            | "debug" | "weinre" | "plugin" | "log" | "ignore" | "filter" | "skip"
-            | "enable" | "disable"
-            | "proxy" | "http-proxy" | "httpproxy" | "https-proxy" | "httpsproxy"
-            | "socks" | "socks5" | "socks4"
-            | "jsonbody" | "timeout" | "delete" | "echo" | "mock"
-            | "htmlreplace" | "jsreplace" | "cssreplace"
-            | "reqprepend" | "reqappend" | "resprepend" | "resappend"
-            | "301" | "302" | "307" | "308"
-            | "includefilter" | "excludefilter"
+            "host"
+                | "file"
+                | "redirect"
+                | "statuscode"
+                | "status"
+                | "replacestatus"
+                | "reqheaders"
+                | "reqheader"
+                | "reqbody"
+                | "urlparams"
+                | "pathreplace"
+                | "urlreplace"
+                | "method"
+                | "ua"
+                | "useragent"
+                | "referer"
+                | "referrer"
+                | "auth"
+                | "reqcookies"
+                | "reqcookie"
+                | "forwardedfor"
+                | "xff"
+                | "reqreplace"
+                | "resheaders"
+                | "resheader"
+                | "resbody"
+                | "htmlbody"
+                | "cssbody"
+                | "jsbody"
+                | "resreplace"
+                | "rescookies"
+                | "rescookie"
+                | "restype"
+                | "contenttype"
+                | "rescharset"
+                | "charset"
+                | "attachment"
+                | "download"
+                | "htmlappend"
+                | "htmlprepend"
+                | "jsappend"
+                | "jsprepend"
+                | "cssappend"
+                | "cssprepend"
+                | "html"
+                | "js"
+                | "css"
+                | "reqcors"
+                | "rescors"
+                | "cors"
+                | "reqdelay"
+                | "delay"
+                | "resdelay"
+                | "reqspeed"
+                | "resspeed"
+                | "speed"
+                | "debug"
+                | "weinre"
+                | "plugin"
+                | "log"
+                | "ignore"
+                | "filter"
+                | "skip"
+                | "enable"
+                | "disable"
+                | "proxy"
+                | "http-proxy"
+                | "httpproxy"
+                | "https-proxy"
+                | "httpsproxy"
+                | "socks"
+                | "socks5"
+                | "socks4"
+                | "jsonbody"
+                | "timeout"
+                | "delete"
+                | "echo"
+                | "mock"
+                | "htmlreplace"
+                | "jsreplace"
+                | "cssreplace"
+                | "reqprepend"
+                | "reqappend"
+                | "resprepend"
+                | "resappend"
+                | "301"
+                | "302"
+                | "307"
+                | "308"
+                | "includefilter"
+                | "excludefilter"
         )
     } else {
         false
@@ -412,7 +499,7 @@ fn is_host_value(token: &str) -> Option<(String, Option<u16>)> {
     }
 
     // IPv4 or numeric IP with optional port: 127.0.0.1:8080
-    if token.chars().next().map_or(false, |c| c.is_ascii_digit()) && token.contains('.') {
+    if token.chars().next().is_some_and(|c| c.is_ascii_digit()) && token.contains('.') {
         if let Some(colon_idx) = token.rfind(':') {
             let ip = &token[..colon_idx];
             let port_str = &token[colon_idx + 1..];
@@ -435,8 +522,8 @@ fn is_host_value(token: &str) -> Option<(String, Option<u16>)> {
 
 /// Parse a pattern string into a Pattern, returning (negated, Pattern).
 fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
-    let (negated, s) = if s.starts_with('!') {
-        (true, &s[1..])
+    let (negated, s) = if let Some(stripped) = s.strip_prefix('!') {
+        (true, stripped)
     } else {
         (false, s)
     };
@@ -475,10 +562,7 @@ fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
             None
         };
 
-        return Ok((negated, Pattern::NoSchema {
-            host,
-            path,
-        }));
+        return Ok((negated, Pattern::NoSchema { host, path }));
     }
 
     // Dot-suffix pattern: .json, .html$
@@ -529,7 +613,11 @@ fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
     }
 
     // URL pattern with protocol
-    if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("ws://") || s.starts_with("wss://") {
+    if s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.starts_with("ws://")
+        || s.starts_with("wss://")
+    {
         return Ok((negated, parse_url_pattern(s)?));
     }
 
@@ -770,7 +858,9 @@ fn format_shorthand(token: &str) -> String {
 // =============================================================================
 
 /// Parse actions and filters from a slice of tokens
-fn parse_actions_and_filters_from_tokens(tokens: &[String]) -> Result<(Vec<RuleAction>, RuleFilters)> {
+fn parse_actions_and_filters_from_tokens(
+    tokens: &[String],
+) -> Result<(Vec<RuleAction>, RuleFilters)> {
     let mut actions = Vec::new();
     let mut filters = RuleFilters::default();
 
@@ -891,19 +981,28 @@ fn parse_filter_token(s: &str, filters: &mut RuleFilters) -> Result<bool> {
 /// Handles: m:, s:, h:, /regex/, etc.
 fn parse_filter_value(value: &str, filters: &mut RuleFilters, _is_exclude: bool) -> Result<bool> {
     // Method sub-filter: filter://m:GET
-    if let Some(v) = value.strip_prefix("m:").or_else(|| value.strip_prefix("method:")) {
+    if let Some(v) = value
+        .strip_prefix("m:")
+        .or_else(|| value.strip_prefix("method:"))
+    {
         filters.methods = v.split(',').map(|s| s.trim().to_uppercase()).collect();
         return Ok(true);
     }
 
     // Status code sub-filter: filter://s:404
-    if let Some(v) = value.strip_prefix("s:").or_else(|| value.strip_prefix("statusCode:")) {
+    if let Some(v) = value
+        .strip_prefix("s:")
+        .or_else(|| value.strip_prefix("statusCode:"))
+    {
         filters.status_codes = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
         return Ok(true);
     }
 
     // Header sub-filter: filter://h:content-type=json
-    if let Some(v) = value.strip_prefix("h:").or_else(|| value.strip_prefix("header:")) {
+    if let Some(v) = value
+        .strip_prefix("h:")
+        .or_else(|| value.strip_prefix("header:"))
+    {
         if let Some(eq_idx) = v.find('=') {
             let key = v[..eq_idx].to_string();
             let val = v[eq_idx + 1..].to_string();
@@ -913,13 +1012,19 @@ fn parse_filter_value(value: &str, filters: &mut RuleFilters, _is_exclude: bool)
     }
 
     // IP sub-filter: filter://i:127.0.0.1
-    if let Some(v) = value.strip_prefix("i:").or_else(|| value.strip_prefix("ip:")) {
+    if let Some(v) = value
+        .strip_prefix("i:")
+        .or_else(|| value.strip_prefix("ip:"))
+    {
         filters.client_ips = v.split(',').map(|s| s.trim().to_string()).collect();
         return Ok(true);
     }
 
     // Protocol sub-filter: filter://p:https
-    if let Some(v) = value.strip_prefix("p:").or_else(|| value.strip_prefix("protocol:")) {
+    if let Some(v) = value
+        .strip_prefix("p:")
+        .or_else(|| value.strip_prefix("protocol:"))
+    {
         filters.protocols = v.split(',').map(|s| s.trim().to_lowercase()).collect();
         return Ok(true);
     }
@@ -1137,16 +1242,13 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 }
             }
 
-            "rescors" | "cors" => {
-                let cors = parse_response_cors(value)?;
-                cors
-            }
+            "rescors" | "cors" => parse_response_cors(value)?,
 
             // === PERFORMANCE ACTIONS ===
             "reqdelay" | "delay" => {
-                let ms: u64 = value.parse().map_err(|_| {
-                    PostGateError::RuleParse(format!("Invalid delay: {}", value))
-                })?;
+                let ms: u64 = value
+                    .parse()
+                    .map_err(|_| PostGateError::RuleParse(format!("Invalid delay: {}", value)))?;
                 RuleAction::Delay {
                     request_ms: Some(ms),
                     response_ms: None,
@@ -1154,9 +1256,9 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             }
 
             "resdelay" => {
-                let ms: u64 = value.parse().map_err(|_| {
-                    PostGateError::RuleParse(format!("Invalid delay: {}", value))
-                })?;
+                let ms: u64 = value
+                    .parse()
+                    .map_err(|_| PostGateError::RuleParse(format!("Invalid delay: {}", value)))?;
                 RuleAction::Delay {
                     request_ms: None,
                     response_ms: Some(ms),
@@ -1164,9 +1266,9 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             }
 
             "reqspeed" => {
-                let kbps: u64 = value.parse().map_err(|_| {
-                    PostGateError::RuleParse(format!("Invalid speed: {}", value))
-                })?;
+                let kbps: u64 = value
+                    .parse()
+                    .map_err(|_| PostGateError::RuleParse(format!("Invalid speed: {}", value)))?;
                 RuleAction::Speed {
                     request_kbps: Some(kbps),
                     response_kbps: None,
@@ -1174,9 +1276,9 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             }
 
             "resspeed" => {
-                let kbps: u64 = value.parse().map_err(|_| {
-                    PostGateError::RuleParse(format!("Invalid speed: {}", value))
-                })?;
+                let kbps: u64 = value
+                    .parse()
+                    .map_err(|_| PostGateError::RuleParse(format!("Invalid speed: {}", value)))?;
                 RuleAction::Speed {
                     request_kbps: None,
                     response_kbps: Some(kbps),
@@ -1184,9 +1286,9 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             }
 
             "speed" => {
-                let kbps: u64 = value.parse().map_err(|_| {
-                    PostGateError::RuleParse(format!("Invalid speed: {}", value))
-                })?;
+                let kbps: u64 = value
+                    .parse()
+                    .map_err(|_| PostGateError::RuleParse(format!("Invalid speed: {}", value)))?;
                 RuleAction::Speed {
                     request_kbps: Some(kbps),
                     response_kbps: Some(kbps),
@@ -1260,9 +1362,9 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             }
 
             "timeout" => {
-                let ms: u64 = value.parse().map_err(|_| {
-                    PostGateError::RuleParse(format!("Invalid timeout: {}", value))
-                })?;
+                let ms: u64 = value
+                    .parse()
+                    .map_err(|_| PostGateError::RuleParse(format!("Invalid timeout: {}", value)))?;
                 RuleAction::Timeout { ms }
             }
 
@@ -1278,28 +1380,48 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             "htmlreplace" => {
                 let (pattern, replacement) = parse_replace_pair(value)?;
                 let is_regex = pattern.starts_with('/') || pattern.starts_with('^');
-                RuleAction::HtmlReplace { pattern, replacement, regex: is_regex }
+                RuleAction::HtmlReplace {
+                    pattern,
+                    replacement,
+                    regex: is_regex,
+                }
             }
 
             "jsreplace" => {
                 let (pattern, replacement) = parse_replace_pair(value)?;
                 let is_regex = pattern.starts_with('/') || pattern.starts_with('^');
-                RuleAction::JsReplace { pattern, replacement, regex: is_regex }
+                RuleAction::JsReplace {
+                    pattern,
+                    replacement,
+                    regex: is_regex,
+                }
             }
 
             "cssreplace" => {
                 let (pattern, replacement) = parse_replace_pair(value)?;
                 let is_regex = pattern.starts_with('/') || pattern.starts_with('^');
-                RuleAction::CssReplace { pattern, replacement, regex: is_regex }
+                RuleAction::CssReplace {
+                    pattern,
+                    replacement,
+                    regex: is_regex,
+                }
             }
 
-            "reqprepend" => RuleAction::RequestPrepend { content: value.to_string() },
+            "reqprepend" => RuleAction::RequestPrepend {
+                content: value.to_string(),
+            },
 
-            "reqappend" => RuleAction::RequestAppend { content: value.to_string() },
+            "reqappend" => RuleAction::RequestAppend {
+                content: value.to_string(),
+            },
 
-            "resprepend" | "resPrepend" => RuleAction::ResponsePrepend { content: value.to_string() },
+            "resprepend" | "resPrepend" => RuleAction::ResponsePrepend {
+                content: value.to_string(),
+            },
 
-            "resappend" => RuleAction::ResponseAppend { content: value.to_string() },
+            "resappend" => RuleAction::ResponseAppend {
+                content: value.to_string(),
+            },
 
             _ => {
                 tracing::warn!("Unknown action protocol: {}", protocol);
@@ -1336,7 +1458,9 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
         if !host_part.is_empty()
             && port_part.chars().all(|c| c.is_ascii_digit())
             && !port_part.is_empty()
-            && host_part.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+            && host_part
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
         {
             return Ok(Some(RuleAction::Host {
                 target: s.to_string(),
@@ -1436,10 +1560,9 @@ fn parse_header_modifications(s: &str) -> Result<HeaderModifications> {
 
     for pair in s.split(',') {
         let pair = pair.trim();
-        if pair.starts_with('-') {
-            modifications.remove.push(pair[1..].to_string());
-        } else if pair.starts_with('+') {
-            let rest = &pair[1..];
+        if let Some(stripped) = pair.strip_prefix('-') {
+            modifications.remove.push(stripped.to_string());
+        } else if let Some(rest) = pair.strip_prefix('+') {
             if let Some(idx) = rest.find(['=', ':']) {
                 let key = rest[..idx].trim().to_string();
                 let value = rest[idx + 1..].trim().to_string();
@@ -1465,9 +1588,9 @@ fn parse_body_content(s: &str) -> Result<BodyContent> {
             return Ok(BodyContent::Json { value });
         }
     }
-    if s.starts_with("base64:") {
+    if let Some(stripped) = s.strip_prefix("base64:") {
         return Ok(BodyContent::Base64 {
-            data: s[7..].to_string(),
+            data: stripped.to_string(),
         });
     }
     if s.is_empty() || s == "empty" {
@@ -1504,10 +1627,9 @@ fn parse_url_param_modifications(s: &str) -> Result<UrlParamModifications> {
 
     for pair in s.split('&') {
         let pair = pair.trim();
-        if pair.starts_with('-') {
-            modifications.remove.push(pair[1..].to_string());
-        } else if pair.starts_with('+') {
-            let rest = &pair[1..];
+        if let Some(stripped) = pair.strip_prefix('-') {
+            modifications.remove.push(stripped.to_string());
+        } else if let Some(rest) = pair.strip_prefix('+') {
             if let Some(idx) = rest.find('=') {
                 let key = rest[..idx].to_string();
                 let value = rest[idx + 1..].to_string();
@@ -1782,7 +1904,10 @@ example.com host://127.0.0.1
     fn test_parse_cors() {
         let rules = parse_rules("*.api.com resCors://*").unwrap();
         assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].actions[0], RuleAction::ResponseCors { .. }));
+        assert!(matches!(
+            rules[0].actions[0],
+            RuleAction::ResponseCors { .. }
+        ));
     }
 
     #[test]
@@ -1798,7 +1923,10 @@ example.com host://127.0.0.1
             parse_rules(r#"example.com resHeaders://{"Content-Type":"application/json"}"#).unwrap();
         assert_eq!(rules.len(), 1);
         if let RuleAction::ResponseHeaders { modifications } = &rules[0].actions[0] {
-            assert_eq!(modifications.set.get("Content-Type").unwrap(), "application/json");
+            assert_eq!(
+                modifications.set.get("Content-Type").unwrap(),
+                "application/json"
+            );
         } else {
             panic!("Expected ResponseHeaders action");
         }
@@ -1834,7 +1962,12 @@ example.com host://127.0.0.1
         // stripped from the path so matching works correctly.
         let rules = parse_rules("https://example.com/api?q=1 host://127.0.0.1:3000").unwrap();
         assert_eq!(rules.len(), 1);
-        if let Pattern::Url { protocol, host, path } = &rules[0].pattern {
+        if let Pattern::Url {
+            protocol,
+            host,
+            path,
+        } = &rules[0].pattern
+        {
             assert_eq!(protocol.as_deref(), Some("https"));
             assert_eq!(host, "example.com");
             assert_eq!(path.as_deref(), Some("/api"));
@@ -1847,7 +1980,12 @@ example.com host://127.0.0.1
     fn test_url_pattern_with_hash_is_stripped() {
         let rules = parse_rules("https://example.com/api#section host://127.0.0.1:3000").unwrap();
         assert_eq!(rules.len(), 1);
-        if let Pattern::Url { protocol, host, path } = &rules[0].pattern {
+        if let Pattern::Url {
+            protocol,
+            host,
+            path,
+        } = &rules[0].pattern
+        {
             assert_eq!(protocol.as_deref(), Some("https"));
             assert_eq!(host, "example.com");
             assert_eq!(path.as_deref(), Some("/api"));
@@ -1884,7 +2022,8 @@ example.com host://127.0.0.1
 
     #[test]
     fn test_parse_url_to_url_proxy() {
-        let rules = parse_rules("https://v.qq.com/biu/u/history/ http://127.0.0.1:3000/browser").unwrap();
+        let rules =
+            parse_rules("https://v.qq.com/biu/u/history/ http://127.0.0.1:3000/browser").unwrap();
         assert_eq!(rules.len(), 1);
         if let RuleAction::Host { target } = &rules[0].actions[0] {
             assert_eq!(target, "http://127.0.0.1:3000/browser");
@@ -1920,31 +2059,63 @@ example.com host://127.0.0.1
         let headers = HashMap::new();
 
         assert!(
-            filters.matches("GET", "https", 443, &headers, "https://v.qq.com/x/cover/mzc00200rgazpwa/h4102454htt.html"),
+            filters.matches(
+                "GET",
+                "https",
+                443,
+                &headers,
+                "https://v.qq.com/x/cover/mzc00200rgazpwa/h4102454htt.html"
+            ),
             "includeFilter should match /x/cover/ URL"
         );
         assert!(
-            filters.matches("GET", "https", 443, &headers, "https://v.qq.com/x/page/something"),
+            filters.matches(
+                "GET",
+                "https",
+                443,
+                &headers,
+                "https://v.qq.com/x/page/something"
+            ),
             "includeFilter should match /x/page/ URL"
         );
         assert!(
-            !filters.matches("GET", "https", 443, &headers, "https://v.qq.com/other/stuff.html"),
+            !filters.matches(
+                "GET",
+                "https",
+                443,
+                &headers,
+                "https://v.qq.com/other/stuff.html"
+            ),
             "includeFilter should NOT match unrelated path"
         );
     }
 
     #[test]
     fn test_include_filter_case_insensitive() {
-        let rules = parse_rules(
-            r#"example.com host://localhost:3000 includeFilter:///api/i"#
-        ).unwrap();
+        let rules =
+            parse_rules(r#"example.com host://localhost:3000 includeFilter:///api/i"#).unwrap();
         assert_eq!(rules.len(), 1);
-        let filters = rules[0].filters.as_ref().expect("Filters should be present");
+        let filters = rules[0]
+            .filters
+            .as_ref()
+            .expect("Filters should be present");
 
         let headers = HashMap::new();
 
-        assert!(filters.matches("GET", "https", 443, &headers, "https://example.com/API/users"));
-        assert!(filters.matches("GET", "https", 443, &headers, "https://example.com/api/users"));
+        assert!(filters.matches(
+            "GET",
+            "https",
+            443,
+            &headers,
+            "https://example.com/API/users"
+        ));
+        assert!(filters.matches(
+            "GET",
+            "https",
+            443,
+            &headers,
+            "https://example.com/api/users"
+        ));
     }
 
     #[test]
@@ -2019,7 +2190,10 @@ example.com host://127.0.0.1
     fn test_filter_protocol_format() {
         let rules = parse_rules("example.com filter://m:GET host://localhost").unwrap();
         assert_eq!(rules.len(), 1);
-        let filters = rules[0].filters.as_ref().expect("Filters should be present");
+        let filters = rules[0]
+            .filters
+            .as_ref()
+            .expect("Filters should be present");
         assert_eq!(filters.methods, vec!["GET"]);
     }
 
@@ -2027,7 +2201,10 @@ example.com host://127.0.0.1
     fn test_filter_regex_protocol_format() {
         let rules = parse_rules("example.com filter:///api/i host://localhost").unwrap();
         assert_eq!(rules.len(), 1);
-        let filters = rules[0].filters.as_ref().expect("Filters should be present");
+        let filters = rules[0]
+            .filters
+            .as_ref()
+            .expect("Filters should be present");
         assert_eq!(filters.include.len(), 1);
     }
 
@@ -2053,7 +2230,10 @@ example.com host://127.0.0.1
     fn test_protocol_alias_urlreplace() {
         let rules = parse_rules("example.com urlReplace:///old->new").unwrap();
         assert_eq!(rules.len(), 1);
-        assert!(matches!(rules[0].actions[0], RuleAction::PathReplace { .. }));
+        assert!(matches!(
+            rules[0].actions[0],
+            RuleAction::PathReplace { .. }
+        ));
     }
 
     #[test]
@@ -2092,10 +2272,7 @@ example.com host://127.0.0.1
                 Some("/thumbplayer/core/1.63.2/txhlsjs-kernel.js")
             );
         } else {
-            panic!(
-                "Expected NoSchema pattern, got {:?}",
-                rules[0].pattern
-            );
+            panic!("Expected NoSchema pattern, got {:?}", rules[0].pattern);
         }
         // The action should be Host with the full target URL
         if let RuleAction::Host { target } = &rules[0].actions[0] {

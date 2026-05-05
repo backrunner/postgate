@@ -31,8 +31,12 @@ pub struct ProxyConfig {
     pub connection_idle_timeout: u64,
 }
 
-fn default_max_connections() -> usize { 10 }
-fn default_idle_timeout() -> u64 { 60 }
+fn default_max_connections() -> usize {
+    10
+}
+fn default_idle_timeout() -> u64 {
+    60
+}
 
 impl Default for ProxyConfig {
     fn default() -> Self {
@@ -77,8 +81,8 @@ impl ProxyServer {
         app_state: Arc<AppState>,
     ) -> Self {
         // Create connection pool (pooling not yet fully integrated)
-        let connection_pool = ConnectionPool::new(PoolConfig::default())
-            .expect("Failed to create connection pool");
+        let connection_pool =
+            ConnectionPool::new(PoolConfig).expect("Failed to create connection pool");
 
         // Build the shared upstream client once — its connection pool is what
         // makes the proxy fast. See proxy/upstream.rs.
@@ -151,11 +155,7 @@ impl ProxyServer {
     }
 
     /// Accept loop for incoming connections
-    async fn accept_loop(
-        listener: TcpListener,
-        ctx: Arc<ProxyContext>,
-        running: Arc<AtomicBool>,
-    ) {
+    async fn accept_loop(listener: TcpListener, ctx: Arc<ProxyContext>, running: Arc<AtomicBool>) {
         while running.load(Ordering::SeqCst) {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {

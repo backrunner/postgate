@@ -71,7 +71,16 @@ pub async fn forward_collect(
     body: Bytes,
     timeout_ms: Option<u64>,
 ) -> Result<(Response<()>, CapturedBody)> {
-    forward_collect_with_proxy(client, method, absolute_url, headers, body, timeout_ms, None).await
+    forward_collect_with_proxy(
+        client,
+        method,
+        absolute_url,
+        headers,
+        body,
+        timeout_ms,
+        None,
+    )
+    .await
 }
 
 /// Same as `forward_collect` but routes through an upstream proxy if one
@@ -89,8 +98,15 @@ pub async fn forward_collect_with_proxy(
     // the pool keys on (scheme, host, port) and knows nothing about chained
     // proxies. Performance-critical use cases for chained proxies are rare.
     if let Some(proxy) = upstream_proxy {
-        return super::chain::forward_via_proxy(method, absolute_url, headers, body, proxy, timeout_ms)
-            .await;
+        return super::chain::forward_via_proxy(
+            method,
+            absolute_url,
+            headers,
+            body,
+            proxy,
+            timeout_ms,
+        )
+        .await;
     }
 
     let req = build_upstream_request(method, absolute_url, headers, body)?;

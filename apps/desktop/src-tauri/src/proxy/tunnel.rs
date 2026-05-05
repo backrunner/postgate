@@ -1,15 +1,14 @@
 use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::error_page::ProxyErrorKind;
 use crate::proxy::forward::ForwardTarget;
 use crate::proxy::handler::ProxyContext;
 use crate::proxy::headers::{
     apply_headers_to_response_builder, build_forward_request_headers,
     build_forward_response_headers, headermap_to_flat,
 };
-use crate::rules::{
-    apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
-};
+use crate::rules::{apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx};
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
 use bytes::Bytes;
@@ -135,8 +134,13 @@ async fn handle_https_request(
     });
 
     // Match rules - now returns MatchedRule with remaining_path
-    let matched_rules = ctx.rule_engine.match_request(&method_str, host, &path, "https", port, &request_headers);
-    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.rule.raw_line.clone()).collect();
+    let matched_rules =
+        ctx.rule_engine
+            .match_request(&method_str, host, &path, "https", port, &request_headers);
+    let matched_rule_ids: Vec<String> = matched_rules
+        .iter()
+        .map(|r| r.rule.raw_line.clone())
+        .collect();
 
     // Collect request body
     let (parts, body) = req.into_parts();
@@ -144,16 +148,20 @@ async fn handle_https_request(
         Ok(b) => b,
         Err(e) => {
             tracing::error!("Failed to collect request body: {}", e);
-            return Ok(Response::builder()
-                .status(502)
-                .body(Full::new(Bytes::from(format!("Error: {}", e))).map_err(|_| unreachable!()).boxed())
-                .unwrap());
+            return Ok(html_error_response(
+                502,
+                ProxyErrorKind::Request,
+                &format!("Failed to read request body: {}", e),
+            ));
         }
     };
 
     let request_size = request_body.size as u64;
-    ctx.body_storage.store_request_body(&request_id, request_body.clone()).await;
-    ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
+    ctx.body_storage
+        .store_request_body(&request_id, request_body.clone())
+        .await;
+    ctx.app_state
+        .persist_body(request_id.clone(), request_body.data.clone(), true);
 
     // Build resolver context for whistle `{name}` references.
     let _ = ctx.app_state.ensure_values_loaded().await;
@@ -201,14 +209,17 @@ async fn handle_https_request(
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
     if let Some(short_circuit) = request_modification.short_circuit {
         let duration = start_time.elapsed().as_millis() as u64;
-        
+
         let response_body = CapturedBody {
             data: short_circuit.body.clone(),
             size: short_circuit.body.len(),
             truncated: false,
         };
-        ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
-        ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
+        ctx.body_storage
+            .store_response_body(&request_id, response_body.clone())
+            .await;
+        ctx.app_state
+            .persist_body(request_id.clone(), response_body.data.clone(), false);
 
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
             id: request_id.clone(),
@@ -246,7 +257,11 @@ async fn handle_https_request(
             builder = builder.header(k.as_str(), v.as_str());
         }
         return Ok(builder
-            .body(Full::new(short_circuit.body).map_err(|_| unreachable!()).boxed())
+            .body(
+                Full::new(short_circuit.body)
+                    .map_err(|_| unreachable!())
+                    .boxed(),
+            )
             .unwrap());
     }
 
@@ -290,7 +305,9 @@ async fn handle_https_request(
             Ok(format!("https://{}{}", authority, original_path))
         };
 
-    let body_to_send = request_modification.body.unwrap_or(request_body.data.clone());
+    let body_to_send = request_modification
+        .body
+        .unwrap_or(request_body.data.clone());
 
     // Build the multi-value-preserving `HeaderMap` to ship upstream. We
     // start from the original client headers and overlay only what the
@@ -410,10 +427,11 @@ async fn handle_https_request(
                     },
                 });
 
-                Ok(Response::builder()
-                    .status(502)
-                    .body(Full::new(Bytes::from(format!("Proxy error: {}", e))).map_err(|_| unreachable!()).boxed())
-                    .unwrap())
+                Ok(html_error_response(
+                    502,
+                    ProxyErrorKind::Upstream,
+                    &e.to_string(),
+                ))
             }
         };
     }
@@ -476,7 +494,10 @@ async fn handle_https_request(
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
             }
 
-            let mut final_body = response_modification.body.clone().unwrap_or(response_body.data.clone());
+            let mut final_body = response_modification
+                .body
+                .clone()
+                .unwrap_or(response_body.data.clone());
 
             // debug:// — inject CDP bridge into HTML responses.
             if response_modification.inject_debug {
@@ -502,7 +523,11 @@ async fn handle_https_request(
                 &original_resp_headers,
                 &upstream_headers,
                 &response_modification,
-                if body_was_modified { Some(final_body.len()) } else { None },
+                if body_was_modified {
+                    Some(final_body.len())
+                } else {
+                    None
+                },
             );
             let final_headers = headermap_to_flat(&final_header_map);
 
@@ -514,8 +539,11 @@ async fn handle_https_request(
                 size: final_body.len(),
                 truncated: false,
             };
-            ctx.body_storage.store_response_body(&request_id, final_body_captured).await;
-            ctx.app_state.persist_body(request_id.clone(), final_body.clone(), false);
+            ctx.body_storage
+                .store_response_body(&request_id, final_body_captured)
+                .await;
+            ctx.app_state
+                .persist_body(request_id.clone(), final_body.clone(), false);
 
             // Emit completed event
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -573,11 +601,27 @@ async fn handle_https_request(
                 },
             });
 
-            Ok(Response::builder()
-                .status(502)
-                .body(Full::new(Bytes::from(format!("Proxy error: {}", e))).map_err(|_| unreachable!()).boxed())
-                .unwrap())
+            Ok(html_error_response(
+                502,
+                ProxyErrorKind::Upstream,
+                &e.to_string(),
+            ))
         }
     }
 }
 
+fn html_error_response(
+    status: u16,
+    kind: ProxyErrorKind,
+    message: &str,
+) -> Response<BoxBody<Bytes, hyper::Error>> {
+    let body = crate::proxy::error_page::html_error_body(status, kind, message);
+    let headers = crate::proxy::error_page::html_error_headers(body.len());
+    let mut builder = Response::builder().status(status);
+    for (key, value) in headers {
+        builder = builder.header(key, value);
+    }
+    builder
+        .body(Full::new(body).map_err(|_| unreachable!()).boxed())
+        .unwrap()
+}

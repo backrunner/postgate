@@ -84,7 +84,7 @@ impl RuleEngine {
         let mut compiled = Vec::new();
 
         let mut groups: Vec<_> = self.groups.iter().map(|r| r.value().clone()).collect();
-        groups.sort_by(|a, b| b.priority.cmp(&a.priority));
+        groups.sort_by_key(|group| std::cmp::Reverse(group.priority));
 
         for group in groups {
             let inline = Arc::new(group.inline_values.clone());
@@ -97,7 +97,7 @@ impl RuleEngine {
             }
         }
 
-        compiled.sort_by(|a, b| b.rule.priority.cmp(&a.rule.priority));
+        compiled.sort_by_key(|compiled| std::cmp::Reverse(compiled.rule.priority));
 
         *self.compiled_rules.write() = compiled;
     }
@@ -206,7 +206,11 @@ impl RuleEngine {
         compiled.iter().any(|cr| {
             cr.group_enabled
                 && cr.rule.enabled
-                && cr.rule.actions.iter().any(|a| matches!(a, RuleAction::Debug { .. }))
+                && cr
+                    .rule
+                    .actions
+                    .iter()
+                    .any(|a| matches!(a, RuleAction::Debug { .. }))
         })
     }
 }
@@ -269,14 +273,12 @@ mod tests {
 
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
-        let matches = engine.match_request(
-            "POST", "example.com", "/", "https", 443, &HashMap::new()
-        );
+        let matches =
+            engine.match_request("POST", "example.com", "/", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 1);
 
-        let matches = engine.match_request(
-            "GET", "example.com", "/", "https", 443, &HashMap::new()
-        );
+        let matches =
+            engine.match_request("GET", "example.com", "/", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 0);
     }
 
@@ -300,14 +302,11 @@ mod tests {
 
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
-        let matches = engine.match_request(
-            "GET", "example.com", "/", "https", 443, &HashMap::new()
-        );
+        let matches =
+            engine.match_request("GET", "example.com", "/", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 1);
 
-        let matches = engine.match_request(
-            "GET", "example.com", "/", "http", 80, &HashMap::new()
-        );
+        let matches = engine.match_request("GET", "example.com", "/", "http", 80, &HashMap::new());
         assert_eq!(matches.len(), 0);
     }
 
@@ -322,14 +321,11 @@ mod tests {
 
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
-        let matches = engine.match_request(
-            "GET", "example.com", "/", "https", 443, &HashMap::new()
-        );
+        let matches =
+            engine.match_request("GET", "example.com", "/", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 1);
 
-        let matches = engine.match_request(
-            "POST", "example.com", "/", "http", 80, &HashMap::new()
-        );
+        let matches = engine.match_request("POST", "example.com", "/", "http", 80, &HashMap::new());
         assert_eq!(matches.len(), 1);
     }
 
@@ -339,26 +335,42 @@ mod tests {
 
         let engine = RuleEngine::new();
 
-        let rules = parse_rules("https://v.qq.com/biu/u/history/ http://127.0.0.1:3000/browser").unwrap();
+        let rules =
+            parse_rules("https://v.qq.com/biu/u/history/ http://127.0.0.1:3000/browser").unwrap();
         assert_eq!(rules.len(), 1);
 
         engine.upsert_group(create_test_group("test-group", rules));
 
         // Exact path match
         let matches = engine.match_request(
-            "GET", "v.qq.com", "/biu/u/history/", "https", 443, &HashMap::new()
+            "GET",
+            "v.qq.com",
+            "/biu/u/history/",
+            "https",
+            443,
+            &HashMap::new(),
         );
         assert_eq!(matches.len(), 1, "Should match exact path");
 
         // Subpath
         let matches = engine.match_request(
-            "GET", "v.qq.com", "/biu/u/history/page/1", "https", 443, &HashMap::new()
+            "GET",
+            "v.qq.com",
+            "/biu/u/history/page/1",
+            "https",
+            443,
+            &HashMap::new(),
         );
         assert_eq!(matches.len(), 1, "Should match subpath");
 
         // Non-matching path
         let matches = engine.match_request(
-            "GET", "v.qq.com", "/other/path", "https", 443, &HashMap::new()
+            "GET",
+            "v.qq.com",
+            "/other/path",
+            "https",
+            443,
+            &HashMap::new(),
         );
         assert_eq!(matches.len(), 0, "Should not match different path");
     }
@@ -375,9 +387,7 @@ mod tests {
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
         // Empty path should be normalized to /
-        let matches = engine.match_request(
-            "GET", "example.com", "", "https", 443, &HashMap::new()
-        );
+        let matches = engine.match_request("GET", "example.com", "", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 1);
     }
 
@@ -396,15 +406,12 @@ mod tests {
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
         // example.com should NOT match (negated)
-        let matches = engine.match_request(
-            "GET", "example.com", "/", "https", 443, &HashMap::new()
-        );
+        let matches =
+            engine.match_request("GET", "example.com", "/", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 0);
 
         // other.com SHOULD match (negated domain doesn't match → inverted → matches)
-        let matches = engine.match_request(
-            "GET", "other.com", "/", "https", 443, &HashMap::new()
-        );
+        let matches = engine.match_request("GET", "other.com", "/", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 1);
     }
 
@@ -419,14 +426,12 @@ mod tests {
 
         engine.upsert_group(create_test_group("test-group", vec![rule]));
 
-        let matches = engine.match_request(
-            "GET", "example.com", "/", "http", 8080, &HashMap::new()
-        );
+        let matches =
+            engine.match_request("GET", "example.com", "/", "http", 8080, &HashMap::new());
         assert_eq!(matches.len(), 1);
 
-        let matches = engine.match_request(
-            "GET", "example.com", "/", "https", 443, &HashMap::new()
-        );
+        let matches =
+            engine.match_request("GET", "example.com", "/", "https", 443, &HashMap::new());
         assert_eq!(matches.len(), 0);
     }
 
@@ -446,19 +451,41 @@ https://v.qq.com/assets/ http://localhost:8080/assets/"#;
 
         // Should match rule 1 (v.qq.com domain + includeFilter matches x/cover)
         let matches = engine.match_request(
-            "GET", "v.qq.com", "/x/cover/kcaoffbyy2l0b45/p4102qbmz2h.html", "https", 443, &headers
+            "GET",
+            "v.qq.com",
+            "/x/cover/kcaoffbyy2l0b45/p4102qbmz2h.html",
+            "https",
+            443,
+            &headers,
         );
-        assert!(matches.len() >= 1, "Should match the v.qq.com rule with includeFilter for /x/cover/ path");
+        assert!(
+            matches.len() >= 1,
+            "Should match the v.qq.com rule with includeFilter for /x/cover/ path"
+        );
 
         // Should NOT match rule 1 (includeFilter rejects), should NOT match rule 2 (path /other/)
         let matches = engine.match_request(
-            "GET", "v.qq.com", "/other/stuff.html", "https", 443, &headers
+            "GET",
+            "v.qq.com",
+            "/other/stuff.html",
+            "https",
+            443,
+            &headers,
         );
-        assert_eq!(matches.len(), 0, "Should NOT match any rule for /other/ path");
+        assert_eq!(
+            matches.len(),
+            0,
+            "Should NOT match any rule for /other/ path"
+        );
 
         // Should match rule 2 (https://v.qq.com/assets/ prefix)
         let matches = engine.match_request(
-            "GET", "v.qq.com", "/assets/js/main.js", "https", 443, &headers
+            "GET",
+            "v.qq.com",
+            "/assets/js/main.js",
+            "https",
+            443,
+            &headers,
         );
         assert!(matches.len() >= 1, "Should match the assets rule");
     }

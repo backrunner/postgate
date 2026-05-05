@@ -265,12 +265,22 @@ impl Database {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Remove every rule group. Used by full-profile restores.
+    pub async fn clear_rule_groups(&self) -> Result<()> {
+        sqlx::query("DELETE FROM rule_groups")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Failed to clear rule groups: {}", e)))?;
+
+        Ok(())
+    }
+
     // ==================== Values Store Methods ====================
 
     /// List all stored values (ordered by name).
     pub async fn list_values(&self) -> Result<Vec<crate::values::ValueEntry>> {
         let rows = sqlx::query_as::<_, ValueRow>(
-            "SELECT name, content, created_at, updated_at FROM values_store ORDER BY name ASC"
+            "SELECT name, content, created_at, updated_at FROM values_store ORDER BY name ASC",
         )
         .fetch_all(&self.pool)
         .await
@@ -282,7 +292,7 @@ impl Database {
     /// Fetch a single value by name.
     pub async fn get_value(&self, name: &str) -> Result<Option<crate::values::ValueEntry>> {
         let row = sqlx::query_as::<_, ValueRow>(
-            "SELECT name, content, created_at, updated_at FROM values_store WHERE name = ?"
+            "SELECT name, content, created_at, updated_at FROM values_store WHERE name = ?",
         )
         .bind(name)
         .fetch_optional(&self.pool)
@@ -339,6 +349,16 @@ impl Database {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Remove every stored value. Used by full-profile restores.
+    pub async fn clear_values(&self) -> Result<()> {
+        sqlx::query("DELETE FROM values_store")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Failed to clear values: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Rename a value. Fails if `new_name` already exists.
     pub async fn rename_value(
         &self,
@@ -386,25 +406,28 @@ impl Database {
     /// Get all collections
     pub async fn get_collections(&self) -> Result<Vec<Collection>> {
         let rows = sqlx::query_as::<_, CollectionRow>(
-            "SELECT id, name, parent_id, created_at, updated_at FROM collections ORDER BY name ASC"
+            "SELECT id, name, parent_id, created_at, updated_at FROM collections ORDER BY name ASC",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(|e| PostGateError::Storage(format!("Failed to fetch collections: {}", e)))?;
 
-        Ok(rows.into_iter().map(|r| Collection {
-            id: r.id,
-            name: r.name,
-            parent_id: r.parent_id,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| Collection {
+                id: r.id,
+                name: r.name,
+                parent_id: r.parent_id,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
     }
 
     /// Get a single collection
     pub async fn get_collection(&self, id: &str) -> Result<Option<Collection>> {
         let row = sqlx::query_as::<_, CollectionRow>(
-            "SELECT id, name, parent_id, created_at, updated_at FROM collections WHERE id = ?"
+            "SELECT id, name, parent_id, created_at, updated_at FROM collections WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -448,17 +471,45 @@ impl Database {
         Ok(())
     }
 
+    /// Remove every collection and saved request. Used by full-profile restores.
+    pub async fn clear_replay_data(&self) -> Result<()> {
+        sqlx::query("DELETE FROM request_history")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                PostGateError::Storage(format!("Failed to clear request history: {}", e))
+            })?;
+
+        sqlx::query("DELETE FROM saved_requests")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                PostGateError::Storage(format!("Failed to clear saved requests: {}", e))
+            })?;
+
+        sqlx::query("DELETE FROM collections")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Failed to clear collections: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Delete collection and all children recursively
-    pub fn delete_collection_recursive<'a>(&'a self, id: &'a str) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    pub fn delete_collection_recursive<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             // Get all child collections
-            let children = sqlx::query_scalar::<_, String>(
-                "SELECT id FROM collections WHERE parent_id = ?"
-            )
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| PostGateError::Storage(format!("Failed to fetch child collections: {}", e)))?;
+            let children =
+                sqlx::query_scalar::<_, String>("SELECT id FROM collections WHERE parent_id = ?")
+                    .bind(id)
+                    .fetch_all(&self.pool)
+                    .await
+                    .map_err(|e| {
+                        PostGateError::Storage(format!("Failed to fetch child collections: {}", e))
+                    })?;
 
             // Recursively delete children
             for child_id in children {
@@ -512,11 +563,14 @@ impl Database {
         .await
         .map_err(|e| PostGateError::Storage(format!("Failed to fetch requests: {}", e)))?;
 
-        Ok(rows.into_iter().filter_map(|r| parse_saved_request(r)).collect())
+        Ok(rows.into_iter().filter_map(parse_saved_request).collect())
     }
 
     /// Get requests in a specific collection
-    pub async fn get_requests_in_collection(&self, collection_id: &str) -> Result<Vec<SavedRequest>> {
+    pub async fn get_requests_in_collection(
+        &self,
+        collection_id: &str,
+    ) -> Result<Vec<SavedRequest>> {
         let rows = sqlx::query_as::<_, SavedRequestRow>(
             "SELECT id, name, collection_id, method, url, headers, query_params, body_type, body_content, created_at, updated_at FROM saved_requests WHERE collection_id = ? ORDER BY name ASC"
         )
@@ -525,7 +579,7 @@ impl Database {
         .await
         .map_err(|e| PostGateError::Storage(format!("Failed to fetch requests: {}", e)))?;
 
-        Ok(rows.into_iter().filter_map(|r| parse_saved_request(r)).collect())
+        Ok(rows.into_iter().filter_map(parse_saved_request).collect())
     }
 
     /// Get a single saved request
@@ -538,15 +592,16 @@ impl Database {
         .await
         .map_err(|e| PostGateError::Storage(format!("Failed to fetch request: {}", e)))?;
 
-        Ok(row.and_then(|r| parse_saved_request(r)))
+        Ok(row.and_then(parse_saved_request))
     }
 
     /// Save a request
     pub async fn save_request(&self, request: &SavedRequest) -> Result<()> {
         let headers_json = serde_json::to_string(&request.headers)
             .map_err(|e| PostGateError::Storage(format!("Failed to serialize headers: {}", e)))?;
-        let query_params_json = serde_json::to_string(&request.query_params)
-            .map_err(|e| PostGateError::Storage(format!("Failed to serialize query params: {}", e)))?;
+        let query_params_json = serde_json::to_string(&request.query_params).map_err(|e| {
+            PostGateError::Storage(format!("Failed to serialize query params: {}", e))
+        })?;
         let body_json = serde_json::to_string(&request.body)
             .map_err(|e| PostGateError::Storage(format!("Failed to serialize body: {}", e)))?;
 
@@ -600,8 +655,10 @@ impl Database {
     pub async fn save_history(&self, history: &RequestHistory) -> Result<()> {
         let request_json = serde_json::to_string(&history.request)
             .map_err(|e| PostGateError::Storage(format!("Failed to serialize request: {}", e)))?;
-        let response_json = history.response.as_ref()
-            .map(|r| serde_json::to_string(r))
+        let response_json = history
+            .response
+            .as_ref()
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| PostGateError::Storage(format!("Failed to serialize response: {}", e)))?;
 
@@ -631,20 +688,25 @@ impl Database {
         .await
         .map_err(|e| PostGateError::Storage(format!("Failed to fetch history: {}", e)))?;
 
-        Ok(rows.into_iter().filter_map(|r| {
-            let request = serde_json::from_str(&r.request_json).ok()?;
-            let response = r.response_json.as_ref()
-                .and_then(|j| serde_json::from_str(j).ok());
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let request = serde_json::from_str(&r.request_json).ok()?;
+                let response = r
+                    .response_json
+                    .as_ref()
+                    .and_then(|j| serde_json::from_str(j).ok());
 
-            Some(RequestHistory {
-                id: r.id,
-                saved_request_id: r.saved_request_id,
-                request,
-                response,
-                error: r.error,
-                executed_at: r.executed_at,
+                Some(RequestHistory {
+                    id: r.id,
+                    saved_request_id: r.saved_request_id,
+                    request,
+                    response,
+                    error: r.error,
+                    executed_at: r.executed_at,
+                })
             })
-        }).collect())
+            .collect())
     }
 
     /// Clear all history
@@ -707,7 +769,8 @@ struct HistoryRow {
 fn parse_saved_request(row: SavedRequestRow) -> Option<SavedRequest> {
     let headers = serde_json::from_str(&row.headers).ok()?;
     let query_params = serde_json::from_str(&row.query_params).ok()?;
-    let body = row.body_content
+    let body = row
+        .body_content
         .as_ref()
         .and_then(|c| serde_json::from_str(c).ok())
         .unwrap_or(crate::replay::RequestBody::None);

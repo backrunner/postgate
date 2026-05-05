@@ -33,7 +33,7 @@ pub struct ForwardTarget {
 
 impl ForwardTarget {
     /// Parse a target URL string and remaining path into ForwardTarget
-    /// 
+    ///
     /// # Arguments
     /// * `target` - Target URL like "http://127.0.0.1:3000/browser" or "127.0.0.1:3000"
     /// * `remaining_path` - Remaining path from pattern match (e.g., "/page/1?id=123")
@@ -43,14 +43,17 @@ impl ForwardTarget {
         if target.starts_with("http://") || target.starts_with("https://") {
             let url = Url::parse(target)
                 .map_err(|e| PostGateError::Proxy(format!("Invalid target URL: {}", e)))?;
-            
+
             let scheme = url.scheme().to_string();
-            let host = url.host_str()
+            let host = url
+                .host_str()
                 .ok_or_else(|| PostGateError::Proxy("Missing host in target URL".into()))?
                 .to_string();
-            let port = url.port().unwrap_or(if scheme == "https" { 443 } else { 80 });
+            let port = url
+                .port()
+                .unwrap_or(if scheme == "https" { 443 } else { 80 });
             let path = url.path().to_string();
-            
+
             Ok(ForwardTarget {
                 scheme,
                 host,
@@ -64,8 +67,9 @@ impl ForwardTarget {
             // Only when no port is specified AND original was HTTPS, keep HTTPS.
             let (host, port, scheme) = if target.contains(':') {
                 let parts: Vec<&str> = target.rsplitn(2, ':').collect();
-                let port: u16 = parts[0].parse()
-                    .map_err(|_| PostGateError::Proxy(format!("Invalid port in target: {}", target)))?;
+                let port: u16 = parts[0].parse().map_err(|_| {
+                    PostGateError::Proxy(format!("Invalid port in target: {}", target))
+                })?;
                 // Bare host:port → default to HTTP (user explicitly specified a port,
                 // likely a local dev server). Use HTTPS only for port 443.
                 let scheme = if port == 443 { "https" } else { "http" };
@@ -86,17 +90,17 @@ impl ForwardTarget {
     }
 
     /// Build the final URL for the request
-    /// 
+    ///
     /// Whistle-compatible path joining:
     /// - Target: http://127.0.0.1:3000/browser
     /// - Remaining: /page/1?id=123
     /// - Result: http://127.0.0.1:3000/browser/page/1?id=123
     pub fn build_url(&self) -> String {
         let base = format!("{}://{}:{}", self.scheme, self.host, self.port);
-        
+
         // Join target path and remaining path
         let full_path = join_paths(&self.path, &self.remaining_path);
-        
+
         format!("{}{}", base, full_path)
     }
 
@@ -112,7 +116,7 @@ impl ForwardTarget {
 }
 
 /// Join two paths whistle-style
-/// 
+///
 /// Examples:
 /// - ("/browser", "/page/1") -> "/browser/page/1"
 /// - ("/browser/", "/page/1") -> "/browser/page/1"
@@ -128,7 +132,7 @@ fn join_paths(base: &str, remaining: &str) -> String {
         }
         return remaining.to_string();
     }
-    
+
     if remaining.is_empty() {
         if base.is_empty() {
             return "/".to_string();
@@ -144,12 +148,12 @@ fn join_paths(base: &str, remaining: &str) -> String {
     // Join with single slash
     let base_trimmed = base.trim_end_matches('/');
     let remaining_trimmed = remaining.trim_start_matches('/');
-    
+
     format!("{}/{}", base_trimmed, remaining_trimmed)
 }
 
 /// Forward a request to the target, handling protocol conversion
-/// 
+///
 /// This is the main entry point for all forwarding, supporting:
 /// - HTTP -> HTTP
 /// - HTTP -> HTTPS
@@ -197,9 +201,7 @@ async fn forward_http(
 
     // Build request with target path
     let uri = target.build_path();
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(&uri);
+    let mut builder = Request::builder().method(method).uri(&uri);
 
     // Copy headers, updating Host header
     for (key, value) in headers {
@@ -227,7 +229,8 @@ async fn forward_http(
         .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
 
     // Send request
-    let resp = sender.send_request(req)
+    let resp = sender
+        .send_request(req)
         .await
         .map_err(|e| PostGateError::Proxy(format!("HTTP request error: {}", e)))?;
 
@@ -279,9 +282,7 @@ async fn forward_https(
 
     // Build request with target path
     let uri = target.build_path();
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(&uri);
+    let mut builder = Request::builder().method(method).uri(&uri);
 
     // Copy headers, updating Host header
     for (key, value) in headers {
@@ -309,7 +310,8 @@ async fn forward_https(
         .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
 
     // Send request
-    let resp = sender.send_request(req)
+    let resp = sender
+        .send_request(req)
         .await
         .map_err(|e| PostGateError::Proxy(format!("HTTPS request error: {}", e)))?;
 
@@ -340,28 +342,25 @@ mod tests {
 
     #[test]
     fn test_forward_target_parse_full_url() {
-        let target = ForwardTarget::parse(
-            "http://127.0.0.1:3000/browser",
-            "/page/1?id=123",
-            "https"
-        ).unwrap();
-        
+        let target =
+            ForwardTarget::parse("http://127.0.0.1:3000/browser", "/page/1?id=123", "https")
+                .unwrap();
+
         assert_eq!(target.scheme, "http");
         assert_eq!(target.host, "127.0.0.1");
         assert_eq!(target.port, 3000);
         assert_eq!(target.path, "/browser");
         assert_eq!(target.remaining_path, "/page/1?id=123");
-        assert_eq!(target.build_url(), "http://127.0.0.1:3000/browser/page/1?id=123");
+        assert_eq!(
+            target.build_url(),
+            "http://127.0.0.1:3000/browser/page/1?id=123"
+        );
     }
 
     #[test]
     fn test_forward_target_parse_host_only() {
         // Bare host:port should default to HTTP, not inherit HTTPS
-        let target = ForwardTarget::parse(
-            "127.0.0.1:3000",
-            "/api/users",
-            "https"
-        ).unwrap();
+        let target = ForwardTarget::parse("127.0.0.1:3000", "/api/users", "https").unwrap();
 
         assert_eq!(target.scheme, "http");
         assert_eq!(target.host, "127.0.0.1");
@@ -374,11 +373,7 @@ mod tests {
     #[test]
     fn test_forward_target_bare_host_port443_keeps_https() {
         // Port 443 should use HTTPS
-        let target = ForwardTarget::parse(
-            "example.com:443",
-            "/api",
-            "https"
-        ).unwrap();
+        let target = ForwardTarget::parse("example.com:443", "/api", "https").unwrap();
 
         assert_eq!(target.scheme, "https");
     }
@@ -386,11 +381,7 @@ mod tests {
     #[test]
     fn test_forward_target_bare_host_no_port_keeps_original() {
         // No port → inherit original scheme
-        let target = ForwardTarget::parse(
-            "example.com",
-            "/api",
-            "https"
-        ).unwrap();
+        let target = ForwardTarget::parse("example.com", "/api", "https").unwrap();
 
         assert_eq!(target.scheme, "https");
         assert_eq!(target.port, 443);
@@ -399,11 +390,7 @@ mod tests {
     #[test]
     fn test_forward_target_localhost_8080_uses_http() {
         // localhost:8080 from HTTPS context should use HTTP (the TLS bug fix)
-        let target = ForwardTarget::parse(
-            "localhost:8080",
-            "/x/cover/page.html",
-            "https"
-        ).unwrap();
+        let target = ForwardTarget::parse("localhost:8080", "/x/cover/page.html", "https").unwrap();
 
         assert_eq!(target.scheme, "http");
         assert_eq!(target.host, "localhost");
@@ -417,15 +404,16 @@ mod tests {
         // Request: https://v.qq.com/biu/u/history/page/1?id=123
         // Remaining: /page/1?id=123
         // Expected: http://127.0.0.1:3000/browser/page/1?id=123
-        
-        let target = ForwardTarget::parse(
-            "http://127.0.0.1:3000/browser",
-            "/page/1?id=123",
-            "https"
-        ).unwrap();
-        
+
+        let target =
+            ForwardTarget::parse("http://127.0.0.1:3000/browser", "/page/1?id=123", "https")
+                .unwrap();
+
         assert!(!target.is_https());
-        assert_eq!(target.build_url(), "http://127.0.0.1:3000/browser/page/1?id=123");
+        assert_eq!(
+            target.build_url(),
+            "http://127.0.0.1:3000/browser/page/1?id=123"
+        );
     }
 
     #[test]
@@ -434,13 +422,9 @@ mod tests {
         // Request: https://v.qq.com/biu/u/history/
         // Remaining: "" (empty)
         // Expected: http://127.0.0.1:3000/browser
-        
-        let target = ForwardTarget::parse(
-            "http://127.0.0.1:3000/browser",
-            "",
-            "https"
-        ).unwrap();
-        
+
+        let target = ForwardTarget::parse("http://127.0.0.1:3000/browser", "", "https").unwrap();
+
         assert_eq!(target.build_url(), "http://127.0.0.1:3000/browser");
     }
 }

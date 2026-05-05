@@ -106,7 +106,11 @@ impl RuleFilters {
         // Check method filter
         if !self.methods.is_empty() {
             let method_upper = method.to_uppercase();
-            if !self.methods.iter().any(|m| m.to_uppercase() == method_upper) {
+            if !self
+                .methods
+                .iter()
+                .any(|m| m.to_uppercase() == method_upper)
+            {
                 return false;
             }
         }
@@ -114,7 +118,11 @@ impl RuleFilters {
         // Check protocol filter
         if !self.protocols.is_empty() {
             let proto_lower = protocol.to_lowercase();
-            if !self.protocols.iter().any(|p| p.to_lowercase() == proto_lower) {
+            if !self
+                .protocols
+                .iter()
+                .any(|p| p.to_lowercase() == proto_lower)
+            {
                 return false;
             }
         }
@@ -137,7 +145,11 @@ impl RuleFilters {
         // Note: Don't reject if Content-Type header is missing (many GET requests have no body)
         if !self.content_types.is_empty() {
             if let Some(ct) = headers.get("content-type") {
-                if !self.content_types.iter().any(|t| ct.to_lowercase().contains(&t.to_lowercase())) {
+                if !self
+                    .content_types
+                    .iter()
+                    .any(|t| ct.to_lowercase().contains(&t.to_lowercase()))
+                {
                     return false;
                 }
             }
@@ -151,7 +163,9 @@ impl RuleFilters {
                 .and_then(|u| u.host_str().map(|h| h.to_string()));
             if let Some(h) = host {
                 if !self.hosts.iter().any(|pattern| {
-                    h == *pattern || h.ends_with(&format!(".{}", pattern)) || wildcard_match(pattern, &h)
+                    h == *pattern
+                        || h.ends_with(&format!(".{}", pattern))
+                        || wildcard_match(pattern, &h)
                 }) {
                     return false;
                 }
@@ -168,10 +182,8 @@ impl RuleFilters {
 
         // Check include patterns (supports regex)
         // Whistle: if include is specified, at least ONE must match
-        if !self.include.is_empty() {
-            if !self.include.iter().any(|p| pattern_matches(p, url)) {
-                return false;
-            }
+        if !self.include.is_empty() && !self.include.iter().any(|p| pattern_matches(p, url)) {
+            return false;
         }
 
         true
@@ -196,7 +208,11 @@ pub enum Pattern {
     /// Domain match (matches host and all subdomains)
     Domain(String),
     /// URL pattern with protocol (e.g., https://example.com/path)
-    Url { protocol: Option<String>, host: String, path: Option<String> },
+    Url {
+        protocol: Option<String>,
+        host: String,
+        path: Option<String>,
+    },
     /// Port pattern (whistle `:port` syntax, matches any URL with that port)
     Port(u16),
     /// No-schema pattern (whistle `//host/path`, matches any protocol)
@@ -222,36 +238,46 @@ impl Pattern {
     ///
     /// `port` is needed for Pattern::Port matching
     pub fn match_with_remainder(&self, url: &str, port: u16) -> PatternMatchResult {
-        let no_match = PatternMatchResult { matched: false, remaining_path: String::new() };
+        let no_match = PatternMatchResult {
+            matched: false,
+            remaining_path: String::new(),
+        };
 
         match self {
             Pattern::Exact(s) => {
                 // Whistle exact match: also match without query string
                 if let Ok(parsed) = url::Url::parse(url) {
-                    let url_no_query = format!("{}://{}{}", parsed.scheme(), parsed.host_str().unwrap_or(""), parsed.path());
+                    let url_no_query = format!(
+                        "{}://{}{}",
+                        parsed.scheme(),
+                        parsed.host_str().unwrap_or(""),
+                        parsed.path()
+                    );
                     if url == s || url_no_query == *s {
-                        PatternMatchResult { matched: true, remaining_path: String::new() }
+                        PatternMatchResult {
+                            matched: true,
+                            remaining_path: String::new(),
+                        }
                     } else {
                         no_match
                     }
                 } else if url == s {
-                    PatternMatchResult { matched: true, remaining_path: String::new() }
+                    PatternMatchResult {
+                        matched: true,
+                        remaining_path: String::new(),
+                    }
                 } else {
                     no_match
                 }
             }
-            Pattern::Wildcard(pattern) => {
-                PatternMatchResult {
-                    matched: whistle_wildcard_match(pattern, url),
-                    remaining_path: String::new(),
-                }
-            }
-            Pattern::Regex(re) => {
-                PatternMatchResult {
-                    matched: re.is_match(url),
-                    remaining_path: String::new(),
-                }
-            }
+            Pattern::Wildcard(pattern) => PatternMatchResult {
+                matched: whistle_wildcard_match(pattern, url),
+                remaining_path: String::new(),
+            },
+            Pattern::Regex(re) => PatternMatchResult {
+                matched: re.is_match(url),
+                remaining_path: String::new(),
+            },
             Pattern::PathPrefix(prefix) => {
                 // Whistle: path prefix uses starts_with, not contains
                 let path = if let Ok(parsed) = url::Url::parse(url) {
@@ -264,9 +290,15 @@ impl Pattern {
                 if path.starts_with(prefix.as_str()) {
                     let rest = &path[prefix.len()..];
                     // Boundary check: next char must be separator or end of string
-                    if rest.is_empty() || is_path_separator(rest.as_bytes()[0]) || prefix.ends_with('/') {
+                    if rest.is_empty()
+                        || is_path_separator(rest.as_bytes()[0])
+                        || prefix.ends_with('/')
+                    {
                         let query = if let Ok(parsed) = url::Url::parse(url) {
-                            parsed.query().map(|q| format!("?{}", q)).unwrap_or_default()
+                            parsed
+                                .query()
+                                .map(|q| format!("?{}", q))
+                                .unwrap_or_default()
                         } else {
                             String::new()
                         };
@@ -284,13 +316,19 @@ impl Pattern {
             Pattern::All => {
                 if let Ok(parsed) = url::Url::parse(url) {
                     let path = parsed.path();
-                    let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                    let query = parsed
+                        .query()
+                        .map(|q| format!("?{}", q))
+                        .unwrap_or_default();
                     PatternMatchResult {
                         matched: true,
                         remaining_path: format!("{}{}", path, query),
                     }
                 } else {
-                    PatternMatchResult { matched: true, remaining_path: String::new() }
+                    PatternMatchResult {
+                        matched: true,
+                        remaining_path: String::new(),
+                    }
                 }
             }
             Pattern::Domain(domain) => {
@@ -300,7 +338,10 @@ impl Pattern {
                     let host = parsed.host_str().unwrap_or("");
                     if host == domain || host.ends_with(&format!(".{}", domain)) {
                         let path = parsed.path();
-                        let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                        let query = parsed
+                            .query()
+                            .map(|q| format!("?{}", q))
+                            .unwrap_or_default();
                         PatternMatchResult {
                             matched: true,
                             remaining_path: format!("{}{}", path, query),
@@ -315,27 +356,38 @@ impl Pattern {
                     }
                 }
             }
-            Pattern::Url { protocol, host, path: pattern_path } => {
-                self.match_url_pattern(url, protocol.as_deref(), host, pattern_path.as_deref())
-            }
+            Pattern::Url {
+                protocol,
+                host,
+                path: pattern_path,
+            } => self.match_url_pattern(url, protocol.as_deref(), host, pattern_path.as_deref()),
             Pattern::Port(expected_port) => {
                 // Match any URL with the given port
                 if port == *expected_port {
                     if let Ok(parsed) = url::Url::parse(url) {
                         let path = parsed.path();
-                        let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                        let query = parsed
+                            .query()
+                            .map(|q| format!("?{}", q))
+                            .unwrap_or_default();
                         PatternMatchResult {
                             matched: true,
                             remaining_path: format!("{}{}", path, query),
                         }
                     } else {
-                        PatternMatchResult { matched: true, remaining_path: String::new() }
+                        PatternMatchResult {
+                            matched: true,
+                            remaining_path: String::new(),
+                        }
                     }
                 } else {
                     no_match
                 }
             }
-            Pattern::NoSchema { host, path: pattern_path } => {
+            Pattern::NoSchema {
+                host,
+                path: pattern_path,
+            } => {
                 // Match any protocol — delegate to URL pattern matching with no protocol
                 self.match_url_pattern(url, None, host, pattern_path.as_deref())
             }
@@ -350,7 +402,10 @@ impl Pattern {
         expected_host: &str,
         expected_path: Option<&str>,
     ) -> PatternMatchResult {
-        let no_match = PatternMatchResult { matched: false, remaining_path: String::new() };
+        let no_match = PatternMatchResult {
+            matched: false,
+            remaining_path: String::new(),
+        };
 
         let parsed = match url::Url::parse(url) {
             Ok(p) => p,
@@ -371,18 +426,28 @@ impl Pattern {
         }
 
         let url_path = parsed.path();
-        let query = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+        let query = parsed
+            .query()
+            .map(|q| format!("?{}", q))
+            .unwrap_or_default();
 
         if let Some(p) = expected_path {
             // Pattern has a path — do prefix matching with boundary check (whistle compatible)
-            let p_normalized = if p.ends_with('/') { p.to_string() } else { format!("{}/", p) };
+            let p_normalized = if p.ends_with('/') {
+                p.to_string()
+            } else {
+                format!("{}/", p)
+            };
             let url_path_normalized = if url_path.ends_with('/') || url_path == p {
                 url_path.to_string()
             } else {
                 format!("{}/", url_path)
             };
 
-            if url_path.starts_with(p) || url_path_normalized.starts_with(&p_normalized) || url_path == p {
+            if url_path.starts_with(p)
+                || url_path_normalized.starts_with(&p_normalized)
+                || url_path == p
+            {
                 // Whistle boundary check: the char after the match must be a separator
                 let after_match_pos = p.len();
                 if after_match_pos < url_path.len() {
@@ -405,7 +470,10 @@ impl Pattern {
                 } else {
                     format!("/{}{}", remaining, query)
                 };
-                PatternMatchResult { matched: true, remaining_path: remaining }
+                PatternMatchResult {
+                    matched: true,
+                    remaining_path: remaining,
+                }
             } else {
                 no_match
             }
@@ -426,17 +494,23 @@ impl Pattern {
             Pattern::Regex(re) => re.is_match(host),
             Pattern::PathPrefix(_) => false,
             Pattern::All => true,
-            Pattern::Domain(domain) => {
-                host == domain || host.ends_with(&format!(".{}", domain))
-            }
-            Pattern::Url { host: pattern_host, path, .. } => {
+            Pattern::Domain(domain) => host == domain || host.ends_with(&format!(".{}", domain)),
+            Pattern::Url {
+                host: pattern_host,
+                path,
+                ..
+            } => {
                 if path.is_some() {
                     return false;
                 }
                 host == pattern_host || wildcard_match(pattern_host, host)
             }
             Pattern::Port(_) => false,
-            Pattern::NoSchema { host: pattern_host, path, .. } => {
+            Pattern::NoSchema {
+                host: pattern_host,
+                path,
+                ..
+            } => {
                 if path.is_some() {
                     return false;
                 }
@@ -462,8 +536,8 @@ pub fn wildcard_match(pattern: &str, text: &str) -> bool {
         match (pattern.first(), text.first()) {
             (None, None) => true,
             (Some('*'), _) => {
-                match_helper(&pattern[1..], text) ||
-                (!text.is_empty() && match_helper(pattern, &text[1..]))
+                match_helper(&pattern[1..], text)
+                    || (!text.is_empty() && match_helper(pattern, &text[1..]))
             }
             (Some('?'), Some(_)) => match_helper(&pattern[1..], &text[1..]),
             (Some(p), Some(t)) if *p == *t => match_helper(&pattern[1..], &text[1..]),
@@ -502,8 +576,8 @@ fn compile_whistle_wildcard(pattern: &str) -> Option<Regex> {
     // Split into protocol, domain, path, query parts
     let (proto_part, rest) = if let Some(idx) = pattern.find("://") {
         (&pattern[..idx + 3], &pattern[idx + 3..])
-    } else if pattern.starts_with("//") {
-        ("//", &pattern[2..])
+    } else if let Some(stripped) = pattern.strip_prefix("//") {
+        ("//", stripped)
     } else {
         ("", pattern)
     };
@@ -531,7 +605,7 @@ fn compile_whistle_wildcard(pattern: &str) -> Option<Regex> {
     } else if proto_part == "//" {
         regex.push_str("[a-z]+://");
     } else {
-        regex.push_str(&regex::escape(&proto_part));
+        regex.push_str(&regex::escape(proto_part));
     }
 
     // Domain part — whistle domain wildcard rules
@@ -723,7 +797,6 @@ pub fn pattern_matches(pattern: &str, text: &str) -> bool {
 #[serde(tag = "type")]
 pub enum RuleAction {
     // === HOST/REDIRECT ACTIONS ===
-
     /// Redirect to a different host (host://)
     Host { target: String },
 
@@ -737,7 +810,6 @@ pub enum RuleAction {
     StatusCode { code: u16 },
 
     // === REQUEST MODIFICATIONS ===
-
     /// Modify request headers (reqHeaders://)
     RequestHeaders { modifications: HeaderModifications },
 
@@ -745,10 +817,15 @@ pub enum RuleAction {
     RequestBody { content: BodyContent },
 
     /// Modify URL query parameters (urlParams://)
-    UrlParams { modifications: UrlParamModifications },
+    UrlParams {
+        modifications: UrlParamModifications,
+    },
 
     /// Replace URL path (pathReplace:// / urlReplace://)
-    PathReplace { pattern: String, replacement: String },
+    PathReplace {
+        pattern: String,
+        replacement: String,
+    },
 
     /// Change HTTP method (method://)
     Method { method: String },
@@ -769,7 +846,6 @@ pub enum RuleAction {
     ForwardedFor { value: String },
 
     // === RESPONSE MODIFICATIONS ===
-
     /// Modify response headers (resHeaders://)
     ResponseHeaders { modifications: HeaderModifications },
 
@@ -786,13 +862,23 @@ pub enum RuleAction {
     JsBody { content: String },
 
     /// String replacement in response (resReplace://)
-    ResponseReplace { pattern: String, replacement: String, regex: bool },
+    ResponseReplace {
+        pattern: String,
+        replacement: String,
+        regex: bool,
+    },
 
     /// String replacement in request (reqReplace://)
-    RequestReplace { pattern: String, replacement: String, regex: bool },
+    RequestReplace {
+        pattern: String,
+        replacement: String,
+        regex: bool,
+    },
 
     /// Set response cookies (resCookies://)
-    ResponseCookies { cookies: HashMap<String, CookieOptions> },
+    ResponseCookies {
+        cookies: HashMap<String, CookieOptions>,
+    },
 
     /// Set response content type (resType://)
     ResponseType { content_type: String },
@@ -804,7 +890,6 @@ pub enum RuleAction {
     Attachment { filename: Option<String> },
 
     // === INJECTION ACTIONS ===
-
     /// Append to HTML (htmlAppend:// / html://)
     HtmlAppend { content: String },
 
@@ -824,9 +909,11 @@ pub enum RuleAction {
     CssPrepend { content: String },
 
     // === CORS ACTIONS ===
-
     /// Set request CORS headers (reqCors://)
-    RequestCors { origin: Option<String>, credentials: bool },
+    RequestCors {
+        origin: Option<String>,
+        credentials: bool,
+    },
 
     /// Set response CORS headers (resCors://)
     ResponseCors {
@@ -838,7 +925,6 @@ pub enum RuleAction {
     },
 
     // === PERFORMANCE ACTIONS ===
-
     /// Add delay to request/response (reqDelay://, resDelay://)
     Delay {
         request_ms: Option<u64>,
@@ -852,12 +938,14 @@ pub enum RuleAction {
     },
 
     // === DEBUGGING/CONTROL ===
-
     /// Enable debugging for this request (debug://)
     Debug { name: String },
 
     /// Forward to plugin (plugin://)
-    Plugin { name: String, config: serde_json::Value },
+    Plugin {
+        name: String,
+        config: serde_json::Value,
+    },
 
     /// Log request (log://)
     Log { message: Option<String> },
@@ -872,18 +960,29 @@ pub enum RuleAction {
     Disable { features: Vec<String> },
 
     // === PROXY CONFIGURATION ===
-
     /// Use HTTP proxy (proxy://, http-proxy://)
-    HttpProxy { host: String, port: u16, auth: Option<ProxyAuth> },
+    HttpProxy {
+        host: String,
+        port: u16,
+        auth: Option<ProxyAuth>,
+    },
 
     /// Use HTTPS proxy (https-proxy://)
-    HttpsProxy { host: String, port: u16, auth: Option<ProxyAuth> },
+    HttpsProxy {
+        host: String,
+        port: u16,
+        auth: Option<ProxyAuth>,
+    },
 
     /// Use SOCKS proxy (socks://)
-    SocksProxy { host: String, port: u16, version: u8, auth: Option<ProxyAuth> },
+    SocksProxy {
+        host: String,
+        port: u16,
+        version: u8,
+        auth: Option<ProxyAuth>,
+    },
 
     // === ADDITIONAL WHISTLE ACTIONS ===
-
     /// JSON body response (jsonBody://)
     JsonBody { value: serde_json::Value },
 
@@ -900,13 +999,25 @@ pub enum RuleAction {
     Mock { path: PathBuf },
 
     /// Replace content in HTML (htmlReplace://)
-    HtmlReplace { pattern: String, replacement: String, regex: bool },
+    HtmlReplace {
+        pattern: String,
+        replacement: String,
+        regex: bool,
+    },
 
     /// Replace content in JavaScript (jsReplace://)
-    JsReplace { pattern: String, replacement: String, regex: bool },
+    JsReplace {
+        pattern: String,
+        replacement: String,
+        regex: bool,
+    },
 
     /// Replace content in CSS (cssReplace://)
-    CssReplace { pattern: String, replacement: String, regex: bool },
+    CssReplace {
+        pattern: String,
+        replacement: String,
+        regex: bool,
+    },
 
     /// Prepend to request body (reqPrepend://)
     RequestPrepend { content: String },
@@ -967,10 +1078,19 @@ pub struct CookieOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BodyContent {
-    Text { content: String, content_type: String },
-    Json { value: serde_json::Value },
-    File { path: PathBuf },
-    Base64 { data: String },
+    Text {
+        content: String,
+        content_type: String,
+    },
+    Json {
+        value: serde_json::Value,
+    },
+    File {
+        path: PathBuf,
+    },
+    Base64 {
+        data: String,
+    },
     Empty,
 }
 
@@ -997,7 +1117,10 @@ mod tests {
         assert!(pattern_matches("/api/i", "https://example.com/api/users"));
 
         // Test plain regex
-        assert!(pattern_matches("^https://.*\\.example\\.com", "https://api.example.com/test"));
+        assert!(pattern_matches(
+            "^https://.*\\.example\\.com",
+            "https://api.example.com/test"
+        ));
 
         // Test substring
         assert!(pattern_matches("/api", "https://example.com/api/users"));
@@ -1037,8 +1160,15 @@ mod tests {
     #[test]
     fn test_port_pattern() {
         let port = Pattern::Port(8080);
-        assert!(port.match_with_remainder("https://example.com/path", 8080).matched);
-        assert!(!port.match_with_remainder("https://example.com/path", 443).matched);
+        assert!(
+            port.match_with_remainder("https://example.com/path", 8080)
+                .matched
+        );
+        assert!(
+            !port
+                .match_with_remainder("https://example.com/path", 443)
+                .matched
+        );
     }
 
     #[test]
@@ -1049,11 +1179,23 @@ mod tests {
             path: Some("/api".to_string()),
         };
         // /api/users — boundary char is /
-        assert!(pattern.match_with_remainder("https://example.com/api/users", 443).matched);
+        assert!(
+            pattern
+                .match_with_remainder("https://example.com/api/users", 443)
+                .matched
+        );
         // /api?q=1 — boundary char is ?
-        assert!(pattern.match_with_remainder("https://example.com/api?q=1", 443).matched);
+        assert!(
+            pattern
+                .match_with_remainder("https://example.com/api?q=1", 443)
+                .matched
+        );
         // /api-v2 — boundary char is - (not a separator)
-        assert!(!pattern.match_with_remainder("https://example.com/api-v2", 443).matched);
+        assert!(
+            !pattern
+                .match_with_remainder("https://example.com/api-v2", 443)
+                .matched
+        );
     }
 
     #[test]
@@ -1063,8 +1205,14 @@ mod tests {
             path: Some("/api".to_string()),
         };
         // Should match any protocol
-        assert!(ns.match_with_remainder("https://example.com/api/users", 443).matched);
-        assert!(ns.match_with_remainder("http://example.com/api/users", 80).matched);
+        assert!(
+            ns.match_with_remainder("https://example.com/api/users", 443)
+                .matched
+        );
+        assert!(
+            ns.match_with_remainder("http://example.com/api/users", 80)
+                .matched
+        );
     }
 
     #[test]
@@ -1098,13 +1246,25 @@ mod tests {
     #[test]
     fn test_whistle_wildcard_multi_star() {
         // ** in domain = any chars (no slash)
-        assert!(whistle_wildcard_match("https://**.example.com/", "https://sub.example.com/"));
-        assert!(whistle_wildcard_match("https://**.example.com/", "https://deep.sub.example.com/"));
+        assert!(whistle_wildcard_match(
+            "https://**.example.com/",
+            "https://sub.example.com/"
+        ));
+        assert!(whistle_wildcard_match(
+            "https://**.example.com/",
+            "https://deep.sub.example.com/"
+        ));
 
         // ** in path = any path
-        assert!(whistle_wildcard_match("https://example.com/**", "https://example.com/a/b/c"));
+        assert!(whistle_wildcard_match(
+            "https://example.com/**",
+            "https://example.com/a/b/c"
+        ));
 
         // *** in path = anything
-        assert!(whistle_wildcard_match("https://example.com/api/***", "https://example.com/api/a/b?q=1"));
+        assert!(whistle_wildcard_match(
+            "https://example.com/api/***",
+            "https://example.com/api/a/b?q=1"
+        ));
     }
 }

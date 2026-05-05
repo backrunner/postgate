@@ -4,10 +4,9 @@
 //!
 //! * `{name}`      — plain substitution, the value's content is returned verbatim
 //! * `` `{name}` ``  — template substitution, `${var}` placeholders inside the
-//!                    resolved content are expanded against [`RequestCtx`]
+//!   resolved content are expanded against [`RequestCtx`]
 //! * anything else — returned unchanged (the caller passes the raw action arg
-//!                    through the resolver unconditionally, so non-references
-//!                    are a no-op)
+//!   through the resolver unconditionally, so non-references are a no-op)
 //!
 //! Precedence: inline rule-group definitions → global store. Missing lookups
 //! resolve to an empty string (whistle behaviour). Recursion is capped to
@@ -207,7 +206,11 @@ fn resolve_nested_refs(
 /// Whether `name` is present in either the inline scope or the global store.
 /// Used to decide if an in-text `{name}` should be treated as a reference or
 /// left alone (e.g. JS destructuring).
-fn has_entry(name: &str, inline: &HashMap<String, String>, store: &DashMap<String, String>) -> bool {
+fn has_entry(
+    name: &str,
+    inline: &HashMap<String, String>,
+    store: &DashMap<String, String>,
+) -> bool {
     inline.contains_key(name) || store.contains_key(name)
 }
 
@@ -498,10 +501,7 @@ const g = () => ({y});
             &RequestCtx::empty(),
             0,
         );
-        assert_eq!(
-            out,
-            "Bearer secret and function f(){return {unknown};}"
-        );
+        assert_eq!(out, "Bearer secret and function f(){return {unknown};}");
     }
 
     #[test]

@@ -37,11 +37,7 @@ impl<'a> ResolveCtx<'a> {
 /// Resolve a whistle-style reference using the supplied inline+global maps.
 /// Returns the input unchanged when either the store or ctx is absent, or
 /// when the input contains no references.
-fn resolve_ref(
-    arg: &str,
-    inline: &HashMap<String, String>,
-    res: &ResolveCtx<'_>,
-) -> String {
+fn resolve_ref(arg: &str, inline: &HashMap<String, String>, res: &ResolveCtx<'_>) -> String {
     match (res.store, res.ctx) {
         (Some(store), Some(ctx)) => resolve_str(arg, inline, store, ctx, 0),
         // No store but we still honor inline definitions so inline values
@@ -58,11 +54,7 @@ fn resolve_ref(
     }
 }
 
-fn resolve_bytes(
-    arg: &str,
-    inline: &HashMap<String, String>,
-    res: &ResolveCtx<'_>,
-) -> Bytes {
+fn resolve_bytes(arg: &str, inline: &HashMap<String, String>, res: &ResolveCtx<'_>) -> Bytes {
     Bytes::from(resolve_ref(arg, inline, res))
 }
 
@@ -291,6 +283,7 @@ pub fn apply_request_rules(
 /// resolution. Callers with access to the app state's values store should
 /// prefer this entry point; the older [`apply_request_rules`] is a
 /// convenience wrapper for tests and legacy callers.
+#[allow(clippy::collapsible_match)]
 pub fn apply_request_rules_with_values(
     matched_rules: &[MatchedRule],
     url: &str,
@@ -317,10 +310,7 @@ pub fn apply_request_rules_with_values(
 
         // Check filters if present
         if let Some(filters) = &rule.filters {
-            let protocol = parsed_url
-                .as_ref()
-                .map(|u| u.scheme())
-                .unwrap_or("http");
+            let protocol = parsed_url.as_ref().map(|u| u.scheme()).unwrap_or("http");
             let port = parsed_url
                 .as_ref()
                 .and_then(|u| u.port())
@@ -346,7 +336,9 @@ pub fn apply_request_rules_with_values(
                         inline,
                         res,
                     );
-                    modification.headers_to_remove.extend(modifications.remove.clone());
+                    modification
+                        .headers_to_remove
+                        .extend(modifications.remove.clone());
                 }
 
                 RuleAction::RequestBody { content } => {
@@ -355,11 +347,15 @@ pub fn apply_request_rules_with_values(
 
                 RuleAction::UrlParams { modifications } => {
                     if let Some(ref url) = parsed_url {
-                        modification.query_params = Some(apply_url_param_modifications(url, modifications));
+                        modification.query_params =
+                            Some(apply_url_param_modifications(url, modifications));
                     }
                 }
 
-                RuleAction::PathReplace { pattern, replacement } => {
+                RuleAction::PathReplace {
+                    pattern,
+                    replacement,
+                } => {
                     if let Some(ref url) = parsed_url {
                         let path = url.path();
                         let new_path = if pattern.starts_with('/') || pattern.starts_with('^') {
@@ -378,15 +374,21 @@ pub fn apply_request_rules_with_values(
 
                 RuleAction::Method { method: new_method } => {
                     // Method modification - stored in headers for now
-                    modification.headers.insert(":method".to_string(), new_method.clone());
+                    modification
+                        .headers
+                        .insert(":method".to_string(), new_method.clone());
                 }
 
                 RuleAction::UserAgent { value } => {
-                    modification.headers.insert("user-agent".to_string(), value.clone());
+                    modification
+                        .headers
+                        .insert("user-agent".to_string(), value.clone());
                 }
 
                 RuleAction::Referer { value } => {
-                    modification.headers.insert("referer".to_string(), value.clone());
+                    modification
+                        .headers
+                        .insert("referer".to_string(), value.clone());
                 }
 
                 RuleAction::Auth { username, password } => {
@@ -395,7 +397,9 @@ pub fn apply_request_rules_with_values(
                         &base64::engine::general_purpose::STANDARD,
                         credentials.as_bytes(),
                     );
-                    modification.headers.insert("authorization".to_string(), format!("Basic {}", encoded));
+                    modification
+                        .headers
+                        .insert("authorization".to_string(), format!("Basic {}", encoded));
                 }
 
                 RuleAction::RequestCookies { cookies } => {
@@ -404,20 +408,28 @@ pub fn apply_request_rules_with_values(
                         .map(|(k, v)| format!("{}={}", k, v))
                         .collect::<Vec<_>>()
                         .join("; ");
-                    
+
                     if let Some(existing) = modification.headers.get_mut("cookie") {
                         existing.push_str("; ");
                         existing.push_str(&cookie_str);
                     } else {
-                        modification.headers.insert("cookie".to_string(), cookie_str);
+                        modification
+                            .headers
+                            .insert("cookie".to_string(), cookie_str);
                     }
                 }
 
                 RuleAction::ForwardedFor { value } => {
-                    modification.headers.insert("x-forwarded-for".to_string(), value.clone());
+                    modification
+                        .headers
+                        .insert("x-forwarded-for".to_string(), value.clone());
                 }
 
-                RuleAction::RequestReplace { pattern, replacement, regex } => {
+                RuleAction::RequestReplace {
+                    pattern,
+                    replacement,
+                    regex,
+                } => {
                     if let Some(ref body) = modification.body {
                         let body_str = String::from_utf8_lossy(body);
                         let new_body = if *regex {
@@ -433,12 +445,18 @@ pub fn apply_request_rules_with_values(
                     }
                 }
 
-                RuleAction::RequestCors { origin, credentials } => {
+                RuleAction::RequestCors {
+                    origin,
+                    credentials,
+                } => {
                     if let Some(o) = origin {
                         modification.headers.insert("origin".to_string(), o.clone());
                     }
                     if *credentials {
-                        modification.headers.insert("access-control-request-credentials".to_string(), "true".to_string());
+                        modification.headers.insert(
+                            "access-control-request-credentials".to_string(),
+                            "true".to_string(),
+                        );
                     }
                 }
 
@@ -500,7 +518,10 @@ pub fn apply_request_rules_with_values(
 
                 RuleAction::HtmlBody { content } => {
                     let mut headers = HashMap::new();
-                    headers.insert("content-type".to_string(), "text/html; charset=utf-8".to_string());
+                    headers.insert(
+                        "content-type".to_string(),
+                        "text/html; charset=utf-8".to_string(),
+                    );
                     modification.short_circuit = Some(ShortCircuitResponse {
                         status: 200,
                         headers,
@@ -510,7 +531,10 @@ pub fn apply_request_rules_with_values(
 
                 RuleAction::JsBody { content } => {
                     let mut headers = HashMap::new();
-                    headers.insert("content-type".to_string(), "application/javascript; charset=utf-8".to_string());
+                    headers.insert(
+                        "content-type".to_string(),
+                        "application/javascript; charset=utf-8".to_string(),
+                    );
                     modification.short_circuit = Some(ShortCircuitResponse {
                         status: 200,
                         headers,
@@ -520,7 +544,10 @@ pub fn apply_request_rules_with_values(
 
                 RuleAction::CssBody { content } => {
                     let mut headers = HashMap::new();
-                    headers.insert("content-type".to_string(), "text/css; charset=utf-8".to_string());
+                    headers.insert(
+                        "content-type".to_string(),
+                        "text/css; charset=utf-8".to_string(),
+                    );
                     modification.short_circuit = Some(ShortCircuitResponse {
                         status: 200,
                         headers,
@@ -625,7 +652,12 @@ pub fn apply_request_rules_with_values(
                         }),
                     });
                 }
-                RuleAction::SocksProxy { host, port, version, auth } => {
+                RuleAction::SocksProxy {
+                    host,
+                    port,
+                    version,
+                    auth,
+                } => {
                     let kind = if *version == 4 {
                         UpstreamProxyKind::Socks4
                     } else {
@@ -647,10 +679,14 @@ pub fn apply_request_rules_with_values(
                 // flags are wired into the proxy; the rest are recorded so
                 // plugins / reporting can see them.
                 RuleAction::Enable { features } => {
-                    modification.enabled_features.extend(features.iter().cloned());
+                    modification
+                        .enabled_features
+                        .extend(features.iter().cloned());
                 }
                 RuleAction::Disable { features } => {
-                    modification.disabled_features.extend(features.iter().cloned());
+                    modification
+                        .disabled_features
+                        .extend(features.iter().cloned());
                 }
 
                 _ => {
@@ -687,6 +723,7 @@ pub fn apply_response_rules(
 
 /// Apply rules to a response with whistle-compatible `{name}` reference
 /// resolution. See [`apply_request_rules_with_values`] for the rationale.
+#[allow(clippy::collapsible_match, clippy::too_many_arguments)]
 pub fn apply_response_rules_with_values(
     matched_rules: &[MatchedRule],
     url: &str,
@@ -714,10 +751,7 @@ pub fn apply_response_rules_with_values(
 
         // Check filters if present
         if let Some(filters) = &rule.filters {
-            let protocol = parsed_url
-                .as_ref()
-                .map(|u| u.scheme())
-                .unwrap_or("http");
+            let protocol = parsed_url.as_ref().map(|u| u.scheme()).unwrap_or("http");
             let port = parsed_url
                 .as_ref()
                 .and_then(|u| u.port())
@@ -737,14 +771,20 @@ pub fn apply_response_rules_with_values(
                         inline,
                         res,
                     );
-                    modification.headers_to_remove.extend(modifications.remove.clone());
+                    modification
+                        .headers_to_remove
+                        .extend(modifications.remove.clone());
                 }
 
                 RuleAction::ResponseBody { content } => {
                     modification.body = Some(resolve_body_content(content, inline, res));
                 }
 
-                RuleAction::ResponseReplace { pattern, replacement, regex } => {
+                RuleAction::ResponseReplace {
+                    pattern,
+                    replacement,
+                    regex,
+                } => {
                     if let Some(ref body) = modification.body {
                         let body_str = String::from_utf8_lossy(body);
                         let new_body = if *regex {
@@ -767,7 +807,9 @@ pub fn apply_response_rules_with_values(
                 }
 
                 RuleAction::ResponseType { content_type } => {
-                    modification.headers.insert("content-type".to_string(), content_type.clone());
+                    modification
+                        .headers
+                        .insert("content-type".to_string(), content_type.clone());
                 }
 
                 RuleAction::ResponseCharset { charset } => {
@@ -783,27 +825,46 @@ pub fn apply_response_rules_with_values(
                         Some(name) => format!("attachment; filename=\"{}\"", name),
                         None => "attachment".to_string(),
                     };
-                    modification.headers.insert("content-disposition".to_string(), value);
+                    modification
+                        .headers
+                        .insert("content-disposition".to_string(), value);
                 }
 
-                RuleAction::ResponseCors { origin, methods, headers, credentials, max_age } => {
+                RuleAction::ResponseCors {
+                    origin,
+                    methods,
+                    headers,
+                    credentials,
+                    max_age,
+                } => {
                     let origin_value = origin.clone().unwrap_or_else(|| "*".to_string());
-                    modification.headers.insert("access-control-allow-origin".to_string(), origin_value);
-                    
+                    modification
+                        .headers
+                        .insert("access-control-allow-origin".to_string(), origin_value);
+
                     if let Some(m) = methods {
-                        modification.headers.insert("access-control-allow-methods".to_string(), m.clone());
+                        modification
+                            .headers
+                            .insert("access-control-allow-methods".to_string(), m.clone());
                     }
-                    
+
                     if let Some(h) = headers {
-                        modification.headers.insert("access-control-allow-headers".to_string(), h.clone());
+                        modification
+                            .headers
+                            .insert("access-control-allow-headers".to_string(), h.clone());
                     }
-                    
+
                     if *credentials {
-                        modification.headers.insert("access-control-allow-credentials".to_string(), "true".to_string());
+                        modification.headers.insert(
+                            "access-control-allow-credentials".to_string(),
+                            "true".to_string(),
+                        );
                     }
-                    
+
                     if let Some(age) = max_age {
-                        modification.headers.insert("access-control-max-age".to_string(), age.to_string());
+                        modification
+                            .headers
+                            .insert("access-control-max-age".to_string(), age.to_string());
                     }
                 }
 
@@ -814,22 +875,16 @@ pub fn apply_response_rules_with_values(
                 RuleAction::HtmlAppend { content } => {
                     if is_html(content_type) {
                         let resolved = resolve_ref(content, inline, res);
-                        modification.body = Some(append_to_html(
-                            modification.body.as_ref(),
-                            &resolved,
-                            false,
-                        ));
+                        modification.body =
+                            Some(append_to_html(modification.body.as_ref(), &resolved, false));
                     }
                 }
 
                 RuleAction::HtmlPrepend { content } => {
                     if is_html(content_type) {
                         let resolved = resolve_ref(content, inline, res);
-                        modification.body = Some(append_to_html(
-                            modification.body.as_ref(),
-                            &resolved,
-                            true,
-                        ));
+                        modification.body =
+                            Some(append_to_html(modification.body.as_ref(), &resolved, true));
                     }
                 }
 
@@ -837,11 +892,8 @@ pub fn apply_response_rules_with_values(
                     let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
                         let script = format!("<script>{}</script>", resolved);
-                        modification.body = Some(append_to_html(
-                            modification.body.as_ref(),
-                            &script,
-                            false,
-                        ));
+                        modification.body =
+                            Some(append_to_html(modification.body.as_ref(), &script, false));
                     } else if is_js(content_type) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = body.to_vec();
@@ -856,11 +908,8 @@ pub fn apply_response_rules_with_values(
                     let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
                         let script = format!("<script>{}</script>", resolved);
-                        modification.body = Some(append_to_html(
-                            modification.body.as_ref(),
-                            &script,
-                            true,
-                        ));
+                        modification.body =
+                            Some(append_to_html(modification.body.as_ref(), &script, true));
                     } else if is_js(content_type) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = resolved.as_bytes().to_vec();
@@ -875,11 +924,8 @@ pub fn apply_response_rules_with_values(
                     let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
                         let style = format!("<style>{}</style>", resolved);
-                        modification.body = Some(append_to_html(
-                            modification.body.as_ref(),
-                            &style,
-                            false,
-                        ));
+                        modification.body =
+                            Some(append_to_html(modification.body.as_ref(), &style, false));
                     } else if is_css(content_type) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = body.to_vec();
@@ -894,11 +940,8 @@ pub fn apply_response_rules_with_values(
                     let resolved = resolve_ref(content, inline, res);
                     if is_html(content_type) {
                         let style = format!("<style>{}</style>", resolved);
-                        modification.body = Some(append_to_html(
-                            modification.body.as_ref(),
-                            &style,
-                            true,
-                        ));
+                        modification.body =
+                            Some(append_to_html(modification.body.as_ref(), &style, true));
                     } else if is_css(content_type) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = resolved.as_bytes().to_vec();
@@ -986,9 +1029,10 @@ pub fn apply_response_rules_with_values(
                         s.push_str(v);
                         s.push('\n');
                     }
-                    modification
-                        .headers
-                        .insert("content-type".to_string(), "text/plain; charset=utf-8".to_string());
+                    modification.headers.insert(
+                        "content-type".to_string(),
+                        "text/plain; charset=utf-8".to_string(),
+                    );
                     modification.body = Some(Bytes::from(s));
                 }
 
@@ -1027,17 +1071,29 @@ pub fn apply_response_rules_with_values(
                 // `htmlReplace://` / `jsReplace://` / `cssReplace://`
                 // — content-type-gated string/regex replacements. Essentially
                 // `resReplace://` scoped to a specific mime family.
-                RuleAction::HtmlReplace { pattern, replacement, regex } => {
+                RuleAction::HtmlReplace {
+                    pattern,
+                    replacement,
+                    regex,
+                } => {
                     if is_html(content_type) {
                         apply_body_replace(&mut modification.body, pattern, replacement, *regex);
                     }
                 }
-                RuleAction::JsReplace { pattern, replacement, regex } => {
+                RuleAction::JsReplace {
+                    pattern,
+                    replacement,
+                    regex,
+                } => {
                     if is_js(content_type) {
                         apply_body_replace(&mut modification.body, pattern, replacement, *regex);
                     }
                 }
-                RuleAction::CssReplace { pattern, replacement, regex } => {
+                RuleAction::CssReplace {
+                    pattern,
+                    replacement,
+                    regex,
+                } => {
                     if is_css(content_type) {
                         apply_body_replace(&mut modification.body, pattern, replacement, *regex);
                     }
@@ -1255,12 +1311,7 @@ fn is_css(content_type: Option<&str>) -> bool {
 /// String- or regex-replace inside a response body. Used by resReplace,
 /// htmlReplace, jsReplace, cssReplace. Falls back to literal `.replace`
 /// when the supplied pattern doesn't compile as a regex.
-fn apply_body_replace(
-    body: &mut Option<Bytes>,
-    pattern: &str,
-    replacement: &str,
-    regex: bool,
-) {
+fn apply_body_replace(body: &mut Option<Bytes>, pattern: &str, replacement: &str, regex: bool) {
     if let Some(current) = body.as_ref() {
         let body_str = String::from_utf8_lossy(current);
         let new_body = if regex {
@@ -1424,14 +1475,34 @@ mod tests {
 
         // Should require buffering:
         for action in [
-            RuleAction::JsonBody { value: serde_json::json!({}) },
-            RuleAction::HtmlReplace { pattern: "a".into(), replacement: "b".into(), regex: false },
-            RuleAction::JsReplace { pattern: "a".into(), replacement: "b".into(), regex: false },
-            RuleAction::CssReplace { pattern: "a".into(), replacement: "b".into(), regex: false },
-            RuleAction::ResponsePrepend { content: "x".into() },
-            RuleAction::ResponseAppend { content: "x".into() },
+            RuleAction::JsonBody {
+                value: serde_json::json!({}),
+            },
+            RuleAction::HtmlReplace {
+                pattern: "a".into(),
+                replacement: "b".into(),
+                regex: false,
+            },
+            RuleAction::JsReplace {
+                pattern: "a".into(),
+                replacement: "b".into(),
+                regex: false,
+            },
+            RuleAction::CssReplace {
+                pattern: "a".into(),
+                replacement: "b".into(),
+                regex: false,
+            },
+            RuleAction::ResponsePrepend {
+                content: "x".into(),
+            },
+            RuleAction::ResponseAppend {
+                content: "x".into(),
+            },
             RuleAction::Echo,
-            RuleAction::Mock { path: "/tmp/x".into() },
+            RuleAction::Mock {
+                path: "/tmp/x".into(),
+            },
         ] {
             assert!(
                 rules_require_response_body(&[mk_rule(action.clone())]),
@@ -1442,10 +1513,19 @@ mod tests {
 
         // Should NOT require buffering:
         for action in [
-            RuleAction::ResponseHeaders { modifications: HeaderModifications::default() },
-            RuleAction::DeleteHeaders { headers: vec!["X-Foo".into()] },
-            RuleAction::ResponseType { content_type: "text/plain".into() },
-            RuleAction::Delay { request_ms: None, response_ms: Some(100) },
+            RuleAction::ResponseHeaders {
+                modifications: HeaderModifications::default(),
+            },
+            RuleAction::DeleteHeaders {
+                headers: vec!["X-Foo".into()],
+            },
+            RuleAction::ResponseType {
+                content_type: "text/plain".into(),
+            },
+            RuleAction::Delay {
+                request_ms: None,
+                response_ms: Some(100),
+            },
         ] {
             assert!(
                 !rules_require_response_body(&[mk_rule(action.clone())]),

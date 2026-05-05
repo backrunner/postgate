@@ -18,7 +18,7 @@ use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::tls::{create_tls_connector_with_alpn, parse_server_name};
 use crate::rules::{ProxyCreds, UpstreamProxy, UpstreamProxyKind};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
@@ -59,9 +59,8 @@ async fn forward_via_proxy_inner(
 ) -> Result<(Response<()>, CapturedBody)> {
     match proxy.kind {
         UpstreamProxyKind::Socks4 | UpstreamProxyKind::Socks5 => {
-            let parsed = Url::parse(absolute_url).map_err(|e| {
-                PostGateError::Proxy(format!("Invalid upstream URL: {}", e))
-            })?;
+            let parsed = Url::parse(absolute_url)
+                .map_err(|e| PostGateError::Proxy(format!("Invalid upstream URL: {}", e)))?;
             let target_is_https = parsed.scheme() == "https";
             let target_host = parsed
                 .host_str()
@@ -101,9 +100,8 @@ async fn forward_via_proxy_inner(
             }
         }
         UpstreamProxyKind::Http | UpstreamProxyKind::Https => {
-            let parsed = Url::parse(absolute_url).map_err(|e| {
-                PostGateError::Proxy(format!("Invalid upstream URL: {}", e))
-            })?;
+            let parsed = Url::parse(absolute_url)
+                .map_err(|e| PostGateError::Proxy(format!("Invalid upstream URL: {}", e)))?;
             let target_is_https = parsed.scheme() == "https";
 
             // Connect to the proxy. For HTTPS proxies we additionally TLS-wrap
@@ -121,13 +119,7 @@ async fn forward_via_proxy_inner(
                     .ok_or_else(|| PostGateError::Proxy("Missing host in URL".into()))?
                     .to_string();
                 let target_port = parsed.port().unwrap_or(443);
-                let tunneled = connect_tunnel(
-                    tcp,
-                    proxy,
-                    &target_host,
-                    target_port,
-                )
-                .await?;
+                let tunneled = connect_tunnel(tcp, proxy, &target_host, target_port).await?;
 
                 // TLS inside the CONNECT tunnel.
                 let connector = create_tls_connector_with_alpn(&[b"http/1.1"])?;
@@ -155,10 +147,7 @@ async fn connect_tunnel(
     target_port: u16,
 ) -> Result<TcpStream> {
     let authority = format!("{}:{}", target_host, target_port);
-    let mut req = format!(
-        "CONNECT {} HTTP/1.1\r\nHost: {}\r\n",
-        authority, authority
-    );
+    let mut req = format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n", authority, authority);
     if let Some(ref creds) = proxy.auth {
         req.push_str(&proxy_auth_header(creds));
     }
@@ -293,7 +282,10 @@ where
     });
 
     let path = target_url.path();
-    let query = target_url.query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let query = target_url
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
     let uri = format!("{}{}", path, query);
     let host_value = if let Some(port) = target_url.port() {
         format!("{}:{}", target_url.host_str().unwrap_or(""), port)
@@ -449,9 +441,7 @@ async fn socks5_handshake(
     // We always send ATYP=domain so the SOCKS server resolves the target.
     let host_bytes = target_host.as_bytes();
     if host_bytes.len() > 255 {
-        return Err(PostGateError::Proxy(
-            "SOCKS5 target host >255 bytes".into(),
-        ));
+        return Err(PostGateError::Proxy("SOCKS5 target host >255 bytes".into()));
     }
     let mut req = Vec::with_capacity(7 + host_bytes.len());
     req.push(0x05); // VER

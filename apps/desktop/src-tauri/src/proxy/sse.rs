@@ -42,7 +42,9 @@ impl SseParser {
 
         // Process complete lines
         while let Some(newline_pos) = self.buffer.find('\n') {
-            let line = self.buffer[..newline_pos].trim_end_matches('\r').to_string();
+            let line = self.buffer[..newline_pos]
+                .trim_end_matches('\r')
+                .to_string();
             self.buffer = self.buffer[newline_pos + 1..].to_string();
 
             if line.is_empty() {
@@ -125,15 +127,15 @@ mod tests {
     #[test]
     fn test_sse_parser_chunked_input() {
         let mut parser = SseParser::new();
-        
+
         // First chunk - incomplete
         let events1 = parser.feed(b"data: hel");
         assert!(events1.is_empty());
-        
+
         // Second chunk - still incomplete
         let events2 = parser.feed(b"lo wor");
         assert!(events2.is_empty());
-        
+
         // Third chunk - completes the event
         let events3 = parser.feed(b"ld\n\n");
         assert_eq!(events3.len(), 1);

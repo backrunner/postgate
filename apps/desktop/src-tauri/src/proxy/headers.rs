@@ -390,7 +390,10 @@ mod tests {
         map.append(n2, v2);
 
         let flat = headermap_to_flat(&map);
-        assert_eq!(flat.get("cookie"), Some(&"session=abc; theme=dark".to_string()));
+        assert_eq!(
+            flat.get("cookie"),
+            Some(&"session=abc; theme=dark".to_string())
+        );
     }
 
     #[test]
@@ -411,9 +414,18 @@ mod tests {
     fn forward_request_preserves_multi_value_cookie_when_untouched() {
         // No rule modifies cookies → both original values must survive.
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("cookie"), HeaderValue::from_static("session=abc"));
-        orig.append(HeaderName::from_static("cookie"), HeaderValue::from_static("theme=dark"));
-        orig.append(HeaderName::from_static("user-agent"), HeaderValue::from_static("UA/1"));
+        orig.append(
+            HeaderName::from_static("cookie"),
+            HeaderValue::from_static("session=abc"),
+        );
+        orig.append(
+            HeaderName::from_static("cookie"),
+            HeaderValue::from_static("theme=dark"),
+        );
+        orig.append(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_static("UA/1"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         // Modification is identical — no rule touched anything.
@@ -431,9 +443,18 @@ mod tests {
     #[test]
     fn forward_request_overwrites_when_rule_changed_header() {
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("cookie"), HeaderValue::from_static("session=abc"));
-        orig.append(HeaderName::from_static("cookie"), HeaderValue::from_static("theme=dark"));
-        orig.append(HeaderName::from_static("user-agent"), HeaderValue::from_static("UA/1"));
+        orig.append(
+            HeaderName::from_static("cookie"),
+            HeaderValue::from_static("session=abc"),
+        );
+        orig.append(
+            HeaderName::from_static("cookie"),
+            HeaderValue::from_static("theme=dark"),
+        );
+        orig.append(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_static("UA/1"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         let mut modified = orig_flat.clone();
@@ -453,8 +474,14 @@ mod tests {
     #[test]
     fn forward_request_removes_explicit_headers() {
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("authorization"), HeaderValue::from_static("Bearer x"));
-        orig.append(HeaderName::from_static("cookie"), HeaderValue::from_static("session=abc"));
+        orig.append(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer x"),
+        );
+        orig.append(
+            HeaderName::from_static("cookie"),
+            HeaderValue::from_static("session=abc"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         let modified = orig_flat.clone();
@@ -468,10 +495,22 @@ mod tests {
     #[test]
     fn forward_request_strips_hop_by_hop() {
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("connection"), HeaderValue::from_static("keep-alive"));
-        orig.append(HeaderName::from_static("keep-alive"), HeaderValue::from_static("timeout=5"));
-        orig.append(HeaderName::from_static("host"), HeaderValue::from_static("example.com"));
-        orig.append(HeaderName::from_static("accept"), HeaderValue::from_static("*/*"));
+        orig.append(
+            HeaderName::from_static("connection"),
+            HeaderValue::from_static("keep-alive"),
+        );
+        orig.append(
+            HeaderName::from_static("keep-alive"),
+            HeaderValue::from_static("timeout=5"),
+        );
+        orig.append(
+            HeaderName::from_static("host"),
+            HeaderValue::from_static("example.com"),
+        );
+        orig.append(
+            HeaderName::from_static("accept"),
+            HeaderValue::from_static("*/*"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         let modified = orig_flat.clone();
@@ -486,9 +525,18 @@ mod tests {
     #[test]
     fn forward_response_preserves_multiple_set_cookie() {
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("set-cookie"), HeaderValue::from_static("a=1; Path=/"));
-        orig.append(HeaderName::from_static("set-cookie"), HeaderValue::from_static("b=2; Path=/"));
-        orig.append(HeaderName::from_static("content-type"), HeaderValue::from_static("text/html"));
+        orig.append(
+            HeaderName::from_static("set-cookie"),
+            HeaderValue::from_static("a=1; Path=/"),
+        );
+        orig.append(
+            HeaderName::from_static("set-cookie"),
+            HeaderValue::from_static("b=2; Path=/"),
+        );
+        orig.append(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("text/html"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         let modification = ResponseModification {
@@ -508,7 +556,10 @@ mod tests {
     #[test]
     fn forward_response_appends_rescookies_as_separate_headers() {
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("set-cookie"), HeaderValue::from_static("a=1"));
+        orig.append(
+            HeaderName::from_static("set-cookie"),
+            HeaderValue::from_static("a=1"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         let modification = ResponseModification {
@@ -533,9 +584,18 @@ mod tests {
     #[test]
     fn forward_response_strips_stale_length_when_body_replaced() {
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("content-length"), HeaderValue::from_static("123"));
-        orig.append(HeaderName::from_static("content-encoding"), HeaderValue::from_static("gzip"));
-        orig.append(HeaderName::from_static("content-type"), HeaderValue::from_static("text/plain"));
+        orig.append(
+            HeaderName::from_static("content-length"),
+            HeaderValue::from_static("123"),
+        );
+        orig.append(
+            HeaderName::from_static("content-encoding"),
+            HeaderValue::from_static("gzip"),
+        );
+        orig.append(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("text/plain"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         let modification = ResponseModification {
@@ -544,15 +604,24 @@ mod tests {
         };
 
         let out = build_forward_response_headers(&orig, &orig_flat, &modification, Some(42));
-        assert_eq!(out.get("content-length").and_then(|v| v.to_str().ok()), Some("42"));
+        assert_eq!(
+            out.get("content-length").and_then(|v| v.to_str().ok()),
+            Some("42")
+        );
         assert!(out.get("content-encoding").is_none());
     }
 
     #[test]
     fn forward_response_removes_explicit_headers() {
         let mut orig = HeaderMap::new();
-        orig.append(HeaderName::from_static("x-powered-by"), HeaderValue::from_static("magic"));
-        orig.append(HeaderName::from_static("content-type"), HeaderValue::from_static("text/plain"));
+        orig.append(
+            HeaderName::from_static("x-powered-by"),
+            HeaderValue::from_static("magic"),
+        );
+        orig.append(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("text/plain"),
+        );
 
         let orig_flat = headermap_to_flat(&orig);
         let modification = ResponseModification {

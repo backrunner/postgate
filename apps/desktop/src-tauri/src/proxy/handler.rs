@@ -3,6 +3,7 @@ use crate::debug::ScriptInjector;
 use crate::error::Result;
 use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::error_page::ProxyErrorKind;
 use crate::proxy::headers::{
     apply_headers_to_response_builder, build_forward_request_headers,
     build_forward_response_headers, flat_to_headermap, headermap_to_flat,
@@ -101,7 +102,9 @@ async fn handle_request(
     let method = req.method().to_string();
     let uri = req.uri().to_string();
     let host = extract_host(&req);
-    let path = req.uri().path_and_query()
+    let path = req
+        .uri()
+        .path_and_query()
         .map(|pq| pq.to_string())
         .unwrap_or_else(|| "/".to_string());
 
@@ -120,33 +123,68 @@ async fn handle_request(
 
     // Check if this is a WebSocket upgrade request
     if websocket::is_websocket_upgrade(&request_headers) {
-        return handle_websocket_upgrade(req, &request_id, timestamp, &host, &path, &request_headers, peer_addr, ctx).await;
+        return handle_websocket_upgrade(
+            req,
+            &request_id,
+            timestamp,
+            &host,
+            &path,
+            &request_headers,
+            peer_addr,
+            ctx,
+        )
+        .await;
     }
 
     // Match rules for this request
     // Extract protocol and port for filter matching
     let protocol = req.uri().scheme_str().unwrap_or("http").to_string();
-    let port = req.uri().port_u16().unwrap_or(if protocol == "https" { 443 } else { 80 });
-    let matched_rules = ctx.rule_engine.match_request(&method, &host, &path, &protocol, port, &request_headers);
-    let matched_rule_ids: Vec<String> = matched_rules.iter().map(|r| r.rule.raw_line.clone()).collect();
+    let port = req
+        .uri()
+        .port_u16()
+        .unwrap_or(if protocol == "https" { 443 } else { 80 });
+    let matched_rules =
+        ctx.rule_engine
+            .match_request(&method, &host, &path, &protocol, port, &request_headers);
+    let matched_rule_ids: Vec<String> = matched_rules
+        .iter()
+        .map(|r| r.rule.raw_line.clone())
+        .collect();
 
     // Collect request body first (needed for rule application)
     let (parts, body) = req.into_parts();
     let request_body = match collect_body(body, MAX_BODY_SIZE).await {
         Ok(b) => b,
         Err(e) => {
-            emit_error_event(&ctx, &request_id, timestamp, &method, &uri, &host, &path,
-                &request_headers, start_time.elapsed().as_millis() as u64, &e.to_string());
-            return Ok(error_response(502, &format!("Failed to read request body: {}", e)));
+            emit_error_event(
+                &ctx,
+                &request_id,
+                timestamp,
+                &method,
+                &uri,
+                &host,
+                &path,
+                &request_headers,
+                start_time.elapsed().as_millis() as u64,
+                &e.to_string(),
+            );
+            return Ok(error_response(
+                502,
+                ProxyErrorKind::Request,
+                &format!("Failed to read request body: {}", e),
+            ));
         }
     };
 
     let request_size = request_body.size as u64;
 
     // Store original request body
-    ctx.body_storage.store_request_body(&request_id, request_body.clone()).await;
+    ctx.body_storage
+        .store_request_body(&request_id, request_body.clone())
+        .await;
     // Persist request body
-    ctx.app_state.persist_body(request_id.clone(), request_body.data.clone(), true);
+    ctx.app_state
+        .persist_body(request_id.clone(), request_body.data.clone(), true);
 
     // Ensure the in-memory values store is populated so `{name}` references
     // in rule actions resolve on the first request after startup.
@@ -189,7 +227,11 @@ async fn handle_request(
         return Ok(Response::builder()
             .status(444) // nginx convention: "no response"
             .header("connection", "close")
-            .body(Empty::<Bytes>::new().map_err(|_: std::convert::Infallible| unreachable!()).boxed())
+            .body(
+                Empty::<Bytes>::new()
+                    .map_err(|_: std::convert::Infallible| unreachable!())
+                    .boxed(),
+            )
             .unwrap());
     }
 
@@ -221,16 +263,19 @@ async fn handle_request(
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
     if let Some(short_circuit) = request_modification.short_circuit {
         let duration = start_time.elapsed().as_millis() as u64;
-        
+
         // Store the short-circuit response as response body
         let response_body = CapturedBody {
             data: short_circuit.body.clone(),
             size: short_circuit.body.len(),
             truncated: false,
         };
-        ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
+        ctx.body_storage
+            .store_response_body(&request_id, response_body.clone())
+            .await;
         // Persist response body
-        ctx.app_state.persist_body(request_id.clone(), response_body.data.clone(), false);
+        ctx.app_state
+            .persist_body(request_id.clone(), response_body.data.clone(), false);
 
         // Emit completion event
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -272,7 +317,11 @@ async fn handle_request(
             builder = builder.header(k.as_str(), v.as_str());
         }
         return Ok(builder
-            .body(Full::new(short_circuit.body).map_err(|_| unreachable!()).boxed())
+            .body(
+                Full::new(short_circuit.body)
+                    .map_err(|_| unreachable!())
+                    .boxed(),
+            )
             .unwrap());
     }
 
@@ -296,24 +345,29 @@ async fn handle_request(
 
         let plugin_context = PluginRequestContext {
             rule_config: match &plugin_info.config {
-                serde_json::Value::Object(map) => map.iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
+                serde_json::Value::Object(map) => {
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                }
                 _ => std::collections::HashMap::new(),
             },
             matched_pattern: uri.clone(),
         };
 
         let plugin_manager = ctx.app_state.plugin_manager.read().await;
-        match plugin_manager.handle_request(&plugin_info.name, plugin_request, plugin_context).await {
+        match plugin_manager
+            .handle_request(&plugin_info.name, plugin_request, plugin_context)
+            .await
+        {
             Ok(Some(modified)) => {
                 let duration = start_time.elapsed().as_millis() as u64;
                 let decoded_body = if modified.body_base64 {
-                    modified.body.as_ref()
-                        .and_then(|b| base64::Engine::decode(
-                            &base64::engine::general_purpose::STANDARD,
-                            b,
-                        ).ok())
+                    modified
+                        .body
+                        .as_ref()
+                        .and_then(|b| {
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b)
+                                .ok()
+                        })
                         .map(Bytes::from)
                 } else {
                     modified.body.as_ref().map(|b| Bytes::from(b.clone()))
@@ -325,8 +379,11 @@ async fn handle_request(
                     size: body_bytes.len(),
                     truncated: false,
                 };
-                ctx.body_storage.store_response_body(&request_id, response_body.clone()).await;
-                ctx.app_state.persist_body(request_id.clone(), body_bytes.clone(), false);
+                ctx.body_storage
+                    .store_response_body(&request_id, response_body.clone())
+                    .await;
+                ctx.app_state
+                    .persist_body(request_id.clone(), body_bytes.clone(), false);
 
                 ctx.app_state.emit_request_event(&CapturedRequestEvent {
                     id: request_id.clone(),
@@ -365,7 +422,11 @@ async fn handle_request(
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!("Plugin handleRequest failed for {}: {}", plugin_info.name, e);
+                tracing::warn!(
+                    "Plugin handleRequest failed for {}: {}",
+                    plugin_info.name,
+                    e
+                );
             }
         }
     }
@@ -376,18 +437,20 @@ async fn handle_request(
     }
 
     // Use modified headers and body for the forwarded request
-    let modified_body = request_modification.body.unwrap_or(request_body.data.clone());
-    
+    let modified_body = request_modification
+        .body
+        .unwrap_or(request_body.data.clone());
+
     // Build the target URI using ForwardTarget for whistle-compatible path forwarding
     let target_uri = if let Some(target) = &request_modification.target_host {
         let remaining_path = request_modification.remaining_path.as_deref().unwrap_or("");
-        
+
         // Parse target and build final URL with remaining path
         match super::forward::ForwardTarget::parse(target, remaining_path, &protocol) {
             Ok(ft) => {
                 tracing::debug!(
-                    "Forwarding {} to {} (remaining: {})", 
-                    uri, 
+                    "Forwarding {} to {} (remaining: {})",
+                    uri,
                     ft.build_url(),
                     remaining_path
                 );
@@ -471,7 +534,11 @@ async fn handle_request(
                     start_time.elapsed().as_millis() as u64,
                     &format!("request body read failed: {}", e),
                 );
-                return Ok(error_response(502, &format!("Proxy error: {}", e)));
+                return Ok(error_response(
+                    502,
+                    ProxyErrorKind::Request,
+                    &format!("Failed to read proxied request body: {}", e),
+                ));
             }
         };
         // Use the multi-value-aware flattener so chained proxies (which
@@ -489,7 +556,10 @@ async fn handle_request(
             Some(proxy),
         )
         .await
-        .map(|(resp, body)| ForwardResult::Normal { response: resp, body })
+        .map(|(resp, body)| ForwardResult::Normal {
+            response: resp,
+            body,
+        })
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
     } else {
         forward_http_request_check_sse(
@@ -509,11 +579,16 @@ async fn handle_request(
     );
 
     match response {
-        Ok(ForwardResult::Sse { parts, body, content_type }) => {
+        Ok(ForwardResult::Sse {
+            parts,
+            body,
+            content_type,
+        }) => {
             // Handle SSE streaming response
             let status = parts.status.as_u16();
             let original_resp_headers: HeaderMap = parts.headers.clone();
-            let response_headers: HashMap<String, String> = headermap_to_flat(&original_resp_headers);
+            let response_headers: HashMap<String, String> =
+                headermap_to_flat(&original_resp_headers);
 
             // Emit started event with SSE protocol
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -543,7 +618,8 @@ async fn handle_request(
             let ctx_clone = ctx.clone();
 
             // Create a wrapper that captures SSE events while streaming
-            let wrapped_body = SseCapturingBody::new(body, request_id_clone, ctx_clone.app_state.clone());
+            let wrapped_body =
+                SseCapturingBody::new(body, request_id_clone, ctx_clone.app_state.clone());
 
             // Build streaming response — preserve multi-value headers
             // (particularly `Set-Cookie`) by starting from the original
@@ -560,7 +636,8 @@ async fn handle_request(
             // through. The client's TTFB then matches the upstream's TTFB.
             let status = parts.status.as_u16();
             let original_resp_headers: HeaderMap = parts.headers.clone();
-            let upstream_headers: HashMap<String, String> = headermap_to_flat(&original_resp_headers);
+            let upstream_headers: HashMap<String, String> =
+                headermap_to_flat(&original_resp_headers);
 
             // Apply non-body response rules (headers, status, cookies,
             // header-removes, delay). `response_modification.body` is
@@ -629,10 +706,14 @@ async fn handle_request(
             let builder = apply_headers_to_response_builder(builder, &final_header_map);
             Ok(builder.body(wrapped.boxed()).unwrap())
         }
-        Ok(ForwardResult::Normal { response: resp, body: response_body }) => {
+        Ok(ForwardResult::Normal {
+            response: resp,
+            body: response_body,
+        }) => {
             let status = resp.status().as_u16();
             let original_resp_headers: HeaderMap = resp.headers().clone();
-            let response_headers: HashMap<String, String> = headermap_to_flat(&original_resp_headers);
+            let response_headers: HashMap<String, String> =
+                headermap_to_flat(&original_resp_headers);
 
             let response_content_type = response_headers.get("content-type").cloned();
 
@@ -649,71 +730,89 @@ async fn handle_request(
             );
 
             // Apply plugin handleResponse if a plugin was matched
-            let (plugin_modified_body, plugin_modified_headers) = if let Some(ref plugin_info) = request_modification.plugin {
-                // Build PluginRequest from request data
-                let plugin_request = PluginRequest {
-                    id: request_id.clone(),
-                    method: method.clone(),
-                    url: uri.clone(),
-                    host: host.clone(),
-                    path: path.clone(),
-                    query: extract_query_params(&uri),
-                    headers: request_headers.clone(),
-                    body: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &request_body.data,
-                    )),
-                    body_base64: true,
-                    timestamp,
-                };
+            let (plugin_modified_body, plugin_modified_headers) =
+                if let Some(ref plugin_info) = request_modification.plugin {
+                    // Build PluginRequest from request data
+                    let plugin_request = PluginRequest {
+                        id: request_id.clone(),
+                        method: method.clone(),
+                        url: uri.clone(),
+                        host: host.clone(),
+                        path: path.clone(),
+                        query: extract_query_params(&uri),
+                        headers: request_headers.clone(),
+                        body: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &request_body.data,
+                        )),
+                        body_base64: true,
+                        timestamp,
+                    };
 
-                // Build PluginResponse from response data
-                let plugin_response = PluginResponse {
-                    status,
-                    headers: response_headers.clone(),
-                    body: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &response_body.data,
-                    )),
-                    body_base64: true,
-                };
+                    // Build PluginResponse from response data
+                    let plugin_response = PluginResponse {
+                        status,
+                        headers: response_headers.clone(),
+                        body: Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &response_body.data,
+                        )),
+                        body_base64: true,
+                    };
 
-                // Build context from rule config
-                let plugin_context = PluginRequestContext {
-                    rule_config: match &plugin_info.config {
-                        serde_json::Value::Object(map) => map.iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect(),
-                        _ => std::collections::HashMap::new(),
-                    },
-                    matched_pattern: uri.clone(),
-                };
+                    // Build context from rule config
+                    let plugin_context = PluginRequestContext {
+                        rule_config: match &plugin_info.config {
+                            serde_json::Value::Object(map) => {
+                                map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                            }
+                            _ => std::collections::HashMap::new(),
+                        },
+                        matched_pattern: uri.clone(),
+                    };
 
-                // Call plugin handleResponse
-                let plugin_manager = ctx.app_state.plugin_manager.read().await;
-                match plugin_manager.handle_response(&plugin_info.name, plugin_request, plugin_response, plugin_context).await {
-                    Ok(modified) => {
-                        // Decode the modified body if base64 encoded
-                        let decoded_body = if modified.body_base64 {
-                            modified.body.as_ref()
-                                .and_then(|b| base64::Engine::decode(
-                                    &base64::engine::general_purpose::STANDARD,
-                                    b,
-                                ).ok())
-                                .map(Bytes::from)
-                        } else {
-                            modified.body.as_ref().map(|b| Bytes::from(b.clone()))
-                        };
-                        (decoded_body, Some(modified.headers))
+                    // Call plugin handleResponse
+                    let plugin_manager = ctx.app_state.plugin_manager.read().await;
+                    match plugin_manager
+                        .handle_response(
+                            &plugin_info.name,
+                            plugin_request,
+                            plugin_response,
+                            plugin_context,
+                        )
+                        .await
+                    {
+                        Ok(modified) => {
+                            // Decode the modified body if base64 encoded
+                            let decoded_body = if modified.body_base64 {
+                                modified
+                                    .body
+                                    .as_ref()
+                                    .and_then(|b| {
+                                        base64::Engine::decode(
+                                            &base64::engine::general_purpose::STANDARD,
+                                            b,
+                                        )
+                                        .ok()
+                                    })
+                                    .map(Bytes::from)
+                            } else {
+                                modified.body.as_ref().map(|b| Bytes::from(b.clone()))
+                            };
+                            (decoded_body, Some(modified.headers))
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Plugin handleResponse failed for {}: {}",
+                                plugin_info.name,
+                                e
+                            );
+                            (None, None)
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("Plugin handleResponse failed for {}: {}", plugin_info.name, e);
-                        (None, None)
-                    }
-                }
-            } else {
-                (None, None)
-            };
+                } else {
+                    (None, None)
+                };
 
             // Apply response delay if specified
             if let Some(delay_ms) = response_modification.delay_ms {
@@ -725,7 +824,8 @@ async fn handle_request(
                 .or(response_modification.body.clone())
                 .unwrap_or(response_body.data.clone());
             let plugin_replaced_headers = plugin_modified_headers.is_some();
-            let headers_source = plugin_modified_headers.unwrap_or(response_modification.headers.clone());
+            let headers_source =
+                plugin_modified_headers.unwrap_or(response_modification.headers.clone());
 
             // Inject debug script if enabled (this changes the body).
             if response_modification.inject_debug {
@@ -792,9 +892,12 @@ async fn handle_request(
                 size: final_body.len(),
                 truncated: response_body.truncated,
             };
-            ctx.body_storage.store_response_body(&request_id, stored_body.clone()).await;
+            ctx.body_storage
+                .store_response_body(&request_id, stored_body.clone())
+                .await;
             // Persist response body
-            ctx.app_state.persist_body(request_id.clone(), stored_body.data.clone(), false);
+            ctx.app_state
+                .persist_body(request_id.clone(), stored_body.data.clone(), false);
 
             let final_duration = start_time.elapsed().as_millis() as u64;
             let final_status = response_modification.status_code.unwrap_or(status);
@@ -834,9 +937,23 @@ async fn handle_request(
         }
         Err(e) => {
             let error_duration = start_time.elapsed().as_millis() as u64;
-            emit_error_event(&ctx, &request_id, timestamp, &method, &uri, &host, &path,
-                &request_headers, error_duration, &e.to_string());
-            Ok(error_response(502, &format!("Proxy error: {}", e)))
+            emit_error_event(
+                &ctx,
+                &request_id,
+                timestamp,
+                &method,
+                &uri,
+                &host,
+                &path,
+                &request_headers,
+                error_duration,
+                &e.to_string(),
+            );
+            Ok(error_response(
+                502,
+                ProxyErrorKind::Upstream,
+                &e.to_string(),
+            ))
         }
     }
 }
@@ -853,24 +970,22 @@ async fn handle_connect(
         Some(h) if !h.is_empty() => h.to_string(),
         _ => {
             tracing::warn!("CONNECT request with missing or empty hostname");
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Full::new(Bytes::from("Missing hostname in CONNECT request"))
-                    .map_err(|_: std::convert::Infallible| unreachable!())
-                    .boxed())
-                .unwrap());
+            return Ok(error_response(
+                400,
+                ProxyErrorKind::Tunnel,
+                "Missing hostname in CONNECT request",
+            ));
         }
     };
 
     // Basic hostname validation (allow localhost, IPs, and valid domain names)
     if !is_valid_hostname(&host) {
         tracing::warn!("CONNECT request with invalid hostname: {}", host);
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Full::new(Bytes::from("Invalid hostname"))
-                .map_err(|_: std::convert::Infallible| unreachable!())
-                .boxed())
-            .unwrap());
+        return Ok(error_response(
+            400,
+            ProxyErrorKind::Tunnel,
+            &format!("Invalid hostname: {}", host),
+        ));
     }
 
     let port = req.uri().port_u16().unwrap_or(443);
@@ -908,7 +1023,9 @@ async fn handle_connect(
                     Ok(acceptor) => {
                         // Pass the upgraded connection wrapped in TokioIo
                         let io = TokioIo::new(upgraded);
-                        if let Err(e) = tunnel_connection(io, acceptor, &host, port, ca, ctx_clone).await {
+                        if let Err(e) =
+                            tunnel_connection(io, acceptor, &host, port, ca, ctx_clone).await
+                        {
                             tracing::debug!("Tunnel error for {}: {}", request_id, e);
                         }
                     }
@@ -926,7 +1043,11 @@ async fn handle_connect(
     // Return 200 Connection Established
     Ok(Response::builder()
         .status(200)
-        .body(Empty::<Bytes>::new().map_err(|_: std::convert::Infallible| unreachable!()).boxed())
+        .body(
+            Empty::<Bytes>::new()
+                .map_err(|_: std::convert::Infallible| unreachable!())
+                .boxed(),
+        )
         .unwrap())
 }
 
@@ -953,17 +1074,20 @@ async fn forward_http_request_check_sse(
     // like, matching whistle semantics.
     let request_fut = ctx.upstream_client.request(req);
     let resp = match timeout_ms {
-        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), request_fut).await {
-            Ok(r) => r?,
-            Err(_) => {
-                return Err(format!("Upstream request timed out after {} ms", ms).into());
+        Some(ms) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(ms), request_fut).await {
+                Ok(r) => r?,
+                Err(_) => {
+                    return Err(format!("Upstream request timed out after {} ms", ms).into());
+                }
             }
-        },
+        }
         None => request_fut.await?,
     };
 
     // Check if this is an SSE response
-    let content_type = resp.headers()
+    let content_type = resp
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
@@ -1032,19 +1156,16 @@ fn extract_query_params(uri: &str) -> HashMap<String, String> {
 
 /// Extract host from request
 fn extract_host(req: &Request<Incoming>) -> String {
-    req.uri()
-        .host()
-        .map(|h| h.to_string())
-        .unwrap_or_else(|| {
-            req.headers()
-                .get("host")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("unknown")
-                .split(':')
-                .next()
-                .unwrap_or("unknown")
-                .to_string()
-        })
+    req.uri().host().map(|h| h.to_string()).unwrap_or_else(|| {
+        req.headers()
+            .get("host")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("unknown")
+            .split(':')
+            .next()
+            .unwrap_or("unknown")
+            .to_string()
+    })
 }
 
 /// Validate hostname for CONNECT requests
@@ -1069,7 +1190,8 @@ fn is_valid_hostname(host: &str) -> bool {
         return false;
     }
 
-    if host.starts_with('.') || host.ends_with('.') || host.starts_with('-') || host.ends_with('-') {
+    if host.starts_with('.') || host.ends_with('.') || host.starts_with('-') || host.ends_with('-')
+    {
         return false;
     }
 
@@ -1091,15 +1213,25 @@ fn is_valid_hostname(host: &str) -> bool {
 }
 
 /// Create an error response
-fn error_response(status: u16, message: &str) -> Response<BoxBody<Bytes, hyper::Error>> {
-    Response::builder()
-        .status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY))
-        .header("content-type", "text/plain")
-        .body(Full::new(Bytes::from(message.to_string())).map_err(|_| unreachable!()).boxed())
+fn error_response(
+    status: u16,
+    kind: ProxyErrorKind,
+    message: &str,
+) -> Response<BoxBody<Bytes, hyper::Error>> {
+    let body = crate::proxy::error_page::html_error_body(status, kind, message);
+    let headers = crate::proxy::error_page::html_error_headers(body.len());
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
+    for (key, value) in headers {
+        builder = builder.header(key, value);
+    }
+    builder
+        .body(Full::new(body).map_err(|_| unreachable!()).boxed())
         .unwrap()
 }
 
 /// Emit an error event
+#[allow(clippy::too_many_arguments)]
 fn emit_error_event(
     ctx: &ProxyContext,
     request_id: &str,
@@ -1132,6 +1264,7 @@ fn emit_error_event(
 }
 
 /// Handle WebSocket upgrade request
+#[allow(clippy::too_many_arguments)]
 async fn handle_websocket_upgrade(
     req: Request<Incoming>,
     request_id: &str,
@@ -1143,7 +1276,7 @@ async fn handle_websocket_upgrade(
     ctx: Arc<ProxyContext>,
 ) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     let url = format!("ws://{}{}", host, path);
-    
+
     // Emit request started event with websocket protocol
     ctx.app_state.emit_request_event(&CapturedRequestEvent {
         id: request_id.to_string(),
@@ -1173,8 +1306,9 @@ async fn handle_websocket_upgrade(
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
-                let ws_proxy = websocket::WebSocketProxy::new(request_id.clone(), ctx_clone.app_state.clone());
-                
+                let ws_proxy =
+                    websocket::WebSocketProxy::new(request_id.clone(), ctx_clone.app_state.clone());
+
                 if let Err(e) = ws_proxy.proxy(io, &target_url).await {
                     tracing::debug!("WebSocket proxy error for {}: {}", request_id, e);
                 }
@@ -1190,15 +1324,19 @@ async fn handle_websocket_upgrade(
         .status(101)
         .header("Upgrade", "websocket")
         .header("Connection", "Upgrade")
-        .body(Empty::<Bytes>::new().map_err(|_: std::convert::Infallible| unreachable!()).boxed())
+        .body(
+            Empty::<Bytes>::new()
+                .map_err(|_: std::convert::Infallible| unreachable!())
+                .boxed(),
+        )
         .unwrap())
 }
 
 // ==================== SSE Capturing Body ====================
 
+use hyper::body::{Body, Frame, SizeHint};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use hyper::body::{Body, Frame, SizeHint};
 
 /// A body wrapper that captures SSE events as data flows through
 struct SseCapturingBody {
@@ -1227,13 +1365,14 @@ impl SseCapturingBody {
     }
 
     fn emit_stream_ended(&self) {
-        self.app_state.emit_stream_ended(&crate::state::StreamEndedEvent {
-            connection_id: self.connection_id.clone(),
-            message_count: self.message_count,
-            total_bytes: self.total_bytes,
-            duration_ms: self.start_time.elapsed().as_millis() as u64,
-            close_reason: None,
-        });
+        self.app_state
+            .emit_stream_ended(&crate::state::StreamEndedEvent {
+                connection_id: self.connection_id.clone(),
+                message_count: self.message_count,
+                total_bytes: self.total_bytes,
+                duration_ms: self.start_time.elapsed().as_millis() as u64,
+                close_reason: None,
+            });
     }
 }
 
@@ -1246,7 +1385,7 @@ impl Body for SseCapturingBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
         let inner = Pin::new(&mut self.inner);
-        
+
         match inner.poll_frame(cx) {
             Poll::Ready(Some(Ok(frame))) => {
                 if let Some(data) = frame.data_ref() {
@@ -1257,7 +1396,7 @@ impl Body for SseCapturingBody {
                     let events = self.parser.feed(&chunk);
                     for event in events {
                         self.message_count += 1;
-                        
+
                         let event_data = if let Some(ref event_type) = event.event_type {
                             format!("event: {}\ndata: {}", event_type, event.data)
                         } else {
@@ -1274,13 +1413,14 @@ impl Body for SseCapturingBody {
                             size: event.data.len(),
                         };
 
-                        self.app_state.emit_stream_message(&crate::state::StreamMessageEvent {
-                            connection_id: self.connection_id.clone(),
-                            message: stream_msg,
-                        });
+                        self.app_state
+                            .emit_stream_message(&crate::state::StreamMessageEvent {
+                                connection_id: self.connection_id.clone(),
+                                message: stream_msg,
+                            });
                     }
                 }
-                
+
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(e))) => {
@@ -1339,8 +1479,12 @@ fn build_query_map(url: &str) -> HashMap<String, String> {
             match pair.split_once('=') {
                 Some((k, v)) => {
                     map.insert(
-                        urlencoding::decode(k).map(|s| s.into_owned()).unwrap_or_else(|_| k.to_string()),
-                        urlencoding::decode(v).map(|s| s.into_owned()).unwrap_or_else(|_| v.to_string()),
+                        urlencoding::decode(k)
+                            .map(|s| s.into_owned())
+                            .unwrap_or_else(|_| k.to_string()),
+                        urlencoding::decode(v)
+                            .map(|s| s.into_owned())
+                            .unwrap_or_else(|_| v.to_string()),
                     );
                 }
                 None => {

@@ -1,7 +1,8 @@
-use crate::error::Result;
+use crate::error::{PostGateError, Result};
 use crate::rules::{parse_rules as parse_rules_internal, parse_rules_with_inline, Rule, RuleGroup};
 use crate::state::AppState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
@@ -20,6 +21,15 @@ pub struct ParseError {
     pub line: usize,
     pub message: String,
     pub content: String,
+}
+
+/// Input for importing a Whistle-exported rules file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WhistleImportInput {
+    pub path: String,
+    #[serde(default)]
+    pub group_name: Option<String>,
 }
 
 /// Get all rule groups
@@ -49,6 +59,44 @@ pub async fn save_rule_group(
     group: RuleGroup,
     state: State<'_, Arc<AppState>>,
 ) -> Result<RuleGroup> {
+    persist_rule_group(group, &state).await
+}
+
+/// Import a Whistle-exported rules file as a new rule group.
+#[tauri::command]
+pub async fn import_whistle_rules(
+    input: WhistleImportInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<RuleGroup> {
+    let path = Path::new(&input.path);
+    let content = tokio::fs::read_to_string(path).await?;
+    let raw_content = strip_utf8_bom(&content).to_string();
+
+    if raw_content.trim().is_empty() {
+        return Err(PostGateError::InvalidState(
+            "Whistle rules file is empty".into(),
+        ));
+    }
+
+    let group = RuleGroup {
+        id: Uuid::new_v4().to_string(),
+        name: input
+            .group_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| derive_whistle_group_name(path)),
+        enabled: true,
+        priority: 0,
+        rules: Vec::new(),
+        raw_content,
+        created_at: 0,
+        updated_at: 0,
+        inline_values: Default::default(),
+    };
+
+    persist_rule_group(group, &state).await
+}
+
+async fn persist_rule_group(group: RuleGroup, state: &Arc<AppState>) -> Result<RuleGroup> {
     let now = chrono::Utc::now().timestamp_millis();
 
     // Parse rules + inline values from raw content.
@@ -82,6 +130,20 @@ pub async fn save_rule_group(
     db.save_rule_group(&group).await?;
 
     Ok(group)
+}
+
+fn strip_utf8_bom(content: &str) -> &str {
+    content.strip_prefix('\u{feff}').unwrap_or(content)
+}
+
+fn derive_whistle_group_name(path: &Path) -> String {
+    path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|stem| format!("Whistle: {}", stem))
+        .unwrap_or_else(|| "Whistle Import".to_string())
 }
 
 /// Delete a rule group

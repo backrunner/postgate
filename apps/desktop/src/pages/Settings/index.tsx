@@ -46,7 +46,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { cn } from "@/lib/utils";
-import { useRulesStore } from "@/stores/rules";
+import { useRulesStore, type RuleGroup } from "@/stores/rules";
 import { useValuesStore } from "@/stores/values";
 import { useReplayStore } from "@/stores/replay";
 import { useColumnsStore, type ColumnConfig } from "@/stores/columns";
@@ -175,7 +175,7 @@ export function SettingsPage() {
   const [profileStatus, setProfileStatus] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSummary, setProfileSummary] = useState<ProfileSummary | null>(null);
-  const [profileBusy, setProfileBusy] = useState<"export" | "import" | null>(null);
+  const [profileBusy, setProfileBusy] = useState<"export" | "import" | "whistle" | null>(null);
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(defaultSyncSettings);
   const [syncPath, setSyncPath] = useState<string | null>(null);
   const [syncRemoteAvailable, setSyncRemoteAvailable] = useState(false);
@@ -330,6 +330,34 @@ export function SettingsPage() {
       await refreshDataStores();
       setProfileSummary(result.summary);
       setProfileStatus(`Imported ${result.summary.ruleGroups} rule groups and ${result.summary.savedRequests} replay requests.`);
+    } catch (e) {
+      setProfileError(String(e));
+    } finally {
+      setProfileBusy(null);
+    }
+  };
+
+  const handleImportWhistleRules = async () => {
+    setProfileBusy("whistle");
+    setProfileError(null);
+    setProfileStatus(null);
+    setProfileSummary(null);
+    try {
+      const selected = await open({
+        title: "Import Whistle rules",
+        multiple: false,
+      });
+      if (!selected || typeof selected !== "string") return;
+
+      const importedGroup = await invoke<RuleGroup>("import_whistle_rules", {
+        input: {
+          path: selected,
+        },
+      });
+      await loadRuleGroups();
+      setProfileStatus(
+        `Imported ${importedGroup.rules.length} rules into "${importedGroup.name}".`,
+      );
     } catch (e) {
       setProfileError(String(e));
     } finally {
@@ -688,7 +716,7 @@ export function SettingsPage() {
                     </p>
                   </div>
                 </div>
-                <div className="flex shrink-0 gap-2">
+                <div className="flex shrink-0 flex-wrap justify-end gap-2">
                   <Button
                     variant="outline"
                     size="sm"
@@ -702,6 +730,20 @@ export function SettingsPage() {
                       <FileUp className="h-3.5 w-3.5" />
                     )}
                     Import
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 gap-1.5 text-xs whitespace-nowrap"
+                    onClick={handleImportWhistleRules}
+                    disabled={profileBusy !== null}
+                  >
+                    {profileBusy === "whistle" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <FileUp className="h-3.5 w-3.5" />
+                    )}
+                    Import from Whistle
                   </Button>
                   <Button
                     size="sm"

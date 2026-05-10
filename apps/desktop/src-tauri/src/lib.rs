@@ -86,6 +86,7 @@ pub fn run() {
             commands::rules::toggle_rule_group,
             commands::rules::parse_rules,
             commands::rules::has_active_debug_rules,
+            commands::rules::import_whistle_rules,
             commands::plugin::get_plugins,
             commands::plugin::discover_plugins,
             commands::plugin::load_plugin,

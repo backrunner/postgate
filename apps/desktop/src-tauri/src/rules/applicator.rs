@@ -11,6 +11,7 @@ use crate::values::{resolve_str, RequestCtx};
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use url::Url;
 
@@ -57,6 +58,21 @@ fn resolve_ref(arg: &str, inline: &HashMap<String, String>, res: &ResolveCtx<'_>
 
 fn resolve_bytes(arg: &str, inline: &HashMap<String, String>, res: &ResolveCtx<'_>) -> Bytes {
     Bytes::from(resolve_ref(arg, inline, res))
+}
+
+fn normalize_operation_value(arg: &str) -> &str {
+    let trimmed = arg.trim();
+    trimmed
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(arg)
+}
+
+fn effective_content_type<'a>(
+    headers: &'a HashMap<String, String>,
+    fallback: Option<&'a str>,
+) -> Option<&'a str> {
+    headers.get("content-type").map(String::as_str).or(fallback)
 }
 
 /// Result of applying rules to a request
@@ -539,33 +555,11 @@ pub fn apply_request_rules_with_values(
                 }
 
                 RuleAction::File { path } => {
-                    // The action argument may be a `{name}` reference into the
-                    // values store (whistle `file://{name}`) OR a real disk
-                    // path. Try the values store first.
-                    let path_str = path.to_string_lossy().into_owned();
-                    let trimmed = path_str.trim();
-                    let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                        || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
-
-                    let (body, content_type) = if is_ref {
-                        let body = resolve_bytes(trimmed, inline, res);
-                        // Guess MIME from the referenced value's name if we
-                        // can (strip the braces and treat as a filename).
-                        let name_for_mime = trimmed
-                            .trim_matches('`')
-                            .trim_start_matches('{')
-                            .trim_end_matches('}');
-                        let ct = mime_guess::from_path(name_for_mime)
-                            .first_or_octet_stream()
-                            .to_string();
-                        (body, ct)
-                    } else {
-                        let body = std::fs::read(path).map(Bytes::from).unwrap_or_default();
-                        let ct = mime_guess::from_path(path)
-                            .first_or_octet_stream()
-                            .to_string();
-                        (body, ct)
-                    };
+                    // The action argument may be a `{name}` value, inline
+                    // `(content)`, a file, or a directory that appends the
+                    // matched path remainder.
+                    let (body, content_type) =
+                        resolve_file_content(path, &matched.remaining_path, inline, res);
 
                     let mut headers = HashMap::new();
                     headers.insert("content-type".to_string(), content_type);
@@ -573,45 +567,6 @@ pub fn apply_request_rules_with_values(
                         status: 200,
                         headers,
                         body,
-                    });
-                }
-
-                RuleAction::HtmlBody { content } => {
-                    let mut headers = HashMap::new();
-                    headers.insert(
-                        "content-type".to_string(),
-                        "text/html; charset=utf-8".to_string(),
-                    );
-                    modification.short_circuit = Some(ShortCircuitResponse {
-                        status: 200,
-                        headers,
-                        body: resolve_bytes(content, inline, res),
-                    });
-                }
-
-                RuleAction::JsBody { content } => {
-                    let mut headers = HashMap::new();
-                    headers.insert(
-                        "content-type".to_string(),
-                        "application/javascript; charset=utf-8".to_string(),
-                    );
-                    modification.short_circuit = Some(ShortCircuitResponse {
-                        status: 200,
-                        headers,
-                        body: resolve_bytes(content, inline, res),
-                    });
-                }
-
-                RuleAction::CssBody { content } => {
-                    let mut headers = HashMap::new();
-                    headers.insert(
-                        "content-type".to_string(),
-                        "text/css; charset=utf-8".to_string(),
-                    );
-                    modification.short_circuit = Some(ShortCircuitResponse {
-                        status: 200,
-                        headers,
-                        body: resolve_bytes(content, inline, res),
                     });
                 }
 
@@ -820,6 +775,7 @@ pub fn apply_response_rules_with_values(
     };
 
     let parsed_url = Url::parse(url).ok();
+    let can_modify_body = has_response_body(method, status_code);
 
     for matched in matched_rules {
         let rule = &matched.rule;
@@ -864,7 +820,7 @@ pub fn apply_response_rules_with_values(
                         .extend(modifications.remove.clone());
                 }
 
-                RuleAction::ResponseBody { content } => {
+                RuleAction::ResponseBody { content } if can_modify_body => {
                     modification.body = Some(resolve_body_content(content, inline, res));
                 }
 
@@ -872,7 +828,7 @@ pub fn apply_response_rules_with_values(
                     pattern,
                     replacement,
                     regex,
-                } => {
+                } if can_modify_body => {
                     if let Some(ref body) = modification.body {
                         let body_str = String::from_utf8_lossy(body);
                         let new_body = if *regex {
@@ -960,29 +916,71 @@ pub fn apply_response_rules_with_values(
                     modification.status_code = Some(*code);
                 }
 
-                RuleAction::HtmlAppend { content } => {
-                    if is_html(content_type) {
+                RuleAction::HtmlBody { content } if can_modify_body => {
+                    if is_html(effective_content_type(&modification.headers, content_type)) {
+                        modification
+                            .headers
+                            .insert("content-type".to_string(), content_type_for_html());
+                        modification.body = Some(resolve_bytes(content, inline, res));
+                    }
+                }
+
+                RuleAction::JsBody { content } if can_modify_body => {
+                    if is_html(effective_content_type(&modification.headers, content_type)) {
+                        let resolved = resolve_ref(content, inline, res);
+                        modification
+                            .headers
+                            .insert("content-type".to_string(), content_type_for_html());
+                        modification.body =
+                            Some(Bytes::from(format!("<script>{}</script>", resolved)));
+                    } else if is_js(effective_content_type(&modification.headers, content_type)) {
+                        modification
+                            .headers
+                            .insert("content-type".to_string(), content_type_for_js());
+                        modification.body = Some(resolve_bytes(content, inline, res));
+                    }
+                }
+
+                RuleAction::CssBody { content } if can_modify_body => {
+                    if is_html(effective_content_type(&modification.headers, content_type)) {
+                        let resolved = resolve_ref(content, inline, res);
+                        modification
+                            .headers
+                            .insert("content-type".to_string(), content_type_for_html());
+                        modification.body =
+                            Some(Bytes::from(format!("<style>{}</style>", resolved)));
+                    } else if is_css(effective_content_type(&modification.headers, content_type)) {
+                        modification
+                            .headers
+                            .insert("content-type".to_string(), content_type_for_css());
+                        modification.body = Some(resolve_bytes(content, inline, res));
+                    }
+                }
+
+                RuleAction::HtmlAppend { content } if can_modify_body => {
+                    if is_html(effective_content_type(&modification.headers, content_type)) {
                         let resolved = resolve_ref(content, inline, res);
                         modification.body =
                             Some(append_to_html(modification.body.as_ref(), &resolved, false));
                     }
                 }
 
-                RuleAction::HtmlPrepend { content } => {
-                    if is_html(content_type) {
+                RuleAction::HtmlPrepend { content } if can_modify_body => {
+                    if is_html(effective_content_type(&modification.headers, content_type)) {
                         let resolved = resolve_ref(content, inline, res);
                         modification.body =
                             Some(append_to_html(modification.body.as_ref(), &resolved, true));
                     }
                 }
 
-                RuleAction::JsAppend { content } => {
+                RuleAction::JsAppend { content } if can_modify_body => {
                     let resolved = resolve_ref(content, inline, res);
-                    if is_html(content_type) {
+                    let effective_ct = effective_content_type(&modification.headers, content_type);
+                    if is_html(effective_ct) {
                         let script = format!("<script>{}</script>", resolved);
                         modification.body =
                             Some(append_to_html(modification.body.as_ref(), &script, false));
-                    } else if is_js(content_type) {
+                    } else if is_js(effective_ct) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = body.to_vec();
                             new_body.extend_from_slice(b"\n");
@@ -992,13 +990,14 @@ pub fn apply_response_rules_with_values(
                     }
                 }
 
-                RuleAction::JsPrepend { content } => {
+                RuleAction::JsPrepend { content } if can_modify_body => {
                     let resolved = resolve_ref(content, inline, res);
-                    if is_html(content_type) {
+                    let effective_ct = effective_content_type(&modification.headers, content_type);
+                    if is_html(effective_ct) {
                         let script = format!("<script>{}</script>", resolved);
                         modification.body =
                             Some(append_to_html(modification.body.as_ref(), &script, true));
-                    } else if is_js(content_type) {
+                    } else if is_js(effective_ct) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = resolved.as_bytes().to_vec();
                             new_body.extend_from_slice(b"\n");
@@ -1008,13 +1007,14 @@ pub fn apply_response_rules_with_values(
                     }
                 }
 
-                RuleAction::CssAppend { content } => {
+                RuleAction::CssAppend { content } if can_modify_body => {
                     let resolved = resolve_ref(content, inline, res);
-                    if is_html(content_type) {
+                    let effective_ct = effective_content_type(&modification.headers, content_type);
+                    if is_html(effective_ct) {
                         let style = format!("<style>{}</style>", resolved);
                         modification.body =
                             Some(append_to_html(modification.body.as_ref(), &style, false));
-                    } else if is_css(content_type) {
+                    } else if is_css(effective_ct) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = body.to_vec();
                             new_body.extend_from_slice(b"\n");
@@ -1024,13 +1024,14 @@ pub fn apply_response_rules_with_values(
                     }
                 }
 
-                RuleAction::CssPrepend { content } => {
+                RuleAction::CssPrepend { content } if can_modify_body => {
                     let resolved = resolve_ref(content, inline, res);
-                    if is_html(content_type) {
+                    let effective_ct = effective_content_type(&modification.headers, content_type);
+                    if is_html(effective_ct) {
                         let style = format!("<style>{}</style>", resolved);
                         modification.body =
                             Some(append_to_html(modification.body.as_ref(), &style, true));
-                    } else if is_css(content_type) {
+                    } else if is_css(effective_ct) {
                         if let Some(ref body) = modification.body {
                             let mut new_body = resolved.as_bytes().to_vec();
                             new_body.extend_from_slice(b"\n");
@@ -1074,15 +1075,15 @@ pub fn apply_response_rules_with_values(
                     }
                 }
 
-                RuleAction::Debug { .. } => {
+                RuleAction::Debug { .. } if can_modify_body => {
                     // Enable debug script injection for HTML responses
-                    if is_html(content_type) {
+                    if is_html(effective_content_type(&modification.headers, content_type)) {
                         modification.inject_debug = true;
                     }
                 }
 
                 // `jsonBody://{value}` — short-circuit with a JSON response.
-                RuleAction::JsonBody { value } => {
+                RuleAction::JsonBody { value } if can_modify_body => {
                     let body_str = serde_json::to_string(value).unwrap_or_default();
                     let resolved = resolve_bytes(&body_str, inline, res);
                     modification.headers.insert(
@@ -1105,7 +1106,7 @@ pub fn apply_response_rules_with_values(
                 // applicator can't see the request body here without a hook,
                 // so we emit a textual summary using the URL/method/headers.
                 // This matches whistle's default behaviour for HTML clients.
-                RuleAction::Echo => {
+                RuleAction::Echo if can_modify_body => {
                     let mut s = String::new();
                     s.push_str(method);
                     s.push(' ');
@@ -1126,28 +1127,9 @@ pub fn apply_response_rules_with_values(
 
                 // `mock://<path>` — replace response body with the referenced
                 // file/value and pick a MIME from the name. Status is 200.
-                RuleAction::Mock { path } => {
-                    let path_str = path.to_string_lossy().into_owned();
-                    let trimmed = path_str.trim();
-                    let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                        || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
-                    let (body, guessed_ct) = if is_ref {
-                        let body = resolve_bytes(trimmed, inline, res);
-                        let name_for_mime = trimmed
-                            .trim_matches('`')
-                            .trim_start_matches('{')
-                            .trim_end_matches('}');
-                        let ct = mime_guess::from_path(name_for_mime)
-                            .first_or_octet_stream()
-                            .to_string();
-                        (body, ct)
-                    } else {
-                        let bytes = std::fs::read(path).map(Bytes::from).unwrap_or_default();
-                        let ct = mime_guess::from_path(path)
-                            .first_or_octet_stream()
-                            .to_string();
-                        (bytes, ct)
-                    };
+                RuleAction::Mock { path } if can_modify_body => {
+                    let (body, guessed_ct) =
+                        resolve_file_content(path, &matched.remaining_path, inline, res);
                     modification
                         .headers
                         .entry("content-type".to_string())
@@ -1163,8 +1145,8 @@ pub fn apply_response_rules_with_values(
                     pattern,
                     replacement,
                     regex,
-                } => {
-                    if is_html(content_type) {
+                } if can_modify_body => {
+                    if is_html(effective_content_type(&modification.headers, content_type)) {
                         apply_body_replace(&mut modification.body, pattern, replacement, *regex);
                     }
                 }
@@ -1172,8 +1154,8 @@ pub fn apply_response_rules_with_values(
                     pattern,
                     replacement,
                     regex,
-                } => {
-                    if is_js(content_type) {
+                } if can_modify_body => {
+                    if is_js(effective_content_type(&modification.headers, content_type)) {
                         apply_body_replace(&mut modification.body, pattern, replacement, *regex);
                     }
                 }
@@ -1181,8 +1163,8 @@ pub fn apply_response_rules_with_values(
                     pattern,
                     replacement,
                     regex,
-                } => {
-                    if is_css(content_type) {
+                } if can_modify_body => {
+                    if is_css(effective_content_type(&modification.headers, content_type)) {
                         apply_body_replace(&mut modification.body, pattern, replacement, *regex);
                     }
                 }
@@ -1190,7 +1172,7 @@ pub fn apply_response_rules_with_values(
                 // `resPrepend://` / `resAppend://` — plain text prepend/append
                 // to the response body. Unlike the `html*` / `js*` / `css*`
                 // variants these are content-type agnostic.
-                RuleAction::ResponsePrepend { content } => {
+                RuleAction::ResponsePrepend { content } if can_modify_body => {
                     let extra = resolve_bytes(content, inline, res);
                     let current = modification.body.clone().unwrap_or_default();
                     let mut combined = Vec::with_capacity(extra.len() + current.len());
@@ -1198,7 +1180,7 @@ pub fn apply_response_rules_with_values(
                     combined.extend_from_slice(&current);
                     modification.body = Some(Bytes::from(combined));
                 }
-                RuleAction::ResponseAppend { content } => {
+                RuleAction::ResponseAppend { content } if can_modify_body => {
                     let extra = resolve_bytes(content, inline, res);
                     let current = modification.body.clone().unwrap_or_default();
                     let mut combined = Vec::with_capacity(extra.len() + current.len());
@@ -1634,7 +1616,9 @@ fn resolve_body_content(
     res: &ResolveCtx<'_>,
 ) -> Bytes {
     match content {
-        BodyContent::Text { content, .. } => resolve_bytes(content, inline, res),
+        BodyContent::Text { content, .. } => {
+            resolve_bytes(normalize_operation_value(content), inline, res)
+        }
         BodyContent::Json { value } => {
             let raw = serde_json::to_string(value).unwrap_or_default();
             resolve_bytes(&raw, inline, res)
@@ -1644,6 +1628,10 @@ fn resolve_body_content(
             // store; otherwise read from disk (whistle file:// semantics).
             let path_str = path.to_string_lossy();
             let trimmed = path_str.trim();
+            let inline_value = normalize_operation_value(trimmed);
+            if inline_value != trimmed {
+                return resolve_bytes(inline_value, inline, res);
+            }
             let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
                 || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
             if is_ref {
@@ -1665,23 +1653,119 @@ fn resolve_body_content(
 
 /// Check if content type is HTML
 fn is_html(content_type: Option<&str>) -> bool {
-    content_type
-        .map(|ct| ct.contains("text/html"))
-        .unwrap_or(false)
+    let Some(ct) = content_type else {
+        return false;
+    };
+    let ct = ct.to_ascii_lowercase();
+    ct.contains("text/html") || ct.contains("application/xhtml")
 }
 
 /// Check if content type is JavaScript
 fn is_js(content_type: Option<&str>) -> bool {
-    content_type
-        .map(|ct| ct.contains("javascript") || ct.contains("text/js"))
-        .unwrap_or(false)
+    let Some(ct) = content_type else {
+        return false;
+    };
+    let ct = ct.to_ascii_lowercase();
+    ct.contains("javascript")
+        || ct.contains("ecmascript")
+        || ct.contains("text/js")
+        || ct.contains("application/x-javascript")
 }
 
 /// Check if content type is CSS
 fn is_css(content_type: Option<&str>) -> bool {
-    content_type
-        .map(|ct| ct.contains("text/css"))
-        .unwrap_or(false)
+    let Some(ct) = content_type else {
+        return false;
+    };
+    ct.to_ascii_lowercase().contains("text/css")
+}
+
+fn content_type_for_html() -> String {
+    "text/html; charset=utf-8".to_string()
+}
+
+fn content_type_for_js() -> String {
+    "application/javascript; charset=utf-8".to_string()
+}
+
+fn content_type_for_css() -> String {
+    "text/css; charset=utf-8".to_string()
+}
+
+fn content_type_for_text() -> String {
+    "text/plain; charset=utf-8".to_string()
+}
+
+fn resolve_file_content(
+    path: &std::path::Path,
+    remaining_path: &str,
+    inline: &HashMap<String, String>,
+    res: &ResolveCtx<'_>,
+) -> (Bytes, String) {
+    let path_str = path.to_string_lossy();
+    let trimmed = path_str.trim();
+    let inline_value = normalize_operation_value(trimmed);
+    if inline_value != trimmed {
+        return (
+            resolve_bytes(inline_value, inline, res),
+            content_type_for_text(),
+        );
+    }
+
+    let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
+    if is_ref {
+        let body = resolve_bytes(trimmed, inline, res);
+        let name_for_mime = trimmed
+            .trim_matches('`')
+            .trim_start_matches('{')
+            .trim_end_matches('}');
+        let ct = mime_guess::from_path(name_for_mime)
+            .first_or_octet_stream()
+            .to_string();
+        return (body, ct);
+    }
+
+    let resolved_path = resolve_local_file_path(path, remaining_path);
+    let body = std::fs::read(&resolved_path)
+        .map(Bytes::from)
+        .unwrap_or_default();
+    let ct = mime_guess::from_path(&resolved_path)
+        .first_or_octet_stream()
+        .to_string();
+    (body, ct)
+}
+
+fn resolve_local_file_path(path: &std::path::Path, remaining_path: &str) -> PathBuf {
+    let base = expand_home(path);
+    if path_ends_with_separator(&base.to_string_lossy()) || base.is_dir() {
+        return join_file_path(&base, remaining_path);
+    }
+    base
+}
+
+fn expand_home(path: &std::path::Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" || raw.starts_with("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            let suffix = raw.strip_prefix("~/").unwrap_or("");
+            return PathBuf::from(home).join(suffix);
+        }
+    }
+    path.to_path_buf()
+}
+
+fn join_file_path(base: &std::path::Path, remaining_path: &str) -> PathBuf {
+    let rest = remaining_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(remaining_path)
+        .trim_start_matches(['/', '\\']);
+    if rest.is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(rest)
+    }
 }
 
 /// String- or regex-replace inside a response body. Used by resReplace,
@@ -1746,18 +1830,37 @@ mod tests {
     }
 
     fn matched_rule_with_filters(action: RuleAction, filters: Option<RuleFilters>) -> MatchedRule {
+        matched_rule_with_actions_and_filters(vec![action], filters)
+    }
+
+    fn matched_rule_with_actions(actions: Vec<RuleAction>) -> MatchedRule {
+        matched_rule_with_actions_and_filters(actions, None)
+    }
+
+    fn matched_rule_with_actions_and_filters(
+        actions: Vec<RuleAction>,
+        filters: Option<RuleFilters>,
+    ) -> MatchedRule {
+        matched_rule_with_actions_filters_and_remainder(actions, filters, "")
+    }
+
+    fn matched_rule_with_actions_filters_and_remainder(
+        actions: Vec<RuleAction>,
+        filters: Option<RuleFilters>,
+        remaining_path: impl Into<String>,
+    ) -> MatchedRule {
         MatchedRule {
             rule: Rule {
                 id: "t".into(),
                 pattern: Pattern::Domain("example.com".into()),
                 filters,
-                actions: vec![action],
+                actions,
                 enabled: true,
                 priority: 0,
                 raw_line: String::new(),
                 negated: false,
             },
-            remaining_path: String::new(),
+            remaining_path: remaining_path.into(),
             inline_values: Arc::new(HashMap::new()),
         }
     }
@@ -1917,6 +2020,67 @@ mod tests {
         assert_eq!(modification.query_params.as_deref(), Some("debug=true"));
         assert_eq!(modification.write_files.len(), 1);
         assert!(modification.write_files[0].raw);
+    }
+
+    #[test]
+    fn test_file_rule_maps_directory_with_remaining_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset_dir = dir.path().join("assets");
+        fs::create_dir_all(asset_dir.join("js")).unwrap();
+        fs::write(asset_dir.join("js/app.js"), "console.log('dir');").unwrap();
+
+        let rule = matched_rule_with_actions_filters_and_remainder(
+            vec![RuleAction::File { path: asset_dir }],
+            None,
+            "/js/app.js?cache=1",
+        );
+
+        let modification = apply_request_rules(
+            &[rule],
+            "https://example.com/static/js/app.js?cache=1",
+            "GET",
+            &HashMap::new(),
+            None,
+        );
+
+        let response = modification.short_circuit.unwrap();
+        assert_eq!(response.body, Bytes::from_static(b"console.log('dir');"));
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some("text/javascript")
+        );
+    }
+
+    #[test]
+    fn test_html_js_css_body_are_response_only() {
+        let request_headers = HashMap::new();
+
+        for action in [
+            RuleAction::HtmlBody {
+                content: "<h1>ok</h1>".into(),
+            },
+            RuleAction::JsBody {
+                content: "console.log('ok')".into(),
+            },
+            RuleAction::CssBody {
+                content: "body{color:red}".into(),
+            },
+        ] {
+            let modification = apply_request_rules(
+                &[matched_rule(action.clone())],
+                "https://example.com/app",
+                "GET",
+                &request_headers,
+                None,
+            );
+
+            assert!(
+                modification.short_circuit.is_none(),
+                "{:?} must not short-circuit during request-stage rules",
+                action
+            );
+            assert_eq!(modification.body, None);
+        }
     }
 
     #[test]
@@ -2175,6 +2339,249 @@ mod tests {
                 .map(String::as_str),
             Some("client")
         );
+    }
+
+    #[test]
+    fn test_apply_response_body_rules_follow_whistle_content_type_and_body_policy() {
+        let request_headers = HashMap::new();
+        let response_headers = HashMap::new();
+        let body = Bytes::from_static(b"original");
+
+        let html_rule = vec![matched_rule(RuleAction::HtmlBody {
+            content: "<h1>changed</h1>".into(),
+        })];
+        let html = apply_response_rules(
+            &html_rule,
+            "https://example.com/page",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("TEXT/HTML; charset=gbk"),
+        );
+        assert_eq!(html.body, Some(Bytes::from_static(b"<h1>changed</h1>")));
+        assert_eq!(
+            html.headers.get("content-type").map(String::as_str),
+            Some("text/html; charset=utf-8")
+        );
+
+        let json = apply_response_rules(
+            &html_rule,
+            "https://example.com/page",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("application/json"),
+        );
+        assert_eq!(json.body, Some(body.clone()));
+
+        let no_body_status = apply_response_rules(
+            &html_rule,
+            "https://example.com/page",
+            "GET",
+            &request_headers,
+            &response_headers,
+            204,
+            Some(&body),
+            Some("text/html"),
+        );
+        assert_eq!(no_body_status.body, Some(body.clone()));
+
+        let head = apply_response_rules(
+            &html_rule,
+            "https://example.com/page",
+            "HEAD",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/html"),
+        );
+        assert_eq!(head.body, Some(body.clone()));
+
+        let js_in_html = apply_response_rules(
+            &[matched_rule(RuleAction::JsBody {
+                content: "window.x=1;".into(),
+            })],
+            "https://example.com/page",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/html"),
+        );
+        assert_eq!(
+            js_in_html.body,
+            Some(Bytes::from_static(b"<script>window.x=1;</script>"))
+        );
+        assert_eq!(
+            js_in_html.headers.get("content-type").map(String::as_str),
+            Some("text/html; charset=utf-8")
+        );
+
+        let js_file = apply_response_rules(
+            &[matched_rule(RuleAction::JsBody {
+                content: "window.x=1;".into(),
+            })],
+            "https://example.com/app.js",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("application/ecmascript"),
+        );
+        assert_eq!(js_file.body, Some(Bytes::from_static(b"window.x=1;")));
+        assert_eq!(
+            js_file.headers.get("content-type").map(String::as_str),
+            Some("application/javascript; charset=utf-8")
+        );
+
+        let css_in_html = apply_response_rules(
+            &[matched_rule(RuleAction::CssBody {
+                content: "body{color:red}".into(),
+            })],
+            "https://example.com/page",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/html"),
+        );
+        assert_eq!(
+            css_in_html.body,
+            Some(Bytes::from_static(b"<style>body{color:red}</style>"))
+        );
+        assert_eq!(
+            css_in_html.headers.get("content-type").map(String::as_str),
+            Some("text/html; charset=utf-8")
+        );
+
+        let css_file = apply_response_rules(
+            &[matched_rule(RuleAction::CssBody {
+                content: "body{color:red}".into(),
+            })],
+            "https://example.com/app.css",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("Text/CSS"),
+        );
+        assert_eq!(css_file.body, Some(Bytes::from_static(b"body{color:red}")));
+        assert_eq!(
+            css_file.headers.get("content-type").map(String::as_str),
+            Some("text/css; charset=utf-8")
+        );
+
+        let js_after_res_type = apply_response_rules(
+            &[matched_rule_with_actions(vec![
+                RuleAction::ResponseType {
+                    content_type: "application/javascript".into(),
+                },
+                RuleAction::JsBody {
+                    content: "window.y=2;".into(),
+                },
+            ])],
+            "https://example.com/app",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/html"),
+        );
+        assert_eq!(
+            js_after_res_type.body,
+            Some(Bytes::from_static(b"window.y=2;"))
+        );
+        assert_eq!(
+            js_after_res_type
+                .headers
+                .get("content-type")
+                .map(String::as_str),
+            Some("application/javascript; charset=utf-8")
+        );
+
+        let css_after_res_type = apply_response_rules(
+            &[matched_rule_with_actions(vec![
+                RuleAction::ResponseType {
+                    content_type: "text/css".into(),
+                },
+                RuleAction::CssBody {
+                    content: "body{color:blue}".into(),
+                },
+            ])],
+            "https://example.com/app",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/html"),
+        );
+        assert_eq!(
+            css_after_res_type.body,
+            Some(Bytes::from_static(b"body{color:blue}"))
+        );
+        assert_eq!(
+            css_after_res_type
+                .headers
+                .get("content-type")
+                .map(String::as_str),
+            Some("text/css; charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn test_response_body_modifiers_skip_statuses_without_body() {
+        let request_headers = HashMap::new();
+        let response_headers = HashMap::new();
+        let body = Bytes::from_static(b"original");
+
+        for action in [
+            RuleAction::ResponseBody {
+                content: BodyContent::Text {
+                    content: "changed".into(),
+                    content_type: "text/plain".into(),
+                },
+            },
+            RuleAction::ResponseAppend {
+                content: "changed".into(),
+            },
+            RuleAction::ResponseReplace {
+                pattern: "original".into(),
+                replacement: "changed".into(),
+                regex: false,
+            },
+            RuleAction::JsonBody {
+                value: serde_json::json!({"ok": true}),
+            },
+        ] {
+            let modification = apply_response_rules(
+                &[matched_rule(action.clone())],
+                "https://example.com/api",
+                "GET",
+                &request_headers,
+                &response_headers,
+                304,
+                Some(&body),
+                Some("text/plain"),
+            );
+
+            assert_eq!(
+                modification.body,
+                Some(body.clone()),
+                "{:?} must not mutate body for 304 responses",
+                action
+            );
+        }
     }
 
     #[test]

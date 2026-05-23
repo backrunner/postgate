@@ -7,9 +7,11 @@ mod types;
 pub use applicator::{
     apply_request_rules, apply_request_rules_with_values, apply_response_rules,
     apply_response_rules_with_values, capture_enabled, feature, is_enabled, persist_request_writes,
-    persist_response_writes, rules_require_request_body, rules_require_response_body, should_abort,
-    ProxyCreds, RequestWriteContext, ResolveCtx, ResponseModification, ResponseWriteContext,
-    UpstreamProxy, UpstreamProxyKind,
+    persist_response_writes, remote_resource_urls_for_request, remote_resource_urls_for_response,
+    remote_resource_urls_for_response_context, rules_require_request_body,
+    rules_require_response_body, should_abort, ProxyCreds, RequestWriteContext, ResolveCtx,
+    ResolvedResource, ResolvedResources, ResponseModification, ResponseWriteContext, UpstreamProxy,
+    UpstreamProxyKind,
 };
 #[allow(unused_imports)]
 pub use engine::{MatchedRule, RuleEngine};

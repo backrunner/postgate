@@ -6,7 +6,7 @@ use crate::proxy::error_page::ProxyErrorKind;
 use crate::proxy::forward::{
     apply_request_url_modifications, path_and_query_from_url, ForwardTarget,
 };
-use crate::proxy::handler::ProxyContext;
+use crate::proxy::handler::{prefetch_response_remote_resources, ProxyContext};
 use crate::proxy::headers::{
     apply_headers_to_response_builder, build_forward_request_headers,
     build_forward_response_headers, flat_to_headermap, headermap_to_flat,
@@ -14,8 +14,8 @@ use crate::proxy::headers::{
 };
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, feature, is_enabled,
-    persist_request_writes, persist_response_writes, RequestWriteContext, ResolveCtx,
-    ResponseModification, ResponseWriteContext,
+    persist_request_writes, persist_response_writes, remote_resource_urls_for_request,
+    RequestWriteContext, ResolveCtx, ResolvedResources, ResponseModification, ResponseWriteContext,
 };
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
@@ -174,20 +174,30 @@ async fn handle_https_request(
         req_cookies: &cookie_map,
         now_ms,
     };
-    let resolve_ctx = ResolveCtx {
-        store: Some(&ctx.app_state.values_store),
-        ctx: Some(&values_ctx),
-    };
+    let mut remote_resources: ResolvedResources = ctx
+        .remote_resource_cache
+        .fetch_all(
+            &ctx.upstream_client,
+            &remote_resource_urls_for_request(&matched_rules),
+        )
+        .await;
 
     // Apply request rules to get modifications
-    let mut request_modification = apply_request_rules_with_values(
-        &matched_rules,
-        &url,
-        &method_str,
-        &request_headers,
-        Some(&request_body.data),
-        &resolve_ctx,
-    );
+    let mut request_modification = {
+        let resolve_ctx = ResolveCtx {
+            store: Some(&ctx.app_state.values_store),
+            ctx: Some(&values_ctx),
+            remote_resources: Some(&remote_resources),
+        };
+        apply_request_rules_with_values(
+            &matched_rules,
+            &url,
+            &method_str,
+            &request_headers,
+            Some(&request_body.data),
+            &resolve_ctx,
+        )
+    };
 
     // `enable://abort` — drop the HTTPS connection without responding. The
     // browser will see a closed TLS tunnel and report ERR_CONNECTION_CLOSED
@@ -315,6 +325,25 @@ async fn handle_https_request(
 
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
     if let Some(short_circuit) = request_modification.short_circuit {
+        let response_headers = short_circuit.headers;
+        let response_content_type = response_headers.get("content-type").cloned();
+        prefetch_response_remote_resources(
+            &ctx,
+            &mut remote_resources,
+            &matched_rules,
+            &display_url,
+            &final_method_str,
+            &request_headers,
+            &response_headers,
+            short_circuit.status,
+            response_content_type.as_deref(),
+        )
+        .await;
+        let resolve_ctx = ResolveCtx {
+            store: Some(&ctx.app_state.values_store),
+            ctx: Some(&values_ctx),
+            remote_resources: Some(&remote_resources),
+        };
         let final_response = super::direct_response::finalize_direct_response(
             super::direct_response::DirectResponseContext {
                 matched_rules: &matched_rules,
@@ -322,7 +351,7 @@ async fn handle_https_request(
                 method: &final_method_str,
                 request_headers: &request_headers,
                 status: short_circuit.status,
-                response_headers: short_circuit.headers,
+                response_headers,
                 body: short_circuit.body,
                 resolve_ctx: &resolve_ctx,
                 force_res_write,
@@ -427,6 +456,25 @@ async fn handle_https_request(
                     modified.body.as_ref().map(|b| Bytes::from(b.clone()))
                 };
                 let body_bytes = decoded_body.unwrap_or_default();
+                let response_headers = modified.headers;
+                let response_content_type = response_headers.get("content-type").cloned();
+                prefetch_response_remote_resources(
+                    &ctx,
+                    &mut remote_resources,
+                    &matched_rules,
+                    &display_url,
+                    &final_method_str,
+                    &request_headers,
+                    &response_headers,
+                    modified.status,
+                    response_content_type.as_deref(),
+                )
+                .await;
+                let resolve_ctx = ResolveCtx {
+                    store: Some(&ctx.app_state.values_store),
+                    ctx: Some(&values_ctx),
+                    remote_resources: Some(&remote_resources),
+                };
                 let final_response = super::direct_response::finalize_direct_response(
                     super::direct_response::DirectResponseContext {
                         matched_rules: &matched_rules,
@@ -434,7 +482,7 @@ async fn handle_https_request(
                         method: &final_method_str,
                         request_headers: &request_headers,
                         status: modified.status,
-                        response_headers: modified.headers,
+                        response_headers,
                         body: body_bytes,
                         resolve_ctx: &resolve_ctx,
                         force_res_write,
@@ -542,6 +590,23 @@ async fn handle_https_request(
                     headermap_to_flat(&original_resp_headers);
 
                 let response_content_type = upstream_headers.get("content-type").cloned();
+                prefetch_response_remote_resources(
+                    &ctx,
+                    &mut remote_resources,
+                    &matched_rules,
+                    &display_url,
+                    &final_method_str,
+                    &request_headers,
+                    &upstream_headers,
+                    status,
+                    response_content_type.as_deref(),
+                )
+                .await;
+                let resolve_ctx = ResolveCtx {
+                    store: Some(&ctx.app_state.values_store),
+                    ctx: Some(&values_ctx),
+                    remote_resources: Some(&remote_resources),
+                };
                 let response_modification = apply_response_rules_with_values(
                     &matched_rules,
                     &display_url,
@@ -676,6 +741,23 @@ async fn handle_https_request(
             let response_content_type = upstream_headers.get("content-type").cloned();
 
             // Apply response rules
+            prefetch_response_remote_resources(
+                &ctx,
+                &mut remote_resources,
+                &matched_rules,
+                &display_url,
+                &final_method_str,
+                &request_headers,
+                &upstream_headers,
+                status,
+                response_content_type.as_deref(),
+            )
+            .await;
+            let resolve_ctx = ResolveCtx {
+                store: Some(&ctx.app_state.values_store),
+                ctx: Some(&values_ctx),
+                remote_resources: Some(&remote_resources),
+            };
             let response_modification = apply_response_rules_with_values(
                 &matched_rules,
                 &display_url,

@@ -2,6 +2,7 @@ use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
 use crate::proxy::handler::{handle_connection, ProxyContext};
 use crate::proxy::pool::{ConnectionPool, PoolConfig};
+use crate::proxy::resource::RemoteResourceCache;
 use crate::proxy::upstream::build_upstream_client;
 use crate::proxy::BodyStorage;
 use crate::rules::RuleEngine;
@@ -96,6 +97,7 @@ impl ProxyServer {
             connection_pool: Arc::new(connection_pool),
             enable_http2: config.enable_http2,
             upstream_client,
+            remote_resource_cache: RemoteResourceCache::new(),
         });
 
         Self {

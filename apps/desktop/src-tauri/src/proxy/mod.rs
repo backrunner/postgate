@@ -8,6 +8,7 @@ mod headers;
 mod http2;
 mod passthrough;
 mod pool;
+mod resource;
 mod server;
 mod sse;
 mod throttle;

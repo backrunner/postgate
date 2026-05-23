@@ -1660,7 +1660,12 @@ fn parse_header_modifications(s: &str) -> Result<HeaderModifications> {
 
 /// Parse body content from string
 fn parse_body_content(s: &str) -> Result<BodyContent> {
-    if s.starts_with('/') || s.starts_with("./") || s.starts_with("~/") {
+    if s.starts_with('/')
+        || s.starts_with("./")
+        || s.starts_with("~/")
+        || s.starts_with("http://")
+        || s.starts_with("https://")
+    {
         return Ok(BodyContent::File { path: s.into() });
     }
     if s.starts_with('{') || s.starts_with('[') {
@@ -2327,6 +2332,18 @@ example.com host://127.0.0.1
         // Should match URLs ending in .json
         assert!(rules[0].pattern.matches("https://api.com/data.json"));
         assert!(!rules[0].pattern.matches("https://api.com/data.jsonp"));
+    }
+
+    #[test]
+    fn test_body_remote_http_resource_parses_as_file_content() {
+        let rules = parse_rules("example.com resBody://https://assets.example/mock.json").unwrap();
+        assert_eq!(rules.len(), 1);
+        match &rules[0].actions[0] {
+            RuleAction::ResponseBody {
+                content: BodyContent::File { path },
+            } => assert_eq!(path.to_string_lossy(), "https://assets.example/mock.json"),
+            other => panic!("Expected remote resBody file content, got {:?}", other),
+        }
     }
 
     #[test]

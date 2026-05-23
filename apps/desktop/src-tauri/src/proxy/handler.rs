@@ -15,8 +15,9 @@ use crate::proxy::websocket;
 use crate::proxy::BodyStorage;
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, feature, is_enabled,
-    persist_request_writes, persist_response_writes, RequestWriteContext, ResolveCtx,
-    ResponseModification, ResponseWriteContext, RuleEngine,
+    persist_request_writes, persist_response_writes, remote_resource_urls_for_request,
+    remote_resource_urls_for_response_context, MatchedRule, RequestWriteContext, ResolveCtx,
+    ResolvedResources, ResponseModification, ResponseWriteContext, RuleEngine,
 };
 use crate::state::{AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
@@ -34,6 +35,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
+use super::resource::RemoteResourceCache;
 use super::tls::TlsAcceptor;
 use super::tunnel::tunnel_connection;
 use super::upstream::SharedClient;
@@ -55,6 +57,8 @@ pub struct ProxyContext {
     /// `handler.rs:732` in git history. A single client is enough because it
     /// serves both HTTP and HTTPS through the hyper-rustls connector.
     pub upstream_client: SharedClient,
+    /// Shared cache for remote `http(s)` resources referenced by whistle rules.
+    pub remote_resource_cache: RemoteResourceCache,
 }
 
 /// Handle an incoming connection
@@ -204,20 +208,30 @@ async fn handle_request(
         req_cookies: &cookie_map,
         now_ms,
     };
-    let resolve_ctx = ResolveCtx {
-        store: Some(&ctx.app_state.values_store),
-        ctx: Some(&values_ctx),
-    };
+    let mut remote_resources: ResolvedResources = ctx
+        .remote_resource_cache
+        .fetch_all(
+            &ctx.upstream_client,
+            &remote_resource_urls_for_request(&matched_rules),
+        )
+        .await;
 
     // Apply request rules
-    let mut request_modification = apply_request_rules_with_values(
-        &matched_rules,
-        &uri,
-        &method,
-        &request_headers,
-        Some(&request_body.data),
-        &resolve_ctx,
-    );
+    let mut request_modification = {
+        let resolve_ctx = ResolveCtx {
+            store: Some(&ctx.app_state.values_store),
+            ctx: Some(&values_ctx),
+            remote_resources: Some(&remote_resources),
+        };
+        apply_request_rules_with_values(
+            &matched_rules,
+            &uri,
+            &method,
+            &request_headers,
+            Some(&request_body.data),
+            &resolve_ctx,
+        )
+    };
 
     // `enable://abort` — tear down the connection without a normal response.
     // Maps to whistle's abort feature, used to simulate peer resets during
@@ -347,6 +361,25 @@ async fn handle_request(
 
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
     if let Some(short_circuit) = request_modification.short_circuit {
+        let response_headers = short_circuit.headers;
+        let response_content_type = response_headers.get("content-type").cloned();
+        prefetch_response_remote_resources(
+            &ctx,
+            &mut remote_resources,
+            &matched_rules,
+            &display_uri,
+            &final_method_str,
+            &request_headers,
+            &response_headers,
+            short_circuit.status,
+            response_content_type.as_deref(),
+        )
+        .await;
+        let resolve_ctx = ResolveCtx {
+            store: Some(&ctx.app_state.values_store),
+            ctx: Some(&values_ctx),
+            remote_resources: Some(&remote_resources),
+        };
         let final_response = super::direct_response::finalize_direct_response(
             super::direct_response::DirectResponseContext {
                 matched_rules: &matched_rules,
@@ -354,7 +387,7 @@ async fn handle_request(
                 method: &final_method_str,
                 request_headers: &request_headers,
                 status: short_circuit.status,
-                response_headers: short_circuit.headers,
+                response_headers,
                 body: short_circuit.body,
                 resolve_ctx: &resolve_ctx,
                 force_res_write,
@@ -461,6 +494,25 @@ async fn handle_request(
                     modified.body.as_ref().map(|b| Bytes::from(b.clone()))
                 };
                 let body_bytes = decoded_body.unwrap_or_default();
+                let response_headers = modified.headers;
+                let response_content_type = response_headers.get("content-type").cloned();
+                prefetch_response_remote_resources(
+                    &ctx,
+                    &mut remote_resources,
+                    &matched_rules,
+                    &display_uri,
+                    &final_method_str,
+                    &request_headers,
+                    &response_headers,
+                    modified.status,
+                    response_content_type.as_deref(),
+                )
+                .await;
+                let resolve_ctx = ResolveCtx {
+                    store: Some(&ctx.app_state.values_store),
+                    ctx: Some(&values_ctx),
+                    remote_resources: Some(&remote_resources),
+                };
                 let final_response = super::direct_response::finalize_direct_response(
                     super::direct_response::DirectResponseContext {
                         matched_rules: &matched_rules,
@@ -468,7 +520,7 @@ async fn handle_request(
                         method: &final_method_str,
                         request_headers: &request_headers,
                         status: modified.status,
-                        response_headers: modified.headers,
+                        response_headers,
                         body: body_bytes,
                         resolve_ctx: &resolve_ctx,
                         force_res_write,
@@ -716,6 +768,23 @@ async fn handle_request(
             // guaranteed None here because we only took this path when no
             // rule requires the body.
             let response_content_type = upstream_headers.get("content-type").cloned();
+            prefetch_response_remote_resources(
+                &ctx,
+                &mut remote_resources,
+                &matched_rules,
+                &display_uri,
+                &final_method_str,
+                &request_headers,
+                &upstream_headers,
+                status,
+                response_content_type.as_deref(),
+            )
+            .await;
+            let resolve_ctx = ResolveCtx {
+                store: Some(&ctx.app_state.values_store),
+                ctx: Some(&values_ctx),
+                remote_resources: Some(&remote_resources),
+            };
             let response_modification = apply_response_rules_with_values(
                 &matched_rules,
                 &display_uri,
@@ -791,6 +860,23 @@ async fn handle_request(
             let response_content_type = response_headers.get("content-type").cloned();
 
             // Apply response rules
+            prefetch_response_remote_resources(
+                &ctx,
+                &mut remote_resources,
+                &matched_rules,
+                &display_uri,
+                &final_method_str,
+                &request_headers,
+                &response_headers,
+                status,
+                response_content_type.as_deref(),
+            )
+            .await;
+            let resolve_ctx = ResolveCtx {
+                store: Some(&ctx.app_state.values_store),
+                ctx: Some(&values_ctx),
+                remote_resources: Some(&remote_resources),
+            };
             let response_modification = apply_response_rules_with_values(
                 &matched_rules,
                 &display_uri,
@@ -1229,6 +1315,36 @@ enum ForwardResult {
         parts: hyper::http::response::Parts,
         body: Incoming,
     },
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prefetch_response_remote_resources(
+    ctx: &ProxyContext,
+    remote_resources: &mut ResolvedResources,
+    matched_rules: &[MatchedRule],
+    url: &str,
+    method: &str,
+    request_headers: &HashMap<String, String>,
+    response_headers: &HashMap<String, String>,
+    status_code: u16,
+    content_type: Option<&str>,
+) {
+    remote_resources.extend(
+        ctx.remote_resource_cache
+            .fetch_all(
+                &ctx.upstream_client,
+                &remote_resource_urls_for_response_context(
+                    matched_rules,
+                    url,
+                    method,
+                    request_headers,
+                    response_headers,
+                    status_code,
+                    content_type,
+                ),
+            )
+            .await,
+    );
 }
 
 /// Extract query parameters from URL

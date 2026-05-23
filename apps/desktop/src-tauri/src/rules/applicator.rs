@@ -25,6 +25,7 @@ use url::Url;
 pub struct ResolveCtx<'a> {
     pub store: Option<&'a DashMap<String, String>>,
     pub ctx: Option<&'a RequestCtx<'a>>,
+    pub remote_resources: Option<&'a ResolvedResources>,
 }
 
 impl<'a> ResolveCtx<'a> {
@@ -32,8 +33,137 @@ impl<'a> ResolveCtx<'a> {
         Self {
             store: None,
             ctx: None,
+            remote_resources: None,
         }
     }
+}
+
+/// Body bytes and metadata fetched from a remote `http(s)` rule resource.
+#[derive(Debug, Clone)]
+pub struct ResolvedResource {
+    pub body: Bytes,
+    pub content_type: Option<String>,
+}
+
+pub type ResolvedResources = HashMap<String, ResolvedResource>;
+
+/// Remote `http(s)` resource URLs referenced by request-stage rules.
+pub fn remote_resource_urls_for_request(matched_rules: &[MatchedRule]) -> Vec<String> {
+    let mut urls = Vec::new();
+    for matched in matched_rules {
+        if !matched.rule.enabled {
+            continue;
+        }
+        for action in &matched.rule.actions {
+            match action {
+                RuleAction::File { path } => {
+                    collect_remote_resource_url_from_path(path, &matched.remaining_path, &mut urls);
+                }
+                RuleAction::RequestBody { content } => {
+                    collect_remote_resource_url_from_body_content(
+                        content,
+                        &matched.remaining_path,
+                        &mut urls,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+/// Remote `http(s)` resource URLs referenced by response-stage rules.
+pub fn remote_resource_urls_for_response(matched_rules: &[MatchedRule]) -> Vec<String> {
+    remote_resource_urls_for_response_with_context(matched_rules, None)
+}
+
+/// Remote `http(s)` resource URLs referenced by response-stage rules whose
+/// response filters match the supplied response context.
+#[allow(clippy::too_many_arguments)]
+pub fn remote_resource_urls_for_response_context(
+    matched_rules: &[MatchedRule],
+    url: &str,
+    method: &str,
+    request_headers: &HashMap<String, String>,
+    response_headers: &HashMap<String, String>,
+    status_code: u16,
+    content_type: Option<&str>,
+) -> Vec<String> {
+    remote_resource_urls_for_response_with_context(
+        matched_rules,
+        Some(ResponseResourceFilterCtx {
+            url,
+            method,
+            request_headers,
+            response_headers,
+            status_code,
+            content_type,
+        }),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ResponseResourceFilterCtx<'a> {
+    url: &'a str,
+    method: &'a str,
+    request_headers: &'a HashMap<String, String>,
+    response_headers: &'a HashMap<String, String>,
+    status_code: u16,
+    content_type: Option<&'a str>,
+}
+
+fn remote_resource_urls_for_response_with_context(
+    matched_rules: &[MatchedRule],
+    filter_ctx: Option<ResponseResourceFilterCtx<'_>>,
+) -> Vec<String> {
+    let mut urls = Vec::new();
+    let parsed_url = filter_ctx.and_then(|ctx| Url::parse(ctx.url).ok());
+    for matched in matched_rules {
+        if !matched.rule.enabled {
+            continue;
+        }
+        if let (Some(filters), Some(ctx)) = (&matched.rule.filters, filter_ctx) {
+            let protocol = parsed_url.as_ref().map(|u| u.scheme()).unwrap_or("http");
+            let port = parsed_url
+                .as_ref()
+                .and_then(|u| u.port())
+                .unwrap_or(if protocol == "https" { 443 } else { 80 });
+
+            if !filters.matches_response(
+                ctx.method,
+                protocol,
+                port,
+                ctx.request_headers,
+                ctx.response_headers,
+                ctx.url,
+                ctx.status_code,
+                ctx.content_type,
+            ) {
+                continue;
+            }
+        }
+        for action in &matched.rule.actions {
+            match action {
+                RuleAction::ResponseBody { content } => {
+                    collect_remote_resource_url_from_body_content(
+                        content,
+                        &matched.remaining_path,
+                        &mut urls,
+                    );
+                }
+                RuleAction::Mock { path } => {
+                    collect_remote_resource_url_from_path(path, &matched.remaining_path, &mut urls);
+                }
+                _ => {}
+            }
+        }
+    }
+    urls.sort();
+    urls.dedup();
+    urls
 }
 
 /// Resolve a whistle-style reference using the supplied inline+global maps.
@@ -405,7 +535,12 @@ pub fn apply_request_rules_with_values(
                 }
 
                 RuleAction::RequestBody { content } => {
-                    modification.body = Some(resolve_body_content(content, inline, res));
+                    modification.body = Some(resolve_body_content(
+                        content,
+                        &matched.remaining_path,
+                        inline,
+                        res,
+                    ));
                 }
 
                 RuleAction::UrlParams { modifications } => {
@@ -821,7 +956,12 @@ pub fn apply_response_rules_with_values(
                 }
 
                 RuleAction::ResponseBody { content } if can_modify_body => {
-                    modification.body = Some(resolve_body_content(content, inline, res));
+                    modification.body = Some(resolve_body_content(
+                        content,
+                        &matched.remaining_path,
+                        inline,
+                        res,
+                    ));
                 }
 
                 RuleAction::ResponseReplace {
@@ -1612,6 +1752,7 @@ fn format_set_cookie(name: &str, opts: &CookieOptions) -> String {
 /// in text/JSON payloads and in file paths against the values store.
 fn resolve_body_content(
     content: &BodyContent,
+    remaining_path: &str,
     inline: &HashMap<String, String>,
     res: &ResolveCtx<'_>,
 ) -> Bytes {
@@ -1624,21 +1765,8 @@ fn resolve_body_content(
             resolve_bytes(&raw, inline, res)
         }
         BodyContent::File { path } => {
-            // If the path is a `{name}` reference, resolve from the values
-            // store; otherwise read from disk (whistle file:// semantics).
-            let path_str = path.to_string_lossy();
-            let trimmed = path_str.trim();
-            let inline_value = normalize_operation_value(trimmed);
-            if inline_value != trimmed {
-                return resolve_bytes(inline_value, inline, res);
-            }
-            let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                || (trimmed.starts_with("`{") && trimmed.ends_with("}`"));
-            if is_ref {
-                resolve_bytes(trimmed, inline, res)
-            } else {
-                std::fs::read(path).map(Bytes::from).unwrap_or_default()
-            }
+            let (body, _) = resolve_file_content(path, remaining_path, inline, res);
+            body
         }
         BodyContent::Base64 { data } => {
             use base64::Engine;
@@ -1696,6 +1824,27 @@ fn content_type_for_text() -> String {
     "text/plain; charset=utf-8".to_string()
 }
 
+fn collect_remote_resource_url_from_body_content(
+    content: &BodyContent,
+    remaining_path: &str,
+    urls: &mut Vec<String>,
+) {
+    if let BodyContent::File { path } = content {
+        collect_remote_resource_url_from_path(path, remaining_path, urls);
+    }
+}
+
+fn collect_remote_resource_url_from_path(
+    path: &std::path::Path,
+    remaining_path: &str,
+    urls: &mut Vec<String>,
+) {
+    let path_str = path.to_string_lossy();
+    if let Some(url) = remote_resource_url(path_str.trim(), remaining_path) {
+        urls.push(url);
+    }
+}
+
 fn resolve_file_content(
     path: &std::path::Path,
     remaining_path: &str,
@@ -1710,6 +1859,19 @@ fn resolve_file_content(
             resolve_bytes(inline_value, inline, res),
             content_type_for_text(),
         );
+    }
+
+    if let Some(url) = remote_resource_url(trimmed, remaining_path) {
+        if let Some(resource) = remote_resource(&url, res) {
+            return (
+                resource.body.clone(),
+                resource
+                    .content_type
+                    .clone()
+                    .unwrap_or_else(|| content_type_for_resource_url(&url)),
+            );
+        }
+        return (Bytes::new(), content_type_for_resource_url(&url));
     }
 
     let is_ref = (trimmed.starts_with('{') && trimmed.ends_with('}'))
@@ -1734,6 +1896,53 @@ fn resolve_file_content(
         .first_or_octet_stream()
         .to_string();
     (body, ct)
+}
+
+fn remote_resource(url: &str, res: &ResolveCtx<'_>) -> Option<ResolvedResource> {
+    res.remote_resources
+        .and_then(|resources| resources.get(url))
+        .cloned()
+}
+
+fn remote_resource_url(raw: &str, remaining_path: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if normalize_operation_value(trimmed) != trimmed {
+        return None;
+    }
+
+    let mut url = Url::parse(trimmed).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    url.set_fragment(None);
+
+    if should_join_remaining_path(trimmed, &url) {
+        let rest = remaining_path
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(remaining_path)
+            .trim_start_matches(['/', '\\']);
+        if !rest.is_empty() {
+            url = url.join(rest).ok()?;
+        }
+    }
+
+    Some(url.to_string())
+}
+
+fn should_join_remaining_path(raw: &str, url: &Url) -> bool {
+    raw.ends_with('/') || url.path().ends_with('/')
+}
+
+fn content_type_for_resource_url(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            mime_guess::from_path(url.path())
+                .first()
+                .map(|mime| mime.to_string())
+        })
+        .unwrap_or_else(|| "application/octet-stream".to_string())
 }
 
 fn resolve_local_file_path(path: &std::path::Path, remaining_path: &str) -> PathBuf {
@@ -2052,6 +2261,136 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_resource_url_collection_joins_directory_remainders() {
+        let request_rules = vec![matched_rule_with_actions_filters_and_remainder(
+            vec![
+                RuleAction::File {
+                    path: "https://assets.example/static/".into(),
+                },
+                RuleAction::RequestBody {
+                    content: BodyContent::File {
+                        path: "https://api.example/payload.json".into(),
+                    },
+                },
+            ],
+            None,
+            "/js/app.js?cache=1",
+        )];
+
+        assert_eq!(
+            remote_resource_urls_for_request(&request_rules),
+            vec![
+                "https://api.example/payload.json".to_string(),
+                "https://assets.example/static/js/app.js".to_string(),
+            ]
+        );
+
+        let response_rules = vec![matched_rule_with_actions_filters_and_remainder(
+            vec![
+                RuleAction::ResponseBody {
+                    content: BodyContent::File {
+                        path: "https://assets.example/body/".into(),
+                    },
+                },
+                RuleAction::Mock {
+                    path: "https://api.example/mock.json".into(),
+                },
+            ],
+            None,
+            "/users?id=1",
+        )];
+
+        assert_eq!(
+            remote_resource_urls_for_response(&response_rules),
+            vec![
+                "https://api.example/mock.json".to_string(),
+                "https://assets.example/body/users".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_response_remote_resource_collection_honors_response_filters() {
+        let rules = vec![matched_rule_with_filters(
+            RuleAction::ResponseBody {
+                content: BodyContent::File {
+                    path: "https://assets.example/not-found.json".into(),
+                },
+            },
+            Some(RuleFilters {
+                status_codes: vec![404],
+                content_types: vec!["json".into()],
+                ..Default::default()
+            }),
+        )];
+        let request_headers = HashMap::new();
+        let mut response_headers = HashMap::new();
+        response_headers.insert("content-type".to_string(), "application/json".to_string());
+
+        assert_eq!(
+            remote_resource_urls_for_response_context(
+                &rules,
+                "https://example.com/api",
+                "GET",
+                &request_headers,
+                &response_headers,
+                200,
+                Some("application/json"),
+            ),
+            Vec::<String>::new()
+        );
+
+        assert_eq!(
+            remote_resource_urls_for_response_context(
+                &rules,
+                "https://example.com/api",
+                "GET",
+                &request_headers,
+                &response_headers,
+                404,
+                Some("application/json"),
+            ),
+            vec!["https://assets.example/not-found.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_request_file_rule_uses_prefetched_remote_resource() {
+        let mut remote_resources = ResolvedResources::new();
+        remote_resources.insert(
+            "https://assets.example/static/app.js".to_string(),
+            ResolvedResource {
+                body: Bytes::from_static(b"console.log('remote');"),
+                content_type: Some("application/javascript".to_string()),
+            },
+        );
+        let resolve_ctx = ResolveCtx {
+            store: None,
+            ctx: None,
+            remote_resources: Some(&remote_resources),
+        };
+        let rules = vec![matched_rule(RuleAction::File {
+            path: "https://assets.example/static/app.js".into(),
+        })];
+
+        let modification = apply_request_rules_with_values(
+            &rules,
+            "https://example.com/app.js",
+            "GET",
+            &HashMap::new(),
+            None,
+            &resolve_ctx,
+        );
+
+        let response = modification.short_circuit.unwrap();
+        assert_eq!(response.body, Bytes::from_static(b"console.log('remote');"));
+        assert_eq!(
+            response.headers.get("content-type").map(String::as_str),
+            Some("application/javascript")
+        );
+    }
+
+    #[test]
     fn test_html_js_css_body_are_response_only() {
         let request_headers = HashMap::new();
 
@@ -2338,6 +2677,73 @@ mod tests {
                 .get("x-whistle-response-for")
                 .map(String::as_str),
             Some("client")
+        );
+    }
+
+    #[test]
+    fn test_response_body_and_mock_use_prefetched_remote_resources() {
+        let mut remote_resources = ResolvedResources::new();
+        remote_resources.insert(
+            "https://assets.example/body.json".to_string(),
+            ResolvedResource {
+                body: Bytes::from_static(br#"{"ok":true}"#),
+                content_type: Some("application/json".to_string()),
+            },
+        );
+        remote_resources.insert(
+            "https://assets.example/mock/users".to_string(),
+            ResolvedResource {
+                body: Bytes::from_static(b"mocked users"),
+                content_type: Some("text/plain".to_string()),
+            },
+        );
+        let resolve_ctx = ResolveCtx {
+            store: None,
+            ctx: None,
+            remote_resources: Some(&remote_resources),
+        };
+        let request_headers = HashMap::new();
+        let response_headers = HashMap::new();
+
+        let res_body = apply_response_rules_with_values(
+            &[matched_rule(RuleAction::ResponseBody {
+                content: BodyContent::File {
+                    path: "https://assets.example/body.json".into(),
+                },
+            })],
+            "https://example.com/api",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&Bytes::from_static(b"original")),
+            Some("application/json"),
+            &resolve_ctx,
+        );
+        assert_eq!(res_body.body, Some(Bytes::from_static(br#"{"ok":true}"#)));
+
+        let mock = apply_response_rules_with_values(
+            &[matched_rule_with_actions_filters_and_remainder(
+                vec![RuleAction::Mock {
+                    path: "https://assets.example/mock/".into(),
+                }],
+                None,
+                "/users?id=1",
+            )],
+            "https://example.com/users?id=1",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&Bytes::from_static(b"original")),
+            Some("text/plain"),
+            &resolve_ctx,
+        );
+        assert_eq!(mock.status_code, Some(200));
+        assert_eq!(mock.body, Some(Bytes::from_static(b"mocked users")));
+        assert_eq!(
+            mock.headers.get("content-type").map(String::as_str),
+            Some("text/plain")
         );
     }
 

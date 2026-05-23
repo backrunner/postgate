@@ -24,7 +24,7 @@ export interface Rule {
 }
 
 export interface Pattern {
-  type: 'Exact' | 'Wildcard' | 'Regex' | 'PathPrefix' | 'All' | 'Domain' | 'Url';
+  type: 'Exact' | 'Wildcard' | 'Regex' | 'PathPrefix' | 'All' | 'Domain' | 'Url' | 'NoSchema' | 'Port';
   value?: string;
   protocol?: string;
   host?: string;
@@ -39,6 +39,9 @@ export interface RuleFilters {
   contentTypes: string[];
   exclude: string[];
   include: string[];
+  clientIps: string[];
+  hosts: string[];
+  statusCodes: number[];
 }
 
 export interface RuleAction {
@@ -50,6 +53,7 @@ export interface ParseResult {
   success: boolean;
   rules: Rule[];
   errors: ParseError[];
+  warnings: ParseError[];
 }
 
 export interface ParseError {
@@ -200,6 +204,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         success: false,
         rules: [],
         errors: [{ line: 0, message: String(e), content: '' }],
+        warnings: [],
       };
       set({ parseResult: errorResult });
       return errorResult;

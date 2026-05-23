@@ -80,6 +80,23 @@ pub struct RuleFilters {
     pub status_codes: Vec<u16>,
 }
 
+/// Runtime context used to evaluate whistle filters. Some filters are only
+/// known after the upstream response arrives (for example status code and
+/// response headers), so request and response rule application use different
+/// subsets of this context.
+pub struct FilterContext<'a> {
+    pub method: &'a str,
+    pub protocol: &'a str,
+    pub port: u16,
+    pub request_headers: &'a HashMap<String, String>,
+    pub response_headers: Option<&'a HashMap<String, String>>,
+    pub url: &'a str,
+    pub client_ip: Option<&'a str>,
+    pub status_code: Option<u16>,
+    pub body: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+}
+
 impl RuleFilters {
     pub fn is_empty(&self) -> bool {
         self.methods.is_empty()
@@ -103,9 +120,63 @@ impl RuleFilters {
         headers: &HashMap<String, String>,
         url: &str,
     ) -> bool {
+        self.matches_request(method, protocol, port, headers, url, None, None)
+    }
+
+    pub fn matches_request(
+        &self,
+        method: &str,
+        protocol: &str,
+        port: u16,
+        headers: &HashMap<String, String>,
+        url: &str,
+        client_ip: Option<&str>,
+        body: Option<&str>,
+    ) -> bool {
+        self.matches_context(FilterContext {
+            method,
+            protocol,
+            port,
+            request_headers: headers,
+            response_headers: None,
+            url,
+            client_ip,
+            status_code: None,
+            body,
+            content_type: headers.get("content-type").map(String::as_str),
+        })
+    }
+
+    pub fn matches_response(
+        &self,
+        method: &str,
+        protocol: &str,
+        port: u16,
+        request_headers: &HashMap<String, String>,
+        response_headers: &HashMap<String, String>,
+        url: &str,
+        status_code: u16,
+        content_type: Option<&str>,
+    ) -> bool {
+        self.matches_context(FilterContext {
+            method,
+            protocol,
+            port,
+            request_headers,
+            response_headers: Some(response_headers),
+            url,
+            client_ip: None,
+            status_code: Some(status_code),
+            body: None,
+            content_type: content_type
+                .or_else(|| response_headers.get("content-type").map(String::as_str)),
+        })
+    }
+
+    pub fn matches_context(&self, ctx: FilterContext<'_>) -> bool {
         // Check method filter
         if !self.methods.is_empty() {
-            let method_upper = method.to_uppercase();
+            let method_upper = ctx.method.to_uppercase();
             if !self
                 .methods
                 .iter()
@@ -117,7 +188,7 @@ impl RuleFilters {
 
         // Check protocol filter
         if !self.protocols.is_empty() {
-            let proto_lower = protocol.to_lowercase();
+            let proto_lower = ctx.protocol.to_lowercase();
             if !self
                 .protocols
                 .iter()
@@ -128,23 +199,27 @@ impl RuleFilters {
         }
 
         // Check port filter
-        if !self.ports.is_empty() && !self.ports.contains(&port) {
+        if !self.ports.is_empty() && !self.ports.contains(&ctx.port) {
             return false;
         }
 
         // Check header filters
         for (key, expected_value) in &self.headers {
             let key_lower = key.to_lowercase();
-            match headers.get(&key_lower) {
-                Some(value) if value.contains(expected_value) => {}
+            let value = ctx.request_headers.get(&key_lower).or_else(|| {
+                ctx.response_headers
+                    .and_then(|headers| headers.get(&key_lower))
+            });
+            match value {
+                Some(value) if header_value_matches(value, expected_value) => {}
                 _ => return false,
             }
         }
 
         // Check content type filter
-        // Note: Don't reject if Content-Type header is missing (many GET requests have no body)
+        // Note: don't reject if Content-Type is missing; many GET requests have no body.
         if !self.content_types.is_empty() {
-            if let Some(ct) = headers.get("content-type") {
+            if let Some(ct) = ctx.content_type {
                 if !self
                     .content_types
                     .iter()
@@ -156,9 +231,42 @@ impl RuleFilters {
             // If no content-type header, allow the request to pass through
         }
 
+        // Check client IP filter when the caller has IP context. Some internal
+        // unit paths and response-only checks don't, and request matching has
+        // already applied the IP filter before response rules run.
+        if !self.client_ips.is_empty() {
+            if let Some(client_ip) = ctx.client_ip {
+                if !self.client_ips.iter().any(|pattern| {
+                    client_ip == pattern
+                        || wildcard_match(pattern, client_ip)
+                        || pattern_matches(pattern, client_ip)
+                }) {
+                    return false;
+                }
+            }
+        }
+
+        // Status is only known during response rule application. During request
+        // matching we deliberately defer it so `s:404 resBody://...` can still
+        // reach the response phase and decide there.
+        if !self.status_codes.is_empty() {
+            if let Some(status_code) = ctx.status_code {
+                if !self.status_codes.contains(&status_code) {
+                    return false;
+                }
+            }
+        }
+
+        if let Some(body) = ctx.body {
+            // Body filters are not yet parsed into their own field, but this
+            // hook keeps context evaluation extensible without another call-site
+            // rewrite.
+            let _ = body;
+        }
+
         // Check host filter
         if !self.hosts.is_empty() {
-            let host = url::Url::parse(url)
+            let host = url::Url::parse(ctx.url)
                 .ok()
                 .and_then(|u| u.host_str().map(|h| h.to_string()));
             if let Some(h) = host {
@@ -175,18 +283,26 @@ impl RuleFilters {
         // Check exclude patterns (supports regex)
         // Whistle: if ANY exclude matches → reject
         for pattern in &self.exclude {
-            if pattern_matches(pattern, url) {
+            if pattern_matches(pattern, ctx.url) {
                 return false;
             }
         }
 
         // Check include patterns (supports regex)
         // Whistle: if include is specified, at least ONE must match
-        if !self.include.is_empty() && !self.include.iter().any(|p| pattern_matches(p, url)) {
+        if !self.include.is_empty() && !self.include.iter().any(|p| pattern_matches(p, ctx.url)) {
             return false;
         }
 
         true
+    }
+}
+
+fn header_value_matches(value: &str, expected: &str) -> bool {
+    if expected.starts_with('/') || expected.starts_with('^') || expected.contains(".*") {
+        pattern_matches(expected, value)
+    } else {
+        value.to_lowercase().contains(&expected.to_lowercase())
     }
 }
 
@@ -830,6 +946,12 @@ pub enum RuleAction {
     /// Change HTTP method (method://)
     Method { method: String },
 
+    /// Set request content type (reqType://)
+    RequestType { content_type: String },
+
+    /// Set request charset (reqCharset://)
+    RequestCharset { charset: String },
+
     /// Set User-Agent header (ua://)
     UserAgent { value: String },
 
@@ -959,6 +1081,10 @@ pub enum RuleAction {
     /// Disable specific features (disable://)
     Disable { features: Vec<String> },
 
+    /// Known whistle protocol that PostGate parses but cannot faithfully apply.
+    /// Keeping this as an action lets the UI warn instead of silently dropping it.
+    Unsupported { protocol: String, value: String },
+
     // === PROXY CONFIGURATION ===
     /// Use HTTP proxy (proxy://, http-proxy://)
     HttpProxy {
@@ -1030,6 +1156,15 @@ pub enum RuleAction {
 
     /// Append to response body (resAppend://)
     ResponseAppend { content: String },
+
+    /// Write the request body to a local file (reqWrite:// / reqWriteRaw://)
+    RequestWrite { path: String, raw: bool },
+
+    /// Write the response body to a local file (resWrite:// / resWriteRaw://)
+    ResponseWrite { path: String, raw: bool },
+
+    /// Set x-whistle-response-for (responseFor://)
+    ResponseFor { value: String },
 }
 
 /// Proxy authentication

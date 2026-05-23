@@ -120,6 +120,22 @@ impl RuleEngine {
         port: u16,
         headers: &HashMap<String, String>,
     ) -> Vec<MatchedRule> {
+        self.match_request_with_client_ip(method, host, path, protocol, port, headers, None)
+    }
+
+    /// Match a request and include client IP context for whistle `i:` /
+    /// `clientIp:` filters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn match_request_with_client_ip(
+        &self,
+        method: &str,
+        host: &str,
+        path: &str,
+        protocol: &str,
+        port: u16,
+        headers: &HashMap<String, String>,
+        client_ip: Option<&str>,
+    ) -> Vec<MatchedRule> {
         let compiled = self.compiled_rules.read();
 
         // Whistle URL normalization: ensure trailing / after bare hostname
@@ -174,7 +190,9 @@ impl RuleEngine {
 
                 // Check filter conditions if present
                 if let Some(filters) = &cr.rule.filters {
-                    if !filters.matches(method, protocol, port, headers, &url) {
+                    if !filters
+                        .matches_request(method, protocol, port, headers, &url, client_ip, None)
+                    {
                         return None;
                     }
                 }
@@ -432,6 +450,49 @@ mod tests {
 
         let matches =
             engine.match_request("GET", "example.com", "/", "https", 443, &HashMap::new());
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_client_ip_filter_matching() {
+        let engine = RuleEngine::new();
+
+        let rule = Rule {
+            id: "test".to_string(),
+            pattern: Pattern::Domain("example.com".to_string()),
+            filters: Some(RuleFilters {
+                client_ips: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            }),
+            actions: vec![RuleAction::StatusCode { code: 200 }],
+            enabled: true,
+            priority: 0,
+            raw_line: "example.com clientIp:127.0.0.1 statusCode://200".to_string(),
+            negated: false,
+        };
+
+        engine.upsert_group(create_test_group("test-group", vec![rule]));
+
+        let matches = engine.match_request_with_client_ip(
+            "GET",
+            "example.com",
+            "/",
+            "https",
+            443,
+            &HashMap::new(),
+            Some("127.0.0.1"),
+        );
+        assert_eq!(matches.len(), 1);
+
+        let matches = engine.match_request_with_client_ip(
+            "GET",
+            "example.com",
+            "/",
+            "https",
+            443,
+            &HashMap::new(),
+            Some("10.0.0.1"),
+        );
         assert_eq!(matches.len(), 0);
     }
 

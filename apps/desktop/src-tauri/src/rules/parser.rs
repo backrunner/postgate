@@ -382,18 +382,42 @@ fn has_protocol(token: &str) -> bool {
         matches!(
             proto.as_str(),
             "host"
+                | "hosts"
+                | "xhost"
                 | "file"
                 | "redirect"
                 | "statuscode"
                 | "status"
                 | "replacestatus"
+                | "style"
+                | "rule"
+                | "pipe"
+                | "pac"
+                | "https2http-proxy"
+                | "http2https-proxy"
+                | "internal-proxy"
                 | "reqheaders"
                 | "reqheader"
                 | "reqbody"
+                | "reqtype"
+                | "reqcharset"
                 | "urlparams"
+                | "params"
+                | "reqmerge"
                 | "pathreplace"
                 | "urlreplace"
                 | "method"
+                | "cache"
+                | "responsefor"
+                | "rulesfile"
+                | "rulefile"
+                | "rulescript"
+                | "rulescripts"
+                | "reqscript"
+                | "reqrules"
+                | "resscript"
+                | "resrules"
+                | "framescript"
                 | "ua"
                 | "useragent"
                 | "referer"
@@ -406,6 +430,8 @@ fn has_protocol(token: &str) -> bool {
                 | "reqreplace"
                 | "resheaders"
                 | "resheader"
+                | "headerreplace"
+                | "resmerge"
                 | "resbody"
                 | "htmlbody"
                 | "cssbody"
@@ -417,6 +443,7 @@ fn has_protocol(token: &str) -> bool {
                 | "contenttype"
                 | "rescharset"
                 | "charset"
+                | "trailers"
                 | "attachment"
                 | "download"
                 | "htmlappend"
@@ -451,6 +478,8 @@ fn has_protocol(token: &str) -> bool {
                 | "httpproxy"
                 | "https-proxy"
                 | "httpsproxy"
+                | "xproxy"
+                | "xhttp-proxy"
                 | "socks"
                 | "socks5"
                 | "socks4"
@@ -466,6 +495,13 @@ fn has_protocol(token: &str) -> bool {
                 | "reqappend"
                 | "resprepend"
                 | "resappend"
+                | "reqwrite"
+                | "reswrite"
+                | "reqwriteraw"
+                | "reswriteraw"
+                | "cipher"
+                | "tlsoptions"
+                | "snicallback"
                 | "301"
                 | "302"
                 | "307"
@@ -1123,6 +1159,14 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 method: value.to_uppercase(),
             },
 
+            "reqtype" => RuleAction::RequestType {
+                content_type: value.to_string(),
+            },
+
+            "reqcharset" => RuleAction::RequestCharset {
+                charset: value.to_string(),
+            },
+
             "ua" | "useragent" => RuleAction::UserAgent {
                 value: value.to_string(),
             },
@@ -1316,11 +1360,11 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             "ignore" | "filter" | "skip" => RuleAction::Ignore,
 
             "enable" => RuleAction::Enable {
-                features: value.split(',').map(|s| s.trim().to_string()).collect(),
+                features: parse_feature_list(value),
             },
 
             "disable" => RuleAction::Disable {
-                features: value.split(',').map(|s| s.trim().to_string()).collect(),
+                features: parse_feature_list(value),
             },
 
             // === PROXY CONFIGURATION ===
@@ -1423,9 +1467,45 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 content: value.to_string(),
             },
 
+            "reqwrite" => RuleAction::RequestWrite {
+                path: value.to_string(),
+                raw: false,
+            },
+
+            "reqwriteraw" => RuleAction::RequestWrite {
+                path: value.to_string(),
+                raw: true,
+            },
+
+            "reswrite" => RuleAction::ResponseWrite {
+                path: value.to_string(),
+                raw: false,
+            },
+
+            "reswriteraw" => RuleAction::ResponseWrite {
+                path: value.to_string(),
+                raw: true,
+            },
+
+            "responsefor" => RuleAction::ResponseFor {
+                value: value.to_string(),
+            },
+
+            "style" | "rule" | "pipe" | "pac" | "https2http-proxy" | "http2https-proxy"
+            | "internal-proxy" | "cache" | "rulesfile" | "rulefile" | "rulescript"
+            | "rulescripts" | "reqscript" | "reqrules" | "resscript" | "resrules"
+            | "framescript" | "resmerge" | "trailers" | "cipher" | "tlsoptions" | "snicallback"
+            | "xproxy" | "xhttp-proxy" => RuleAction::Unsupported {
+                protocol: protocol.to_string(),
+                value: value.to_string(),
+            },
+
             _ => {
-                tracing::warn!("Unknown action protocol: {}", protocol);
-                return Ok(None);
+                tracing::warn!("Unsupported or unknown action protocol: {}", protocol);
+                RuleAction::Unsupported {
+                    protocol: protocol.to_string(),
+                    value: value.to_string(),
+                }
             }
         };
 
@@ -1600,6 +1680,15 @@ fn parse_body_content(s: &str) -> Result<BodyContent> {
         content: s.to_string(),
         content_type: "text/plain".to_string(),
     })
+}
+
+fn parse_feature_list(value: &str) -> Vec<String> {
+    value
+        .split([',', '|'])
+        .map(str::trim)
+        .filter(|feature| !feature.is_empty())
+        .map(|feature| feature.to_ascii_lowercase())
+        .collect()
 }
 
 /// Parse URL parameter modifications
@@ -1957,6 +2046,80 @@ example.com host://127.0.0.1
     }
 
     #[test]
+    fn test_parse_additional_whistle_protocols() {
+        let rules = parse_rules(
+            "example.com reqType://application/json reqCharset://utf-8 reqWrite:///tmp/req.bin reqWriteRaw:///tmp/req.raw resWrite:///tmp/res.bin resWriteRaw:///tmp/res.raw responseFor://client",
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 1);
+
+        assert!(matches!(
+            rules[0].actions[0],
+            RuleAction::RequestType { ref content_type } if content_type == "application/json"
+        ));
+        assert!(matches!(
+            rules[0].actions[1],
+            RuleAction::RequestCharset { ref charset } if charset == "utf-8"
+        ));
+        assert!(matches!(
+            rules[0].actions[2],
+            RuleAction::RequestWrite { ref path, raw: false } if path == "/tmp/req.bin"
+        ));
+        assert!(matches!(
+            rules[0].actions[3],
+            RuleAction::RequestWrite { ref path, raw: true } if path == "/tmp/req.raw"
+        ));
+        assert!(matches!(
+            rules[0].actions[4],
+            RuleAction::ResponseWrite { ref path, raw: false } if path == "/tmp/res.bin"
+        ));
+        assert!(matches!(
+            rules[0].actions[5],
+            RuleAction::ResponseWrite { ref path, raw: true } if path == "/tmp/res.raw"
+        ));
+        assert!(matches!(
+            rules[0].actions[6],
+            RuleAction::ResponseFor { ref value } if value == "client"
+        ));
+    }
+
+    #[test]
+    fn test_parse_enable_disable_feature_lists_with_pipes() {
+        let rules =
+            parse_rules("example.com enable://forceReqWrite|forceResWrite disable://capture,abort")
+                .unwrap();
+        assert_eq!(rules.len(), 1);
+
+        assert!(matches!(
+            &rules[0].actions[0],
+            RuleAction::Enable { features }
+                if features == &vec!["forcereqwrite".to_string(), "forcereswrite".to_string()]
+        ));
+        assert!(matches!(
+            &rules[0].actions[1],
+            RuleAction::Disable { features }
+                if features == &vec!["capture".to_string(), "abort".to_string()]
+        ));
+    }
+
+    #[test]
+    fn test_parse_unsupported_protocols_are_preserved() {
+        let rules = parse_rules("example.com style://foo unknownThing://bar").unwrap();
+        assert_eq!(rules.len(), 1);
+
+        assert!(matches!(
+            rules[0].actions[0],
+            RuleAction::Unsupported { ref protocol, ref value }
+                if protocol == "style" && value == "foo"
+        ));
+        assert!(matches!(
+            rules[0].actions[1],
+            RuleAction::Unsupported { ref protocol, ref value }
+                if protocol == "unknownthing" && value == "bar"
+        ));
+    }
+
+    #[test]
     fn test_url_pattern_with_query_is_stripped() {
         // Regression: URL pattern containing query/hash should have them
         // stripped from the path so matching works correctly.
@@ -2184,6 +2347,25 @@ example.com host://127.0.0.1
         assert_eq!(rules.len(), 2);
         assert!(matches!(&rules[0].pattern, Pattern::Domain(d) if d == "example.com"));
         assert!(matches!(&rules[1].pattern, Pattern::Domain(d) if d == "test.com"));
+    }
+
+    #[test]
+    fn test_reverse_syntax_known_whistle_protocols_are_not_patterns() {
+        let rules = parse_rules(
+            "hosts://127.0.0.1 xhost://127.0.0.2 reqMerge://debug=true headerReplace://x-a=b example.com",
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 4);
+        assert!(rules
+            .iter()
+            .all(|rule| matches!(&rule.pattern, Pattern::Domain(d) if d == "example.com")));
+        assert!(matches!(rules[0].actions[0], RuleAction::Host { .. }));
+        assert!(matches!(rules[1].actions[0], RuleAction::Host { .. }));
+        assert!(matches!(rules[2].actions[0], RuleAction::UrlParams { .. }));
+        assert!(matches!(
+            rules[3].actions[0],
+            RuleAction::ResponseHeaders { .. }
+        ));
     }
 
     #[test]

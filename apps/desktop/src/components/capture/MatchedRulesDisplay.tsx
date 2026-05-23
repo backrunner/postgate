@@ -17,7 +17,7 @@ function parseRule(ruleLine: string): ParsedRule {
   const raw = ruleLine.trim();
   
   // Skip comments
-  if (raw.startsWith('#') || raw.startsWith('//')) {
+  if (raw.startsWith('#')) {
     return { source: raw, target: null, action: null, raw };
   }
   

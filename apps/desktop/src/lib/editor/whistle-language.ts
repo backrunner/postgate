@@ -12,7 +12,6 @@ export const whistleLanguage: languages.IMonarchLanguage = {
     root: [
       // Comment lines
       [/^[ \t]*#.*$/, 'comment'],
-      [/^[ \t]*\/\/.*$/, 'comment'],
       
       // Empty lines
       [/^[ \t]*$/, ''],
@@ -30,7 +29,6 @@ export const whistleLanguage: languages.IMonarchLanguage = {
     afterFirst: [
       // CRITICAL: Detect start of new line and reset to root
       [/^[ \t]*#.*$/, { token: 'comment', next: '@root' }],
-      [/^[ \t]*\/\/.*$/, { token: 'comment', next: '@root' }],
       [/^[ \t]*$/, { token: '', next: '@root' }],
       [/^[ \t]+/, { token: '', next: '@afterFirstToken' }],
       [/^[^\s]+/, { token: 'source', next: '@afterFirst' }],
@@ -52,7 +50,6 @@ export const whistleLanguage: languages.IMonarchLanguage = {
     afterFirstToken: [
       // CRITICAL: Detect start of new line and reset to root
       [/^[ \t]*#.*$/, { token: 'comment', next: '@root' }],
-      [/^[ \t]*\/\/.*$/, { token: 'comment', next: '@root' }],
       [/^[ \t]*$/, { token: '', next: '@root' }],
       [/^[ \t]+/, { token: '', next: '@afterFirstToken' }],
       [/^[^\s]+/, { token: 'source', next: '@afterFirst' }],

@@ -1,5 +1,7 @@
 use crate::error::{PostGateError, Result};
-use crate::rules::{parse_rules as parse_rules_internal, parse_rules_with_inline, Rule, RuleGroup};
+use crate::rules::{
+    parse_rules as parse_rules_internal, parse_rules_with_inline, Rule, RuleAction, RuleGroup,
+};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -13,6 +15,7 @@ pub struct ParseResult {
     pub success: bool,
     pub rules: Vec<Rule>,
     pub errors: Vec<ParseError>,
+    pub warnings: Vec<ParseError>,
 }
 
 /// A parse error with location info
@@ -137,8 +140,7 @@ fn strip_utf8_bom(content: &str) -> &str {
 }
 
 fn derive_whistle_group_name(path: &Path) -> String {
-    path
-        .file_stem()
+    path.file_stem()
         .and_then(|value| value.to_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -186,6 +188,7 @@ pub async fn parse_rules(content: String) -> Result<ParseResult> {
     match parse_rules_internal(&content) {
         Ok(rules) => Ok(ParseResult {
             success: true,
+            warnings: collect_parse_warnings(&content, &rules),
             rules,
             errors: vec![],
         }),
@@ -200,13 +203,63 @@ pub async fn parse_rules(content: String) -> Result<ParseResult> {
                     message: error_msg,
                     content: String::new(),
                 }],
+                warnings: vec![],
             })
         }
     }
+}
+
+fn collect_parse_warnings(content: &str, rules: &[Rule]) -> Vec<ParseError> {
+    rules
+        .iter()
+        .flat_map(|rule| {
+            rule.actions.iter().filter_map(move |action| {
+                if let RuleAction::Unsupported { protocol, value } = action {
+                    Some(ParseError {
+                        line: find_rule_line(content, &rule.raw_line),
+                        message: format!("Unsupported Whistle protocol: {}://{}", protocol, value),
+                        content: rule.raw_line.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
+}
+
+fn find_rule_line(content: &str, raw_line: &str) -> usize {
+    let needle = raw_line.trim();
+    content
+        .lines()
+        .position(|line| line.trim() == needle)
+        .map(|index| index + 1)
+        .unwrap_or(0)
 }
 
 /// Check if any enabled rule group has a debug:// action
 #[tauri::command]
 pub async fn has_active_debug_rules(state: State<'_, Arc<AppState>>) -> Result<bool> {
     Ok(state.rule_engine.has_active_debug_rules())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collect_parse_warnings_for_unsupported_protocols() {
+        let content = "\nexample.com host://127.0.0.1\napi.example.com style://dark\n";
+        let rules = parse_rules_internal(content).unwrap();
+
+        let warnings = collect_parse_warnings(content, &rules);
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].line, 3);
+        assert_eq!(
+            warnings[0].message,
+            "Unsupported Whistle protocol: style://dark"
+        );
+        assert_eq!(warnings[0].content, "api.example.com style://dark");
+    }
 }

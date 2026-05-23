@@ -1,4 +1,4 @@
-import { CheckCircle, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useRulesStore, Rule, RuleAction } from '@/stores/rules';
@@ -27,8 +27,9 @@ export function ParseStatus({ className }: ParseStatusProps) {
     );
   }
 
-  const { rules, errors } = parseResult;
+  const { rules, errors, warnings = [] } = parseResult;
   const hasErrors = errors.length > 0;
+  const hasWarnings = warnings.length > 0;
 
   return (
     <div className={cn('flex flex-col overflow-hidden', className)}>
@@ -37,11 +38,13 @@ export function ParseStatus({ className }: ParseStatusProps) {
         <div className="flex items-center gap-1.5">
           {hasErrors ? (
             <XCircle className="h-3 w-3 text-red-500 shrink-0" />
+          ) : hasWarnings ? (
+            <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
           ) : (
             <CheckCircle className="h-3 w-3 text-emerald-500 shrink-0" />
           )}
           <span className="text-xs font-medium">
-            {hasErrors ? 'Errors' : 'Valid'}
+            {hasErrors ? 'Errors' : hasWarnings ? 'Valid with warnings' : 'Valid'}
           </span>
         </div>
         <div className="flex items-center gap-1">
@@ -51,6 +54,11 @@ export function ParseStatus({ className }: ParseStatusProps) {
           {hasErrors && (
             <Badge variant="destructive" className="text-[10px] px-1 py-0 h-4">
               {errors.length}
+            </Badge>
+          )}
+          {hasWarnings && (
+            <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 text-amber-600 border-amber-500/40">
+              {warnings.length}
             </Badge>
           )}
         </div>
@@ -76,6 +84,29 @@ export function ParseStatus({ className }: ParseStatusProps) {
                 {error.content && (
                   <code className="text-[10px] bg-muted px-1 py-0.5 rounded mt-1 block truncate" title={error.content}>
                     {error.content}
+                  </code>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : hasWarnings ? (
+          <div className="px-3 py-2 space-y-1.5">
+            {warnings.map((warning, index) => (
+              <div
+                key={index}
+                className="p-1.5 rounded bg-amber-500/10 border border-amber-500/20 overflow-hidden"
+              >
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] font-medium text-amber-600 dark:text-amber-400 shrink-0">
+                    L{warning.line}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground truncate flex-1 w-0" title={warning.message}>
+                    {warning.message}
+                  </span>
+                </div>
+                {warning.content && (
+                  <code className="text-[10px] bg-muted px-1 py-0.5 rounded mt-1 block truncate" title={warning.content}>
+                    {warning.content}
                   </code>
                 )}
               </div>

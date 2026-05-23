@@ -50,6 +50,21 @@ export interface PageError {
   timestamp: number;
 }
 
+export interface PageNetworkRequest {
+  id: string;
+  session_id: string;
+  method: string;
+  url: string;
+  request_headers: Record<string, string>;
+  request_body: string | null;
+  status: number | null;
+  response_headers: Record<string, string> | null;
+  response_body: string | null;
+  duration_ms: number | null;
+  timestamp: number;
+  initiator: string | null;
+}
+
 export interface DebugStatus {
   is_running: boolean;
   port: number;
@@ -76,6 +91,9 @@ interface DebugState {
   // Page errors
   errors: PageError[];
 
+  // Page-level fetch/XHR requests captured by debug injection
+  networkRequests: PageNetworkRequest[];
+
   // Auto-scroll
   autoScroll: boolean;
 
@@ -89,6 +107,7 @@ interface DebugState {
   fetchLogs: (sessionId?: string) => Promise<void>;
   clearLogs: (sessionId?: string) => Promise<void>;
   fetchErrors: (sessionId: string) => Promise<void>;
+  fetchNetworkRequests: (sessionId: string) => Promise<void>;
   clearAll: () => Promise<void>;
   removeSession: (sessionId: string) => Promise<void>;
   setLevelFilter: (levels: ConsoleLevel[]) => void;
@@ -114,6 +133,7 @@ export const useDebugStore = create<DebugState>((set, get) => ({
   levelFilter: [],
   searchFilter: "",
   errors: [],
+  networkRequests: [],
   autoScroll: true,
 
   // Actions
@@ -183,6 +203,7 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     if (sessionId) {
       get().fetchLogs(sessionId);
       get().fetchErrors(sessionId);
+      get().fetchNetworkRequests(sessionId);
     }
   },
 
@@ -217,10 +238,19 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     }
   },
 
+  fetchNetworkRequests: async (sessionId) => {
+    try {
+      const networkRequests = await invoke<PageNetworkRequest[]>("get_network_requests", { sessionId });
+      set({ networkRequests });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
   clearAll: async () => {
     try {
       await invoke("clear_all_debug_data");
-      set({ logs: [], filteredLogs: [], errors: [] });
+      set({ logs: [], filteredLogs: [], errors: [], networkRequests: [] });
     } catch (e) {
       set({ error: String(e) });
     }

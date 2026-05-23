@@ -358,6 +358,7 @@ async fn handle_request(
                 body: short_circuit.body,
                 resolve_ctx: &resolve_ctx,
                 force_res_write,
+                debug_port: ctx.app_state.debug_port_for_injection().await,
             },
         )
         .await;
@@ -471,6 +472,7 @@ async fn handle_request(
                         body: body_bytes,
                         resolve_ctx: &resolve_ctx,
                         force_res_write,
+                        debug_port: ctx.app_state.debug_port_for_injection().await,
                     },
                 )
                 .await;
@@ -901,7 +903,7 @@ async fn handle_request(
 
             // Inject debug script if enabled (this changes the body).
             if response_modification.inject_debug {
-                let injector = ScriptInjector::new(9229); // Default debug port
+                let injector = ScriptInjector::new(ctx.app_state.debug_port_for_injection().await);
                 if let Ok(html) = String::from_utf8(final_body.to_vec()) {
                     if !ScriptInjector::is_already_injected(&html) {
                         let injected = injector.inject_into_html(&html);

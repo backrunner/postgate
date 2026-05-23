@@ -2,29 +2,75 @@
 
 use super::session::SessionManager;
 use super::types::*;
+use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+const CDP_CHANNEL_CAPACITY: usize = 1024;
 
 /// WebSocket server for debug connections from injected scripts
 pub struct DebugServer {
     session_manager: Arc<SessionManager>,
     config: RwLock<DebugConfig>,
     running: AtomicBool,
+    page_connections: DashMap<String, mpsc::UnboundedSender<ServerMessage>>,
+    cdp_buses: DashMap<String, broadcast::Sender<serde_json::Value>>,
+    shutdown_tx: broadcast::Sender<()>,
+    accept_handle: RwLock<Option<JoinHandle<()>>>,
+}
+
+fn parse_request_path(request: &str) -> Option<&str> {
+    let first_line = request.lines().next()?;
+    let mut parts = first_line.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("GET"), Some(path)) => Some(path),
+        _ => None,
+    }
+}
+
+fn devtools_session_id(path: &str) -> Option<String> {
+    route_path(path)
+        .strip_prefix("/devtools/page/")
+        .and_then(|id| id.split(['?', '#']).next())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn route_path(path: &str) -> &str {
+    path.split(['?', '#']).next().unwrap_or(path)
+}
+
+fn cdp_error_response(request: &serde_json::Value, message: &str) -> Option<serde_json::Value> {
+    let id = request.get("id")?.clone();
+    Some(serde_json::json!({
+        "id": id,
+        "error": {
+            "code": -32000,
+            "message": message
+        }
+    }))
 }
 
 impl DebugServer {
     pub fn new(session_manager: Arc<SessionManager>) -> Arc<Self> {
+        let (shutdown_tx, _) = broadcast::channel(16);
         Arc::new(Self {
             session_manager,
             config: RwLock::new(DebugConfig::default()),
             running: AtomicBool::new(false),
+            page_connections: DashMap::new(),
+            cdp_buses: DashMap::new(),
+            shutdown_tx,
+            accept_handle: RwLock::new(None),
         })
     }
 
@@ -49,27 +95,38 @@ impl DebugServer {
         info!("Debug WebSocket server listening on ws://{}", addr);
 
         let server = Arc::clone(self);
-        tokio::spawn(async move {
-            while server.running.load(Ordering::Relaxed) {
-                match listener.accept().await {
-                    Ok((stream, addr)) => {
-                        debug!("Debug connection from {}", addr);
-                        let server = Arc::clone(&server);
-                        tokio::spawn(async move {
-                            if let Err(e) = server.handle_incoming(stream).await {
-                                warn!("Debug connection error: {}", e);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let accept_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    incoming = listener.accept() => {
+                        match incoming {
+                            Ok((stream, addr)) => {
+                                debug!("Debug connection from {}", addr);
+                                let server = Arc::clone(&server);
+                                tokio::spawn(async move {
+                                    if let Err(e) = server.handle_incoming(stream).await {
+                                        warn!("Debug connection error: {}", e);
+                                    }
+                                });
                             }
-                        });
-                    }
-                    Err(e) => {
-                        if server.running.load(Ordering::Relaxed) {
-                            error!("Failed to accept connection: {}", e);
+                            Err(e) => {
+                                if server.running.load(Ordering::Relaxed) {
+                                    error!("Failed to accept connection: {}", e);
+                                }
+                                break;
+                            }
                         }
+                    }
+                    _ = shutdown_rx.recv() => {
                         break;
                     }
                 }
             }
+
+            server.running.store(false, Ordering::Relaxed);
         });
+        *self.accept_handle.write().await = Some(accept_handle);
 
         Ok(())
     }
@@ -82,13 +139,19 @@ impl DebugServer {
 
         let request_line = String::from_utf8_lossy(&buf[..n]);
 
+        let request_path = parse_request_path(&request_line);
+
         // Check if it's an HTTP GET request for /json endpoints
-        if request_line.starts_with("GET /json") {
+        if request_path.is_some_and(|path| path.starts_with("/json")) {
             return self.handle_http_request(stream).await;
         }
 
-        // Otherwise treat as WebSocket connection
-        self.handle_connection(stream).await
+        if let Some(session_id) = request_path.and_then(devtools_session_id) {
+            return self.handle_devtools_connection(stream, session_id).await;
+        }
+
+        // Otherwise treat as a page-side injected-script WebSocket.
+        self.handle_page_connection(stream).await
     }
 
     /// Handle HTTP requests for /json/list, /json/version etc.
@@ -100,6 +163,7 @@ impl DebugServer {
         // Parse the request line
         let first_line = request.lines().next().unwrap_or("");
         let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+        let path = route_path(path);
 
         let config = self.config.read().await;
         let port = config.port;
@@ -156,6 +220,15 @@ impl DebugServer {
     /// Stop the debug server
     pub async fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+        let _ = self.shutdown_tx.send(());
+
+        if let Some(handle) = self.accept_handle.write().await.take() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+        }
+
+        self.page_connections.clear();
+        self.cdp_buses.clear();
+
         let mut config = self.config.write().await;
         config.enabled = false;
         info!("Debug server stopped");
@@ -177,67 +250,219 @@ impl DebugServer {
         }
     }
 
-    /// Handle a single WebSocket connection
-    async fn handle_connection(&self, stream: TcpStream) -> Result<(), String> {
+    /// Get the port currently configured for debug injection.
+    pub async fn port(&self) -> u16 {
+        self.config.read().await.port
+    }
+
+    /// Handle a page-side WebSocket connection from the injected script.
+    async fn handle_page_connection(&self, stream: TcpStream) -> Result<(), String> {
         let ws_stream = accept_async(stream)
             .await
             .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
 
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         let mut session_id: Option<String> = None;
+        let (page_tx, mut page_rx) = mpsc::unbounded_channel::<ServerMessage>();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        while let Some(msg) = ws_receiver.next().await {
-            let msg = match msg {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!("WebSocket error: {}", e);
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
                     break;
                 }
-            };
-
-            match msg {
-                Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(client_msg) => {
-                        let response = self.handle_message(client_msg, &mut session_id).await;
-                        if let Some(resp) = response {
-                            let json = serde_json::to_string(&resp).unwrap();
-                            if ws_sender.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
+                msg = ws_receiver.next() => {
+                    let Some(msg) = msg else { break };
+                    let msg = match msg {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("Page debug WebSocket error: {}", e);
+                            break;
                         }
+                    };
+
+                    match msg {
+                        Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                            Ok(client_msg) => {
+                                let response = self
+                                    .handle_page_message(client_msg, &mut session_id, &page_tx)
+                                    .await;
+                                if let Some(resp) = response {
+                                    if page_tx.send(resp).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse page debug message: {} - {}", e, text);
+                            }
+                        },
+                        Message::Binary(_) => {
+                            // Binary messages not supported for injected-script transport.
+                        }
+                        Message::Ping(data) => {
+                            let _ = ws_sender.send(Message::Pong(data)).await;
+                        }
+                        Message::Pong(_) => {}
+                        Message::Close(_) => {
+                            break;
+                        }
+                        Message::Frame(_) => {}
                     }
-                    Err(e) => {
-                        warn!("Failed to parse client message: {} - {}", e, text);
+                }
+                outbound = page_rx.recv() => {
+                    let Some(outbound) = outbound else { break };
+                    let json = serde_json::to_string(&outbound)
+                        .map_err(|e| format!("Failed to serialize page message: {}", e))?;
+                    if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                        break;
                     }
-                },
-                Message::Binary(_) => {
-                    // Binary messages not supported yet
                 }
-                Message::Ping(data) => {
-                    let _ = ws_sender.send(Message::Pong(data)).await;
-                }
-                Message::Pong(_) => {}
-                Message::Close(_) => {
-                    break;
-                }
-                Message::Frame(_) => {}
             }
         }
 
         // Clean up session on disconnect
         if let Some(id) = session_id {
+            self.page_connections.remove(&id);
+            self.cdp_buses.remove(&id);
             self.session_manager.disconnect_session(&id);
-            debug!("Debug session {} disconnected", id);
+            debug!("Debug page session {} disconnected", id);
         }
 
         Ok(())
     }
 
-    /// Handle a client message
-    async fn handle_message(
+    /// Handle a Chrome DevTools WebSocket connection for `/devtools/page/{id}`.
+    async fn handle_devtools_connection(
+        &self,
+        stream: TcpStream,
+        session_id: String,
+    ) -> Result<(), String> {
+        let ws_stream = accept_async(stream)
+            .await
+            .map_err(|e| format!("DevTools WebSocket handshake failed: {}", e))?;
+
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let mut cdp_rx = self.cdp_bus_for_session(&session_id).subscribe();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+        info!("DevTools connected to debug session {}", session_id);
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    break;
+                }
+                msg = ws_receiver.next() => {
+                    let Some(msg) = msg else { break };
+                    let msg = match msg {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("DevTools WebSocket error: {}", e);
+                            break;
+                        }
+                    };
+
+                    match msg {
+                        Message::Text(text) => {
+                            self.forward_cdp_to_page(&session_id, text.as_str(), &mut ws_sender).await?;
+                        }
+                        Message::Binary(bytes) => {
+                            if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+                                self.forward_cdp_to_page(&session_id, &text, &mut ws_sender).await?;
+                            }
+                        }
+                        Message::Ping(data) => {
+                            let _ = ws_sender.send(Message::Pong(data)).await;
+                        }
+                        Message::Pong(_) => {}
+                        Message::Close(_) => break,
+                        Message::Frame(_) => {}
+                    }
+                }
+                cdp_message = cdp_rx.recv() => {
+                    match cdp_message {
+                        Ok(message) => {
+                            let json = serde_json::to_string(&message)
+                                .map_err(|e| format!("Failed to serialize CDP message: {}", e))?;
+                            if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(
+                                session_id,
+                                skipped,
+                                "DevTools CDP receiver lagged behind"
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+
+        debug!("DevTools disconnected from debug session {}", session_id);
+
+        Ok(())
+    }
+
+    async fn forward_cdp_to_page(
+        &self,
+        session_id: &str,
+        raw_message: &str,
+        ws_sender: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<TcpStream>,
+            Message,
+        >,
+    ) -> Result<(), String> {
+        let parsed = match serde_json::from_str::<serde_json::Value>(raw_message) {
+            Ok(value) => value,
+            Err(e) => {
+                warn!("Invalid DevTools CDP JSON for {}: {}", session_id, e);
+                return Ok(());
+            }
+        };
+
+        let page_tx = self.page_connections.get(session_id).map(|tx| tx.clone());
+        if let Some(page_tx) = page_tx {
+            page_tx
+                .send(ServerMessage::Cdp { message: parsed })
+                .map_err(|_| format!("Debug page session {} is disconnected", session_id))?;
+            self.session_manager.update_activity(session_id);
+        } else if let Some(error) =
+            cdp_error_response(&parsed, "PostGate page session is not connected")
+        {
+            let json = serde_json::to_string(&error)
+                .map_err(|e| format!("Failed to serialize CDP error: {}", e))?;
+            let _ = ws_sender.send(Message::Text(json.into())).await;
+        }
+
+        Ok(())
+    }
+
+    fn cdp_bus_for_session(&self, session_id: &str) -> broadcast::Sender<serde_json::Value> {
+        if let Some(tx) = self.cdp_buses.get(session_id) {
+            return tx.clone();
+        }
+
+        let (tx, _) = broadcast::channel(CDP_CHANNEL_CAPACITY);
+        self.cdp_buses.insert(session_id.to_string(), tx.clone());
+        tx
+    }
+
+    fn publish_cdp_message(&self, session_id: &str, message: serde_json::Value) {
+        let tx = self.cdp_bus_for_session(session_id);
+        let _ = tx.send(message);
+        self.session_manager.update_activity(session_id);
+    }
+
+    /// Handle a message from the injected page script.
+    async fn handle_page_message(
         &self,
         msg: ClientMessage,
         session_id: &mut Option<String>,
+        page_tx: &mpsc::UnboundedSender<ServerMessage>,
     ) -> Option<ServerMessage> {
         let config = self.config.read().await;
         let port = config.port;
@@ -258,6 +483,9 @@ impl DebugServer {
                     port,
                 );
                 *session_id = Some(session.id.clone());
+                self.page_connections
+                    .insert(session.id.clone(), page_tx.clone());
+                self.cdp_bus_for_session(&session.id);
                 info!(
                     "Debug session started: {} (CDP: {})",
                     session.id, session.cdp_enabled
@@ -332,7 +560,7 @@ impl DebugServer {
                 if let Some(sid) = session_id {
                     if phase == "start" {
                         let request = PageNetworkRequest {
-                            id,
+                            id: id.clone(),
                             session_id: sid.clone(),
                             method: method.unwrap_or_default(),
                             url: url.unwrap_or_default(),
@@ -347,19 +575,37 @@ impl DebugServer {
                         };
                         self.session_manager.add_network_request(request);
                     } else if phase == "end" {
-                        self.session_manager.update_network_request(&id, |req| {
+                        let updated = self.session_manager.update_network_request(&id, |req| {
                             req.status = status;
                             req.response_headers = response_headers.clone();
                             req.duration_ms = duration_ms;
                         });
+                        if !updated {
+                            let request = PageNetworkRequest {
+                                id,
+                                session_id: sid.clone(),
+                                method: method.unwrap_or_default(),
+                                url: url.unwrap_or_default(),
+                                request_headers: request_headers.unwrap_or_default(),
+                                request_body,
+                                status,
+                                response_headers,
+                                response_body: None,
+                                duration_ms,
+                                timestamp: chrono::Utc::now().timestamp_millis(),
+                                initiator,
+                            };
+                            self.session_manager.add_network_request(request);
+                        }
                     }
                 }
                 None
             }
 
-            ClientMessage::Cdp { message: _ } => {
-                // CDP messages for DevTools integration
-                // TODO: Forward to DevTools frontend
+            ClientMessage::Cdp { message } => {
+                if let Some(sid) = session_id {
+                    self.publish_cdp_message(sid, message);
+                }
                 None
             }
 
@@ -459,5 +705,117 @@ fn parse_error_type(s: &str) -> ErrorType {
         "unhandledrejection" | "promise" => ErrorType::Promise,
         "error" | "runtime" => ErrorType::Runtime,
         _ => ErrorType::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tokio::net::TcpListener;
+
+    async fn free_local_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn test_parse_request_path_for_devtools_target() {
+        let request = "GET /devtools/page/session-1?foo=bar HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+
+        assert_eq!(
+            parse_request_path(request),
+            Some("/devtools/page/session-1?foo=bar")
+        );
+        assert_eq!(
+            devtools_session_id(parse_request_path(request).unwrap()).as_deref(),
+            Some("session-1")
+        );
+    }
+
+    #[test]
+    fn test_parse_request_path_rejects_non_get() {
+        let request = "POST /devtools/page/session-1 HTTP/1.1\r\n\r\n";
+
+        assert_eq!(parse_request_path(request), None);
+    }
+
+    #[test]
+    fn test_cdp_error_response_preserves_request_id() {
+        let request = serde_json::json!({
+            "id": 7,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "1 + 1" }
+        });
+
+        let error = cdp_error_response(&request, "not connected").unwrap();
+
+        assert_eq!(error["id"], 7);
+        assert_eq!(error["error"]["code"], -32000);
+        assert_eq!(error["error"]["message"], "not connected");
+    }
+
+    #[tokio::test]
+    async fn test_debug_server_stop_releases_port_for_restart() {
+        let port = free_local_port().await;
+        let manager = SessionManager::new();
+        let server = DebugServer::new(manager);
+
+        server.start(port).await.unwrap();
+        assert!(server.is_running());
+
+        server.stop().await;
+        assert!(!server.is_running());
+
+        server.start(port).await.unwrap();
+        assert!(server.is_running());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_network_end_without_start_is_recorded() {
+        let manager = SessionManager::new();
+        let server = DebugServer::new(Arc::clone(&manager));
+        let mut session_id = None;
+        let (page_tx, _page_rx) = mpsc::unbounded_channel();
+
+        server
+            .handle_page_message(
+                ClientMessage::Hello {
+                    url: "https://example.com".into(),
+                    title: Some("Example".into()),
+                    user_agent: None,
+                    cdp_enabled: Some(false),
+                },
+                &mut session_id,
+                &page_tx,
+            )
+            .await;
+
+        let sid = session_id.unwrap();
+        server
+            .handle_page_message(
+                ClientMessage::Network {
+                    id: "req-1".into(),
+                    phase: "end".into(),
+                    method: Some("GET".into()),
+                    url: Some("https://example.com/api".into()),
+                    request_headers: Some(HashMap::new()),
+                    request_body: None,
+                    status: Some(200),
+                    response_headers: Some(HashMap::new()),
+                    duration_ms: Some(42),
+                    initiator: Some("fetch".into()),
+                },
+                &mut Some(sid.clone()),
+                &page_tx,
+            )
+            .await;
+
+        let requests = manager.get_network_requests(&sid);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, "req-1");
+        assert_eq!(requests[0].status, Some(200));
+        assert_eq!(requests[0].duration_ms, Some(42));
     }
 }

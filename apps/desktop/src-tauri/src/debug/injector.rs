@@ -37,6 +37,14 @@ impl ScriptInjector {
   let reconnectAttempts = 0;
   const MAX_RECONNECT = 5;
 
+  function flushMessageQueue() {{
+    if (!ws || ws.readyState !== WebSocket.OPEN || !sessionId) return;
+    while (messageQueue.length > 0) {{
+      const msg = messageQueue.shift();
+      ws.send(JSON.stringify(msg));
+    }}
+  }}
+
   // Load Chobitsu dynamically from CDN
   function loadChobitsu() {{
     return new Promise((resolve, reject) => {{
@@ -100,16 +108,11 @@ impl ScriptInjector {
           user_agent: navigator.userAgent,
           cdp_enabled: cdpReady
         }});
-
-        // Flush queued messages
-        while (messageQueue.length > 0) {{
-          const msg = messageQueue.shift();
-          ws.send(JSON.stringify(msg));
-        }}
       }};
 
       ws.onclose = function() {{
         ws = null;
+        sessionId = null;
         console.log('[PostGate] Disconnected from debug server');
         
         if (reconnectAttempts < MAX_RECONNECT) {{
@@ -139,7 +142,8 @@ impl ScriptInjector {
 
   // Send message to PostGate server
   function send(msg) {{
-    if (ws && ws.readyState === WebSocket.OPEN) {{
+    const isHello = msg && msg.type === 'hello';
+    if (ws && ws.readyState === WebSocket.OPEN && (isHello || sessionId)) {{
       ws.send(JSON.stringify(msg));
     }} else {{
       messageQueue.push(msg);
@@ -152,6 +156,7 @@ impl ScriptInjector {
       case 'welcome':
         sessionId = msg.session_id;
         console.log('[PostGate] Session established:', sessionId);
+        flushMessageQueue();
         break;
 
       case 'cdp':
@@ -188,9 +193,9 @@ impl ScriptInjector {
   }}
 
   // Serialize values for transmission
-  function serialize(value, depth, seen) {{
-    depth = depth || 0;
-    seen = seen || new WeakSet();
+	  function serialize(value, depth, seen) {{
+	    depth = depth || 0;
+	    seen = seen || new WeakSet();
 
     if (depth > 10) return {{ type: 'truncated', value: '[Max depth]' }};
     if (value === null) return {{ type: 'null' }};
@@ -228,12 +233,187 @@ impl ScriptInjector {
       return {{ type: 'object', value: obj }};
     }}
 
-    return {{ type: 'unknown', value: String(value) }};
-  }}
+	    return {{ type: 'unknown', value: String(value) }};
+	  }}
 
-  // Capture console for fallback/legacy support
-  var originalConsole = {{}};
-  var consoleMethods = ['log', 'info', 'warn', 'error', 'debug', 'trace', 'clear'];
+	  function nextNetworkId() {{
+	    return 'net-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+	  }}
+
+	  function headersToObject(headers) {{
+	    var out = {{}};
+	    if (!headers) return out;
+	    try {{
+	      if (headers instanceof Headers) {{
+	        headers.forEach(function(value, key) {{ out[key] = value; }});
+	        return out;
+	      }}
+	      if (Array.isArray(headers)) {{
+	        headers.forEach(function(pair) {{
+	          if (pair && pair.length >= 2) out[String(pair[0])] = String(pair[1]);
+	        }});
+	        return out;
+	      }}
+	      Object.keys(headers).forEach(function(key) {{
+	        var value = headers[key];
+	        if (value != null) out[key] = String(value);
+	      }});
+	    }} catch (_) {{}}
+	    return out;
+	  }}
+
+	  function bodyPreview(body) {{
+	    if (body == null) return null;
+	    if (typeof body === 'string') return body.length > 10000 ? body.slice(0, 10000) + '...' : body;
+	    if (body instanceof URLSearchParams) return body.toString();
+	    if (body instanceof FormData) return '[FormData]';
+	    if (body instanceof Blob) return '[Blob ' + body.size + ' bytes]';
+	    if (body instanceof ArrayBuffer) return '[ArrayBuffer ' + body.byteLength + ' bytes]';
+	    if (ArrayBuffer.isView(body)) return '[' + body.constructor.name + ' ' + body.byteLength + ' bytes]';
+	    try {{ return JSON.stringify(body); }} catch (_) {{ return String(body); }}
+	  }}
+
+	  function requestInfoFromFetch(input, init) {{
+	    var method = (init && init.method) || 'GET';
+	    var url = '';
+	    var headers = {{}};
+	    var requestBody = init ? init.body : null;
+
+	    try {{
+	      if (input instanceof Request) {{
+	        url = input.url;
+	        method = (init && init.method) || input.method || method;
+	        headers = headersToObject(input.headers);
+	      }} else {{
+	        url = String(input);
+	      }}
+	    }} catch (_) {{
+	      url = String(input);
+	    }}
+
+	    if (init && init.headers) {{
+	      Object.assign(headers, headersToObject(init.headers));
+	    }}
+
+	    return {{
+	      method: String(method || 'GET').toUpperCase(),
+	      url: url,
+	      headers: headers,
+	      body: bodyPreview(requestBody)
+	    }};
+	  }}
+
+	  function sendNetworkStart(id, info, initiator) {{
+	    send({{
+	      type: 'network',
+	      id: id,
+	      phase: 'start',
+	      method: info.method,
+	      url: info.url,
+	      request_headers: info.headers,
+	      request_body: info.body,
+	      initiator: initiator
+	    }});
+	  }}
+
+	  function sendNetworkEnd(id, status, responseHeaders, startedAt) {{
+	    send({{
+	      type: 'network',
+	      id: id,
+	      phase: 'end',
+	      status: status,
+	      response_headers: responseHeaders || {{}},
+	      duration_ms: Math.round(performance.now() - startedAt)
+	    }});
+	  }}
+
+	  function installNetworkCapture() {{
+	    if (window.__POSTGATE_NETWORK_CAPTURED__) return;
+	    window.__POSTGATE_NETWORK_CAPTURED__ = true;
+
+	    if (typeof window.fetch === 'function') {{
+	      var originalFetch = window.fetch.bind(window);
+	      window.fetch = function(input, init) {{
+	        var id = nextNetworkId();
+	        var startedAt = performance.now();
+	        var info = requestInfoFromFetch(input, init);
+	        sendNetworkStart(id, info, 'fetch');
+
+	        return originalFetch(input, init).then(function(response) {{
+	          sendNetworkEnd(id, response.status, headersToObject(response.headers), startedAt);
+	          return response;
+	        }}, function(error) {{
+	          sendNetworkEnd(id, 0, {{}}, startedAt);
+	          send({{
+	            type: 'error',
+	            error_type: 'NetworkError',
+	            message: error && error.message ? error.message : String(error),
+	            stack: error && error.stack ? error.stack : null
+	          }});
+	          throw error;
+	        }});
+	      }};
+	    }}
+
+	    if (typeof window.XMLHttpRequest === 'function') {{
+	      var OriginalXHR = window.XMLHttpRequest;
+	      var originalOpen = OriginalXHR.prototype.open;
+	      var originalSetRequestHeader = OriginalXHR.prototype.setRequestHeader;
+	      var originalSend = OriginalXHR.prototype.send;
+
+	      OriginalXHR.prototype.open = function(method, url) {{
+	        this.__postgateNetwork = {{
+	          id: nextNetworkId(),
+	          method: String(method || 'GET').toUpperCase(),
+	          url: String(url || ''),
+	          headers: {{}},
+	          startedAt: 0
+	        }};
+	        return originalOpen.apply(this, arguments);
+	      }};
+
+	      OriginalXHR.prototype.setRequestHeader = function(name, value) {{
+	        if (this.__postgateNetwork) {{
+	          this.__postgateNetwork.headers[String(name)] = String(value);
+	        }}
+	        return originalSetRequestHeader.apply(this, arguments);
+	      }};
+
+	      OriginalXHR.prototype.send = function(body) {{
+	        var info = this.__postgateNetwork || {{
+	          id: nextNetworkId(),
+	          method: 'GET',
+	          url: '',
+	          headers: {{}}
+	        }};
+	        info.startedAt = performance.now();
+	        sendNetworkStart(info.id, {{
+	          method: info.method,
+	          url: info.url,
+	          headers: info.headers,
+	          body: bodyPreview(body)
+	        }}, 'xhr');
+
+	        this.addEventListener('loadend', function() {{
+	          var responseHeaders = {{}};
+	          try {{
+	            var raw = this.getAllResponseHeaders();
+	            raw.trim().split(/[\r\n]+/).forEach(function(line) {{
+	              var idx = line.indexOf(':');
+	              if (idx > 0) responseHeaders[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+	            }});
+	          }} catch (_) {{}}
+	          sendNetworkEnd(info.id, this.status || 0, responseHeaders, info.startedAt);
+	        }});
+
+	        return originalSend.apply(this, arguments);
+	      }};
+	    }}
+	  }}
+
+	  // Capture console for fallback/legacy support
+	  var originalConsole = {{}};
+	  var consoleMethods = ['log', 'info', 'warn', 'error', 'debug', 'trace', 'clear'];
 
   consoleMethods.forEach(function(method) {{
     originalConsole[method] = console[method];
@@ -265,18 +445,20 @@ impl ScriptInjector {
   }});
 
   // Capture unhandled promise rejections
-  window.addEventListener('unhandledrejection', function(event) {{
-    var reason = event.reason;
-    send({{
+	  window.addEventListener('unhandledrejection', function(event) {{
+	    var reason = event.reason;
+	    send({{
       type: 'error',
       error_type: 'UnhandledRejection',
       message: reason && reason.message ? reason.message : String(reason),
       stack: reason ? reason.stack : null,
       timestamp: Date.now()
-    }});
-  }});
+	    }});
+	  }});
 
-  // Keep-alive ping
+	  installNetworkCapture();
+
+	  // Keep-alive ping
   setInterval(function() {{
     if (ws && ws.readyState === WebSocket.OPEN) {{
       send({{ type: 'ping' }});

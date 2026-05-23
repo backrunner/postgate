@@ -1,6 +1,6 @@
 // Tauri IPC commands for debug functionality
 
-use crate::debug::{ConsoleLog, DebugSession, DebugStatus, PageError};
+use crate::debug::{ConsoleLog, DebugSession, DebugStatus, PageError, PageNetworkRequest};
 use crate::state::AppState;
 use std::sync::Arc;
 use tauri::State;
@@ -57,6 +57,14 @@ pub async fn get_page_errors(
     session_id: String,
 ) -> Result<Vec<PageError>, String> {
     Ok(state.get_page_errors(&session_id))
+}
+
+#[tauri::command]
+pub async fn get_network_requests(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<Vec<PageNetworkRequest>, String> {
+    Ok(state.get_network_requests(&session_id))
 }
 
 #[tauri::command]

@@ -194,12 +194,15 @@ impl SessionManager {
         &self,
         request_id: &str,
         update: impl FnOnce(&mut PageNetworkRequest),
-    ) {
+    ) -> bool {
         if let Some(mut request) = self.network_requests.get_mut(request_id) {
             update(&mut request);
             let _ = self
                 .event_tx
                 .send(DebugEvent::NetworkRequest(request.clone()));
+            true
+        } else {
+            false
         }
     }
 

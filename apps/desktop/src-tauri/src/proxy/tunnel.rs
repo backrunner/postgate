@@ -326,6 +326,7 @@ async fn handle_https_request(
                 body: short_circuit.body,
                 resolve_ctx: &resolve_ctx,
                 force_res_write,
+                debug_port: ctx.app_state.debug_port_for_injection().await,
             },
         )
         .await;
@@ -437,6 +438,7 @@ async fn handle_https_request(
                         body: body_bytes,
                         resolve_ctx: &resolve_ctx,
                         force_res_write,
+                        debug_port: ctx.app_state.debug_port_for_injection().await,
                     },
                 )
                 .await;
@@ -779,7 +781,9 @@ async fn handle_https_request(
 
             // debug:// — inject CDP bridge into HTML responses.
             if response_modification.inject_debug {
-                let injector = crate::debug::ScriptInjector::new(9229);
+                let injector = crate::debug::ScriptInjector::new(
+                    ctx.app_state.debug_port_for_injection().await,
+                );
                 if let Ok(html) = String::from_utf8(final_body.to_vec()) {
                     if !crate::debug::ScriptInjector::is_already_injected(&html) {
                         final_body = Bytes::from(injector.inject_into_html(&html));

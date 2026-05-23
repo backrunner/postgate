@@ -18,6 +18,7 @@ pub struct DirectResponseContext<'a, 'r> {
     pub body: Bytes,
     pub resolve_ctx: &'a ResolveCtx<'r>,
     pub force_res_write: bool,
+    pub debug_port: u16,
 }
 
 pub struct FinalizedDirectResponse {
@@ -55,7 +56,7 @@ pub async fn finalize_direct_response(
     let mut final_body = response_modification.body.clone().unwrap_or(ctx.body);
 
     if response_modification.inject_debug {
-        let injector = ScriptInjector::new(9229);
+        let injector = ScriptInjector::new(ctx.debug_port);
         if let Ok(html) = String::from_utf8(final_body.to_vec()) {
             if !ScriptInjector::is_already_injected(&html) {
                 final_body = Bytes::from(injector.inject_into_html(&html));

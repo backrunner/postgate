@@ -1,5 +1,8 @@
 use crate::cert::CertificateAuthority;
-use crate::debug::{ConsoleLog, DebugServer, DebugSession, DebugStatus, PageError, SessionManager};
+use crate::debug::{
+    ConsoleLog, DebugServer, DebugSession, DebugStatus, PageError, PageNetworkRequest,
+    SessionManager,
+};
 use crate::plugin::PluginManager;
 use crate::proxy::{BodyStorage, ProxyServer};
 use crate::rules::RuleEngine;
@@ -424,6 +427,18 @@ impl AppState {
         }
     }
 
+    /// Port used by debug:// script injection. Falls back to the default so
+    /// injected pages still target the conventional endpoint before the debug
+    /// server has been started by the rules UI.
+    pub async fn debug_port_for_injection(&self) -> u16 {
+        let server_guard = self.debug_server.read().await;
+        if let Some(ref server) = *server_guard {
+            server.port().await
+        } else {
+            9229
+        }
+    }
+
     /// Get all debug sessions
     pub fn get_debug_sessions(&self) -> Vec<DebugSession> {
         self.debug_session_manager.get_sessions()
@@ -456,6 +471,11 @@ impl AppState {
     /// Get page errors
     pub fn get_page_errors(&self, session_id: &str) -> Vec<PageError> {
         self.debug_session_manager.get_page_errors(session_id)
+    }
+
+    /// Get page-level network requests captured by the injected debug script
+    pub fn get_network_requests(&self, session_id: &str) -> Vec<PageNetworkRequest> {
+        self.debug_session_manager.get_network_requests(session_id)
     }
 
     /// Clear all debug data

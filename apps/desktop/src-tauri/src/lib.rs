@@ -122,6 +122,7 @@ pub fn run() {
             commands::debug::get_console_logs,
             commands::debug::clear_console_logs,
             commands::debug::get_page_errors,
+            commands::debug::get_network_requests,
             commands::debug::clear_all_debug_data,
             commands::debug::remove_debug_session,
             commands::values::list_values,

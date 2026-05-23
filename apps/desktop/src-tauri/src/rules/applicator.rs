@@ -11,6 +11,7 @@ use crate::values::{resolve_str, RequestCtx};
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use url::Url;
 
 /// Handle to the shared values store + current request context, passed into
@@ -71,6 +72,8 @@ pub struct RequestModification {
     pub path: Option<String>,
     /// Modified URL query parameters
     pub query_params: Option<String>,
+    /// Modified request method
+    pub method: Option<String>,
     /// Should short-circuit with this response
     pub short_circuit: Option<ShortCircuitResponse>,
     /// Request delay in ms
@@ -100,6 +103,8 @@ pub struct RequestModification {
     /// forward client is built against this upstream proxy instead of
     /// connecting directly.
     pub upstream_proxy: Option<UpstreamProxy>,
+    /// Files that should receive the final request body.
+    pub write_files: Vec<BodyWriteTarget>,
 }
 
 /// An upstream proxy configuration derived from `proxy://` / `socks://`
@@ -160,6 +165,33 @@ pub struct ResponseModification {
     pub cookies: Vec<String>,
     /// Inject debug script into HTML responses
     pub inject_debug: bool,
+    /// Files that should receive the request/response body.
+    pub write_files: Vec<BodyWriteTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BodyWriteTarget {
+    pub path: String,
+    pub raw: bool,
+    pub remaining_path: String,
+}
+
+/// Data needed to serialize a request for whistle `reqWriteRaw://`.
+pub struct RequestWriteContext<'a> {
+    pub method: &'a str,
+    pub url: &'a str,
+    pub headers: &'a HashMap<String, String>,
+    pub body: &'a Bytes,
+    pub force: bool,
+}
+
+/// Data needed to serialize a response for whistle `resWriteRaw://`.
+pub struct ResponseWriteContext<'a> {
+    pub method: &'a str,
+    pub status: u16,
+    pub headers: &'a HashMap<String, String>,
+    pub body: &'a Bytes,
+    pub force: bool,
 }
 
 /// Does the set of matched rules require buffering the upstream response body
@@ -196,6 +228,7 @@ pub fn rules_require_response_body(matched_rules: &[MatchedRule]) -> bool {
                 | RuleAction::ResponseAppend { .. }
                 | RuleAction::Echo
                 | RuleAction::Mock { .. } => return true,
+                RuleAction::ResponseWrite { .. } => return true,
                 // Response throttling requires owning the body chunks.
                 RuleAction::Speed { response_kbps, .. } if response_kbps.is_some() => return true,
                 // Debug injects a <script> into HTML responses.
@@ -221,7 +254,8 @@ pub fn rules_require_request_body(matched_rules: &[MatchedRule]) -> bool {
                 RuleAction::RequestBody { .. }
                 | RuleAction::RequestReplace { .. }
                 | RuleAction::RequestPrepend { .. }
-                | RuleAction::RequestAppend { .. } => return true,
+                | RuleAction::RequestAppend { .. }
+                | RuleAction::RequestWrite { .. } => return true,
                 RuleAction::Speed { request_kbps, .. } if request_kbps.is_some() => return true,
                 RuleAction::Plugin { .. } => return true,
                 _ => {}
@@ -241,24 +275,37 @@ pub mod feature {
     /// Close the connection without responding. Useful for simulating peer
     /// disconnects.
     pub const ABORT: &str = "abort";
+    /// Allow reqWrite:// / reqWriteRaw:// to overwrite existing files.
+    pub const FORCE_REQ_WRITE: &str = "forcereqwrite";
+    /// Allow resWrite:// / resWriteRaw:// to overwrite existing files.
+    pub const FORCE_RES_WRITE: &str = "forcereswrite";
 }
 
 /// Returns true if `feature` is not in the modification's `disabled_features`.
 /// Used at capture / emit sites to honor `disable://capture`.
 pub fn capture_enabled(modification: &RequestModification) -> bool {
-    !modification
-        .disabled_features
-        .iter()
-        .any(|f| f.eq_ignore_ascii_case(feature::CAPTURE) || f.eq_ignore_ascii_case(feature::HIDE))
+    !modification.ignore
+        && !modification.disabled_features.iter().any(|f| {
+            f.eq_ignore_ascii_case(feature::CAPTURE) || f.eq_ignore_ascii_case(feature::HIDE)
+        })
 }
 
 /// Returns true if `enable://abort` is set, i.e. the proxy should terminate
 /// this request without responding.
 pub fn should_abort(modification: &RequestModification) -> bool {
+    is_enabled(modification, feature::ABORT)
+}
+
+/// Returns true when a whistle feature flag is enabled for this request.
+pub fn is_enabled(modification: &RequestModification, name: &str) -> bool {
     modification
         .enabled_features
         .iter()
-        .any(|f| f.eq_ignore_ascii_case(feature::ABORT))
+        .any(|f| f.eq_ignore_ascii_case(name))
+        && !modification
+            .disabled_features
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(name))
 }
 
 /// Apply rules to a request and return modifications
@@ -373,10 +420,23 @@ pub fn apply_request_rules_with_values(
                 }
 
                 RuleAction::Method { method: new_method } => {
-                    // Method modification - stored in headers for now
+                    modification.method = Some(new_method.clone());
+                }
+
+                RuleAction::RequestType { content_type } => {
                     modification
                         .headers
-                        .insert(":method".to_string(), new_method.clone());
+                        .insert("content-type".to_string(), content_type.clone());
+                }
+
+                RuleAction::RequestCharset { charset } => {
+                    let value = modification
+                        .headers
+                        .entry("content-type".to_string())
+                        .or_insert_with(|| "text/plain".to_string());
+                    if !value.to_lowercase().contains("charset=") {
+                        value.push_str(&format!("; charset={}", charset));
+                    }
                 }
 
                 RuleAction::UserAgent { value } => {
@@ -610,6 +670,14 @@ pub fn apply_request_rules_with_values(
                     modification.body = Some(Bytes::from(combined));
                 }
 
+                RuleAction::RequestWrite { path, raw } => {
+                    modification.write_files.push(BodyWriteTarget {
+                        path: path.clone(),
+                        raw: *raw,
+                        remaining_path: matched.remaining_path.clone(),
+                    });
+                }
+
                 // `timeout://<ms>` — abort the upstream call if it takes longer.
                 // Stored on the RequestModification; consumed in the proxy
                 // forward sites via tokio::time::timeout.
@@ -689,6 +757,14 @@ pub fn apply_request_rules_with_values(
                         .extend(features.iter().cloned());
                 }
 
+                RuleAction::Unsupported { protocol, value } => {
+                    tracing::warn!(
+                        "Whistle protocol {}://{} is parsed but unsupported in PostGate",
+                        protocol,
+                        value
+                    );
+                }
+
                 _ => {
                     // Response-only actions are skipped here
                 }
@@ -706,6 +782,7 @@ pub fn apply_response_rules(
     method: &str,
     request_headers: &HashMap<String, String>,
     response_headers: &HashMap<String, String>,
+    status_code: u16,
     body: Option<&Bytes>,
     content_type: Option<&str>,
 ) -> ResponseModification {
@@ -715,6 +792,7 @@ pub fn apply_response_rules(
         method,
         request_headers,
         response_headers,
+        status_code,
         body,
         content_type,
         &ResolveCtx::disabled(),
@@ -730,6 +808,7 @@ pub fn apply_response_rules_with_values(
     method: &str,
     request_headers: &HashMap<String, String>,
     response_headers: &HashMap<String, String>,
+    status_code: u16,
     body: Option<&Bytes>,
     content_type: Option<&str>,
     res: &ResolveCtx<'_>,
@@ -757,7 +836,16 @@ pub fn apply_response_rules_with_values(
                 .and_then(|u| u.port())
                 .unwrap_or(if protocol == "https" { 443 } else { 80 });
 
-            if !filters.matches(method, protocol, port, request_headers, url) {
+            if !filters.matches_response(
+                method,
+                protocol,
+                port,
+                request_headers,
+                response_headers,
+                url,
+                status_code,
+                content_type,
+            ) {
                 continue;
             }
         }
@@ -1118,6 +1206,25 @@ pub fn apply_response_rules_with_values(
                     combined.extend_from_slice(&extra);
                     modification.body = Some(Bytes::from(combined));
                 }
+                RuleAction::ResponseWrite { path, raw } => {
+                    modification.write_files.push(BodyWriteTarget {
+                        path: path.clone(),
+                        raw: *raw,
+                        remaining_path: matched.remaining_path.clone(),
+                    });
+                }
+                RuleAction::ResponseFor { value } => {
+                    modification
+                        .headers
+                        .insert("x-whistle-response-for".to_string(), value.clone());
+                }
+                RuleAction::Unsupported { protocol, value } => {
+                    tracing::warn!(
+                        "Whistle protocol {}://{} is parsed but unsupported in PostGate",
+                        protocol,
+                        value
+                    );
+                }
 
                 _ => {
                     // Request-only actions are skipped here
@@ -1127,6 +1234,275 @@ pub fn apply_response_rules_with_values(
     }
 
     modification
+}
+
+pub fn persist_request_writes(targets: &[BodyWriteTarget], ctx: RequestWriteContext<'_>) {
+    for target in targets {
+        if !target.raw && !has_request_body(ctx.method) {
+            continue;
+        }
+        let data = if target.raw {
+            serialize_raw_request(ctx.method, ctx.url, ctx.headers, ctx.body)
+        } else {
+            ctx.body.clone()
+        };
+        if let Err(e) =
+            write_body_file(&target.path, &target.remaining_path, &data, ctx.force, None)
+        {
+            tracing::warn!(
+                "{} request write failed for {}: {}",
+                if target.raw { "raw" } else { "body" },
+                target.path,
+                e
+            );
+        }
+    }
+}
+
+pub fn persist_response_writes(targets: &[BodyWriteTarget], ctx: ResponseWriteContext<'_>) {
+    for target in targets {
+        if !target.raw && !has_response_body(ctx.method, ctx.status) {
+            continue;
+        }
+        let data = if target.raw {
+            serialize_raw_response(ctx.status, ctx.headers, ctx.body)
+        } else {
+            ctx.body.clone()
+        };
+        if let Err(e) = write_body_file(
+            &target.path,
+            &target.remaining_path,
+            &data,
+            ctx.force,
+            Some(ctx.status),
+        ) {
+            tracing::warn!(
+                "{} response write failed for {}: {}",
+                if target.raw { "raw" } else { "body" },
+                target.path,
+                e
+            );
+        }
+    }
+}
+
+fn write_body_file(
+    path: &str,
+    remaining_path: &str,
+    body: &Bytes,
+    force: bool,
+    response_status: Option<u16>,
+) -> std::io::Result<()> {
+    let Some(path) = normalize_write_path(path, remaining_path, response_status) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    if !force && path.try_exists()? {
+        return Ok(());
+    }
+    std::fs::write(path, body)
+}
+
+fn normalize_write_path(
+    raw_path: &str,
+    remaining_path: &str,
+    response_status: Option<u16>,
+) -> Option<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let mut path = join_write_path(raw_path, remaining_path);
+    if let Some(status) = response_status {
+        if status != 200 {
+            path = PathBuf::from(format!("{}.{}", path.display(), status));
+        }
+    }
+
+    if path_ends_with_separator(&path.to_string_lossy()) {
+        path.push("index.html");
+    }
+
+    Some(path)
+}
+
+fn join_write_path(raw_path: &str, remaining_path: &str) -> PathBuf {
+    let mut path = PathBuf::from(raw_path);
+    let mut rest = remaining_path;
+    if rest.is_empty() {
+        return path;
+    }
+
+    if path_ends_with_separator(raw_path) {
+        let rest_ends_with_sep = path_ends_with_separator(rest);
+        rest = rest.trim_start_matches(['/', '\\']);
+        for part in rest.split(['/', '\\']).filter(|part| !part.is_empty()) {
+            if part == "." || part == ".." {
+                continue;
+            }
+            path.push(part);
+        }
+        if rest_ends_with_sep && !path_ends_with_separator(&path.to_string_lossy()) {
+            path.push("");
+        }
+    }
+
+    path
+}
+
+fn path_ends_with_separator(raw: &str) -> bool {
+    raw.ends_with('/') || raw.ends_with('\\')
+}
+
+fn has_request_body(method: &str) -> bool {
+    !matches!(
+        method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS" | "CONNECT"
+    )
+}
+
+fn has_response_body(method: &str, status: u16) -> bool {
+    !method.eq_ignore_ascii_case("HEAD")
+        && status != 204
+        && !(300..400).contains(&status)
+        && !(100..=199).contains(&status)
+}
+
+fn serialize_raw_request(
+    method: &str,
+    url: &str,
+    headers: &HashMap<String, String>,
+    body: &Bytes,
+) -> Bytes {
+    let mut raw = format!("{} {} HTTP/1.1", method, request_target_for_raw(url));
+    append_headers(&mut raw, headers, true);
+    raw.push_str("\r\n\r\n");
+    let mut bytes = raw.into_bytes();
+    bytes.extend_from_slice(body);
+    Bytes::from(bytes)
+}
+
+fn serialize_raw_response(status: u16, headers: &HashMap<String, String>, body: &Bytes) -> Bytes {
+    let mut raw = format!(
+        "HTTP/1.1 {} {}",
+        status,
+        http_status_reason(status).unwrap_or_default()
+    );
+    append_headers(&mut raw, headers, false);
+    raw.push_str("\r\n\r\n");
+    let mut bytes = raw.into_bytes();
+    bytes.extend_from_slice(body);
+    Bytes::from(bytes)
+}
+
+fn request_target_for_raw(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .map(|parsed| {
+            let mut target = parsed.path().to_string();
+            if target.is_empty() {
+                target.push('/');
+            }
+            if let Some(query) = parsed.query() {
+                target.push('?');
+                target.push_str(query);
+            }
+            target
+        })
+        .unwrap_or_else(|| url.to_string())
+}
+
+fn append_headers(out: &mut String, headers: &HashMap<String, String>, is_request: bool) {
+    let mut keys: Vec<&String> = headers.keys().collect();
+    keys.sort_unstable();
+    for key in keys {
+        let lower = key.to_ascii_lowercase();
+        if is_request && lower == "content-encoding" {
+            continue;
+        }
+        if lower.starts_with(':') {
+            continue;
+        }
+        if let Some(value) = headers.get(key) {
+            out.push_str("\r\n");
+            out.push_str(key);
+            out.push_str(": ");
+            out.push_str(value);
+        }
+    }
+}
+
+fn http_status_reason(status: u16) -> Option<&'static str> {
+    match status {
+        100 => Some("Continue"),
+        101 => Some("Switching Protocols"),
+        102 => Some("Processing"),
+        103 => Some("Early Hints"),
+        200 => Some("OK"),
+        201 => Some("Created"),
+        202 => Some("Accepted"),
+        203 => Some("Non-Authoritative Information"),
+        204 => Some("No Content"),
+        205 => Some("Reset Content"),
+        206 => Some("Partial Content"),
+        207 => Some("Multi-Status"),
+        208 => Some("Already Reported"),
+        226 => Some("IM Used"),
+        300 => Some("Multiple Choices"),
+        301 => Some("Moved Permanently"),
+        302 => Some("Found"),
+        303 => Some("See Other"),
+        304 => Some("Not Modified"),
+        305 => Some("Use Proxy"),
+        307 => Some("Temporary Redirect"),
+        308 => Some("Permanent Redirect"),
+        400 => Some("Bad Request"),
+        401 => Some("Unauthorized"),
+        402 => Some("Payment Required"),
+        403 => Some("Forbidden"),
+        404 => Some("Not Found"),
+        405 => Some("Method Not Allowed"),
+        406 => Some("Not Acceptable"),
+        407 => Some("Proxy Authentication Required"),
+        408 => Some("Request Timeout"),
+        409 => Some("Conflict"),
+        410 => Some("Gone"),
+        411 => Some("Length Required"),
+        412 => Some("Precondition Failed"),
+        413 => Some("Payload Too Large"),
+        414 => Some("URI Too Long"),
+        415 => Some("Unsupported Media Type"),
+        416 => Some("Range Not Satisfiable"),
+        417 => Some("Expectation Failed"),
+        418 => Some("I'm a teapot"),
+        421 => Some("Misdirected Request"),
+        422 => Some("Unprocessable Entity"),
+        423 => Some("Locked"),
+        424 => Some("Failed Dependency"),
+        425 => Some("Too Early"),
+        426 => Some("Upgrade Required"),
+        428 => Some("Precondition Required"),
+        429 => Some("Too Many Requests"),
+        431 => Some("Request Header Fields Too Large"),
+        451 => Some("Unavailable For Legal Reasons"),
+        500 => Some("Internal Server Error"),
+        501 => Some("Not Implemented"),
+        502 => Some("Bad Gateway"),
+        503 => Some("Service Unavailable"),
+        504 => Some("Gateway Timeout"),
+        505 => Some("HTTP Version Not Supported"),
+        506 => Some("Variant Also Negotiates"),
+        507 => Some("Insufficient Storage"),
+        508 => Some("Loop Detected"),
+        510 => Some("Not Extended"),
+        511 => Some("Network Authentication Required"),
+        _ => None,
+    }
 }
 
 /// Apply header modifications
@@ -1360,7 +1736,51 @@ fn append_to_html(body: Option<&Bytes>, content: &str, prepend: bool) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::engine::MatchedRule;
+    use crate::rules::types::{Pattern, Rule, RuleFilters};
+    use std::fs;
     use std::sync::Arc;
+
+    fn matched_rule(action: RuleAction) -> MatchedRule {
+        matched_rule_with_filters(action, None)
+    }
+
+    fn matched_rule_with_filters(action: RuleAction, filters: Option<RuleFilters>) -> MatchedRule {
+        MatchedRule {
+            rule: Rule {
+                id: "t".into(),
+                pattern: Pattern::Domain("example.com".into()),
+                filters,
+                actions: vec![action],
+                enabled: true,
+                priority: 0,
+                raw_line: String::new(),
+                negated: false,
+            },
+            remaining_path: String::new(),
+            inline_values: Arc::new(HashMap::new()),
+        }
+    }
+
+    fn body_write_target(path: impl Into<String>, raw: bool) -> BodyWriteTarget {
+        BodyWriteTarget {
+            path: path.into(),
+            raw,
+            remaining_path: String::new(),
+        }
+    }
+
+    fn body_write_target_with_remainder(
+        path: impl Into<String>,
+        raw: bool,
+        remaining_path: impl Into<String>,
+    ) -> BodyWriteTarget {
+        BodyWriteTarget {
+            path: path.into(),
+            raw,
+            remaining_path: remaining_path.into(),
+        }
+    }
 
     #[test]
     fn test_header_modifications() {
@@ -1450,14 +1870,319 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_request_rules_sets_method_url_and_body_write() {
+        let rules = vec![
+            matched_rule(RuleAction::Method {
+                method: "POST".into(),
+            }),
+            matched_rule(RuleAction::RequestType {
+                content_type: "application/json".into(),
+            }),
+            matched_rule(RuleAction::RequestCharset {
+                charset: "utf-8".into(),
+            }),
+            matched_rule(RuleAction::PathReplace {
+                pattern: "/v1".into(),
+                replacement: "/v2".into(),
+            }),
+            matched_rule(RuleAction::UrlParams {
+                modifications: UrlParamModifications {
+                    set: [("debug".to_string(), "true".to_string())]
+                        .into_iter()
+                        .collect(),
+                    remove: vec!["old".to_string()],
+                    append: HashMap::new(),
+                },
+            }),
+            matched_rule(RuleAction::RequestWrite {
+                path: "/tmp/postgate-req.bin".into(),
+                raw: true,
+            }),
+        ];
+
+        let modification = apply_request_rules(
+            &rules,
+            "https://example.com/v1/users?old=1",
+            "GET",
+            &HashMap::new(),
+            Some(&Bytes::from_static(b"body")),
+        );
+
+        assert_eq!(modification.method.as_deref(), Some("POST"));
+        assert_eq!(
+            modification.headers.get("content-type").map(String::as_str),
+            Some("application/json; charset=utf-8")
+        );
+        assert_eq!(modification.path.as_deref(), Some("/v2/users"));
+        assert_eq!(modification.query_params.as_deref(), Some("debug=true"));
+        assert_eq!(modification.write_files.len(), 1);
+        assert!(modification.write_files[0].raw);
+    }
+
+    #[test]
+    fn test_persist_request_writes_raw_message_and_body_only_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_path = dir.path().join("req.raw");
+        let body_path = dir.path().join("req.body");
+        let get_body_path = dir.path().join("get.body");
+        let mut headers = HashMap::new();
+        headers.insert("host".to_string(), "example.com".to_string());
+        headers.insert("content-encoding".to_string(), "gzip".to_string());
+
+        persist_request_writes(
+            &[
+                body_write_target(body_path.to_string_lossy(), false),
+                body_write_target(raw_path.to_string_lossy(), true),
+            ],
+            RequestWriteContext {
+                method: "POST",
+                url: "https://example.com/api/users?debug=1",
+                headers: &headers,
+                body: &Bytes::from_static(b"payload"),
+                force: false,
+            },
+        );
+
+        assert_eq!(fs::read(&body_path).unwrap(), b"payload");
+        let raw = String::from_utf8(fs::read(&raw_path).unwrap()).unwrap();
+        assert!(raw.starts_with("POST /api/users?debug=1 HTTP/1.1\r\n"));
+        assert!(raw.contains("\r\nhost: example.com\r\n"));
+        assert!(!raw.contains("content-encoding: gzip"));
+        assert!(raw.ends_with("\r\n\r\npayload"));
+
+        persist_request_writes(
+            &[body_write_target(get_body_path.to_string_lossy(), false)],
+            RequestWriteContext {
+                method: "GET",
+                url: "https://example.com/api",
+                headers: &headers,
+                body: &Bytes::from_static(b"ignored"),
+                force: true,
+            },
+        );
+        assert!(!get_body_path.exists());
+    }
+
+    #[test]
+    fn test_persist_response_writes_raw_message_status_suffix_and_head_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let body_path = dir.path().join("res.body");
+        let raw_path = dir.path().join("res.raw");
+        let not_found = dir.path().join("missing.html.404");
+        let head_body_path = dir.path().join("head.body");
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "text/plain".to_string());
+
+        persist_response_writes(
+            &[
+                body_write_target(body_path.to_string_lossy(), false),
+                body_write_target(raw_path.to_string_lossy(), true),
+            ],
+            ResponseWriteContext {
+                method: "GET",
+                status: 200,
+                headers: &headers,
+                body: &Bytes::from_static(b"ok"),
+                force: false,
+            },
+        );
+        assert_eq!(fs::read(&body_path).unwrap(), b"ok");
+        let raw = String::from_utf8(fs::read(&raw_path).unwrap()).unwrap();
+        assert!(raw.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(raw.contains("\r\ncontent-type: text/plain\r\n"));
+        assert!(raw.ends_with("\r\n\r\nok"));
+
+        persist_response_writes(
+            &[body_write_target(
+                not_found.with_extension("").to_string_lossy(),
+                false,
+            )],
+            ResponseWriteContext {
+                method: "GET",
+                status: 404,
+                headers: &headers,
+                body: &Bytes::from_static(b"missing"),
+                force: true,
+            },
+        );
+        assert_eq!(fs::read(&not_found).unwrap(), b"missing");
+
+        persist_response_writes(
+            &[body_write_target(head_body_path.to_string_lossy(), false)],
+            ResponseWriteContext {
+                method: "HEAD",
+                status: 200,
+                headers: &headers,
+                body: &Bytes::from_static(b"ignored"),
+                force: true,
+            },
+        );
+        assert!(!head_body_path.exists());
+    }
+
+    #[test]
+    fn test_persist_writes_directory_index_remainder_and_force_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_dir = dir.path().join("out");
+        let out_dir_slash = format!("{}/", out_dir.display());
+        let existing = out_dir.join("asset.js");
+
+        persist_request_writes(
+            &[body_write_target_with_remainder(
+                &out_dir_slash,
+                false,
+                "/asset.js?cache=1",
+            )],
+            RequestWriteContext {
+                method: "POST",
+                url: "https://example.com/asset.js?cache=1",
+                headers: &HashMap::new(),
+                body: &Bytes::from_static(b"first"),
+                force: false,
+            },
+        );
+        assert_eq!(
+            fs::read(out_dir.join("asset.js?cache=1")).unwrap(),
+            b"first"
+        );
+
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(&existing, b"old").unwrap();
+        persist_request_writes(
+            &[body_write_target_with_remainder(
+                &out_dir_slash,
+                false,
+                "/asset.js",
+            )],
+            RequestWriteContext {
+                method: "POST",
+                url: "https://example.com/asset.js",
+                headers: &HashMap::new(),
+                body: &Bytes::from_static(b"new"),
+                force: false,
+            },
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"old");
+
+        persist_request_writes(
+            &[body_write_target_with_remainder(
+                &out_dir_slash,
+                false,
+                "/asset.js",
+            )],
+            RequestWriteContext {
+                method: "POST",
+                url: "https://example.com/asset.js",
+                headers: &HashMap::new(),
+                body: &Bytes::from_static(b"new"),
+                force: true,
+            },
+        );
+        assert_eq!(fs::read(&existing).unwrap(), b"new");
+
+        persist_request_writes(
+            &[body_write_target_with_remainder(&out_dir_slash, false, "/")],
+            RequestWriteContext {
+                method: "POST",
+                url: "https://example.com/",
+                headers: &HashMap::new(),
+                body: &Bytes::from_static(b"index"),
+                force: true,
+            },
+        );
+        assert_eq!(fs::read(out_dir.join("index.html")).unwrap(), b"index");
+
+        persist_response_writes(
+            &[body_write_target_with_remainder(&out_dir_slash, false, "/")],
+            ResponseWriteContext {
+                method: "GET",
+                status: 404,
+                headers: &HashMap::new(),
+                body: &Bytes::from_static(b"not found"),
+                force: true,
+            },
+        );
+        assert_eq!(fs::read(out_dir.join(".404")).unwrap(), b"not found");
+    }
+
+    #[test]
+    fn test_apply_response_rules_honors_status_filter_and_write_actions() {
+        let rules = vec![matched_rule_with_filters(
+            RuleAction::ResponseBody {
+                content: BodyContent::Text {
+                    content: "not found".into(),
+                    content_type: "text/plain".into(),
+                },
+            },
+            Some(RuleFilters {
+                status_codes: vec![404],
+                ..Default::default()
+            }),
+        )];
+
+        let request_headers = HashMap::new();
+        let response_headers = HashMap::new();
+        let body = Bytes::from_static(b"ok");
+
+        let no_match = apply_response_rules(
+            &rules,
+            "https://example.com/api",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/plain"),
+        );
+        assert_eq!(no_match.body, Some(body.clone()));
+
+        let matched = apply_response_rules(
+            &rules,
+            "https://example.com/api",
+            "GET",
+            &request_headers,
+            &response_headers,
+            404,
+            Some(&body),
+            Some("text/plain"),
+        );
+        assert_eq!(matched.body, Some(Bytes::from_static(b"not found")));
+
+        let write_rules = vec![
+            matched_rule(RuleAction::ResponseWrite {
+                path: "/tmp/postgate-res.bin".into(),
+                raw: false,
+            }),
+            matched_rule(RuleAction::ResponseFor {
+                value: "client".into(),
+            }),
+        ];
+        let modification = apply_response_rules(
+            &write_rules,
+            "https://example.com/api",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/plain"),
+        );
+        assert_eq!(modification.write_files.len(), 1);
+        assert_eq!(
+            modification
+                .headers
+                .get("x-whistle-response-for")
+                .map(String::as_str),
+            Some("client")
+        );
+    }
+
+    #[test]
     fn test_rules_require_response_body_covers_all_body_actions() {
         // Guard against future regressions: if we add a body-modifying action
         // and forget to list it here, streaming-path users silently lose it.
         // This test exercises the predicate for a representative sample of
         // the newly-added actions.
-        use crate::rules::engine::MatchedRule;
-        use crate::rules::types::{Pattern, Rule};
-
         let mk_rule = |action: RuleAction| MatchedRule {
             rule: Rule {
                 id: "t".into(),

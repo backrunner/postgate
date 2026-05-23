@@ -6,8 +6,9 @@ mod types;
 #[allow(unused_imports)]
 pub use applicator::{
     apply_request_rules, apply_request_rules_with_values, apply_response_rules,
-    apply_response_rules_with_values, capture_enabled, feature, rules_require_request_body,
-    rules_require_response_body, should_abort, ProxyCreds, ResolveCtx, ResponseModification,
+    apply_response_rules_with_values, capture_enabled, feature, is_enabled, persist_request_writes,
+    persist_response_writes, rules_require_request_body, rules_require_response_body, should_abort,
+    ProxyCreds, RequestWriteContext, ResolveCtx, ResponseModification, ResponseWriteContext,
     UpstreamProxy, UpstreamProxyKind,
 };
 #[allow(unused_imports)]

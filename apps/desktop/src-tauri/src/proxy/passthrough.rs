@@ -145,7 +145,7 @@ impl PassthroughCapturingBody {
             return;
         }
         self.ended = true;
-        if !emit {
+        if !emit || !self.meta.capture {
             return;
         }
 
@@ -167,11 +167,6 @@ impl PassthroughCapturingBody {
         tokio::spawn(async move {
             body_storage.store_response_body(&request_id, stored).await;
         });
-        // Only persist & emit when capture is enabled — whistle
-        // `disable://capture` should leave no trace.
-        if !self.meta.capture {
-            return;
-        }
         if self.meta.persistence_enabled {
             self.app_state
                 .persist_body(self.meta.request_id.clone(), collected.clone(), false);
@@ -219,7 +214,7 @@ impl Body for PassthroughCapturingBody {
                     self.total_bytes += data.len() as u64;
                     // Cap how much we actually buffer for the UI; bytes flow
                     // to the client regardless.
-                    if self.collected.len() < MAX_BODY_SIZE {
+                    if self.meta.capture && self.collected.len() < MAX_BODY_SIZE {
                         let remaining = MAX_BODY_SIZE - self.collected.len();
                         if data.len() <= remaining {
                             self.collected.extend_from_slice(data);
@@ -227,7 +222,7 @@ impl Body for PassthroughCapturingBody {
                             self.collected.extend_from_slice(&data[..remaining]);
                             self.truncated = true;
                         }
-                    } else {
+                    } else if self.meta.capture {
                         self.truncated = true;
                     }
                 }

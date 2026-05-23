@@ -1,5 +1,6 @@
 mod body;
 mod chain;
+mod direct_response;
 pub(crate) mod error_page;
 mod forward;
 mod handler;

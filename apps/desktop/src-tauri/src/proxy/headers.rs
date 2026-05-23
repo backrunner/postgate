@@ -179,6 +179,26 @@ pub fn build_forward_request_headers(
     out
 }
 
+/// Keep request entity headers consistent with the bytes we will actually
+/// forward upstream. Body rewrite rules run before the forwarding `HeaderMap`
+/// is built, so stale `Content-Length` / `Content-Encoding` from the client
+/// must be fixed here.
+pub fn sync_request_body_headers(
+    headers: &mut HashMap<String, String>,
+    original_body: &Bytes,
+    final_body: &Bytes,
+) {
+    let body_changed = original_body != final_body;
+    if body_changed {
+        headers.remove("content-encoding");
+        headers.remove("transfer-encoding");
+    }
+
+    if body_changed || headers.contains_key("content-length") || !final_body.is_empty() {
+        headers.insert("content-length".to_string(), final_body.len().to_string());
+    }
+}
+
 /// Build the outgoing response `HeaderMap` sent back to the client.
 ///
 /// Mirrors [`build_forward_request_headers`] but for the response path and

@@ -13,19 +13,26 @@ use crate::error::{PostGateError, Result};
 use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
 use crate::proxy::body::{CapturedBody, MAX_BODY_SIZE};
 use crate::proxy::error_page::ProxyErrorKind;
-use crate::proxy::forward::ForwardTarget;
+use crate::proxy::forward::{
+    apply_request_url_modifications, path_and_query_from_url, ForwardTarget,
+};
 use crate::proxy::handler::ProxyContext;
 use crate::proxy::headers::{
     apply_headers_to_response_builder_h2, build_forward_request_headers,
     build_forward_response_headers, flat_to_headermap, headermap_to_flat,
+    sync_request_body_headers,
 };
-use crate::rules::{apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx};
+use crate::rules::{
+    apply_request_rules_with_values, apply_response_rules_with_values, feature, is_enabled,
+    persist_request_writes, persist_response_writes, RequestWriteContext, ResolveCtx,
+    ResponseWriteContext,
+};
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
 use bytes::Bytes;
 use h2::server::SendResponse;
 use h2::RecvStream;
-use hyper::{HeaderMap, Request, Response};
+use hyper::{HeaderMap, Method, Request, Response};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -62,6 +69,7 @@ pub async fn handle_http2_connection<S>(
     port: u16,
     ctx: Arc<ProxyContext>,
     tls_version: String,
+    client_ip: String,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -77,9 +85,11 @@ where
         let host = host.clone();
         let ctx = ctx.clone();
         let tls_ver = tls_version.clone();
+        let client_ip = client_ip.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_http2_request(request, respond, &host, port, ctx, &tls_ver).await
+            if let Err(e) =
+                handle_http2_request(request, respond, &host, port, ctx, &tls_ver, &client_ip).await
             {
                 tracing::error!("HTTP/2 request error: {}", e);
             }
@@ -97,6 +107,7 @@ async fn handle_http2_request(
     port: u16,
     ctx: Arc<ProxyContext>,
     tls_version: &str,
+    client_ip: &str,
 ) -> Result<()> {
     let request_id = Uuid::new_v4().to_string();
     let start_time = std::time::Instant::now();
@@ -129,29 +140,16 @@ async fn handle_http2_request(
 
     let content_type = request_headers.get("content-type").cloned();
 
-    // Emit started event
-    ctx.app_state.emit_request_event(&CapturedRequestEvent {
-        id: request_id.clone(),
-        event_type: RequestEventType::Started,
-        data: CapturedRequestData {
-            id: request_id.clone(),
-            timestamp,
-            method: method_str.clone(),
-            url: url.clone(),
-            host: host.to_string(),
-            path: path.clone(),
-            request_headers: Some(request_headers.clone()),
-            protocol: "h2".to_string(),
-            content_type: content_type.clone(),
-            tls_version: Some(tls_version.to_string()),
-            ..Default::default()
-        },
-    });
-
     // Match rules
-    let matched_rules =
-        ctx.rule_engine
-            .match_request(&method_str, host, &path, "https", port, &request_headers);
+    let matched_rules = ctx.rule_engine.match_request_with_client_ip(
+        &method_str,
+        host,
+        &path,
+        "https",
+        port,
+        &request_headers,
+        Some(client_ip),
+    );
     let matched_rule_ids: Vec<String> = matched_rules
         .iter()
         .map(|r| r.rule.raw_line.clone())
@@ -162,12 +160,6 @@ async fn handle_http2_request(
     let request_body = collect_h2_body(body).await?;
     let request_size = request_body.size as u64;
 
-    ctx.body_storage
-        .store_request_body(&request_id, request_body.clone())
-        .await;
-    ctx.app_state
-        .persist_body(request_id.clone(), request_body.data.clone(), true);
-
     // Build resolver context for whistle `{name}` references.
     let _ = ctx.app_state.ensure_values_loaded().await;
     let query_map = super::handler::tunnel_value_helpers::query_map(&url);
@@ -176,7 +168,7 @@ async fn handle_http2_request(
     let values_ctx = RequestCtx {
         url: &url,
         method: &method_str,
-        client_ip: "",
+        client_ip,
         req_headers: &request_headers,
         query: &query_map,
         req_cookies: &cookie_map,
@@ -188,7 +180,7 @@ async fn handle_http2_request(
     };
 
     // Apply request rules
-    let request_modification = apply_request_rules_with_values(
+    let mut request_modification = apply_request_rules_with_values(
         &matched_rules,
         &url,
         &method_str,
@@ -206,175 +198,29 @@ async fn handle_http2_request(
     }
 
     let capture = crate::rules::capture_enabled(&request_modification);
+    let force_res_write = is_enabled(&request_modification, feature::FORCE_RES_WRITE);
 
-    // Handle short-circuit responses (redirect / file / statusCode / ...)
-    if let Some(short_circuit) = request_modification.short_circuit {
-        let duration = start_time.elapsed().as_millis() as u64;
+    let final_method = request_modification
+        .method
+        .as_deref()
+        .and_then(|m| Method::from_bytes(m.as_bytes()).ok())
+        .unwrap_or_else(|| method.clone());
+    let final_method_str = final_method.to_string();
 
-        let response_body = CapturedBody {
-            data: short_circuit.body.clone(),
-            size: short_circuit.body.len(),
-            truncated: false,
-        };
-        ctx.body_storage
-            .store_response_body(&request_id, response_body.clone())
-            .await;
-        ctx.app_state
-            .persist_body(request_id.clone(), response_body.data.clone(), false);
-
-        ctx.app_state.emit_request_event(&CapturedRequestEvent {
-            id: request_id.clone(),
-            event_type: RequestEventType::Completed,
-            data: CapturedRequestData {
-                id: request_id.clone(),
-                timestamp,
-                method: method_str.clone(),
-                url: url.clone(),
-                host: host.to_string(),
-                path: path.clone(),
-                request_headers: Some(request_headers.clone()),
-                response_status: Some(short_circuit.status),
-                response_headers: Some(short_circuit.headers.clone()),
-                duration_ms: Some(duration),
-                matched_rules: matched_rule_ids.clone(),
-                protocol: "h2".to_string(),
-                content_type: short_circuit.headers.get("content-type").cloned(),
-                request_size,
-                response_size: Some(short_circuit.body.len() as u64),
-                tls_version: Some(tls_version.to_string()),
-                ..Default::default()
-            },
-        });
-
-        let mut sc_headers = short_circuit.headers.clone();
-        // HTTP/2 doesn't carry these and the body length is implicit in the frame.
-        sc_headers.remove("content-encoding");
-        sc_headers.remove("transfer-encoding");
-        send_h2_response(
-            &mut respond,
-            short_circuit.status,
-            &sc_headers,
-            short_circuit.body,
-        )?;
-        return Ok(());
-    }
-
-    // Apply plugin handleRequest if a plugin was matched
-    if let Some(ref plugin_info) = request_modification.plugin {
-        let plugin_request = PluginRequest {
-            id: request_id.clone(),
-            method: method_str.clone(),
-            url: url.clone(),
-            host: host.to_string(),
-            path: path.clone(),
-            query: extract_query_params(&url),
-            headers: request_headers.clone(),
-            body: Some(base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &request_body.data,
-            )),
-            body_base64: true,
-            timestamp,
-        };
-
-        let plugin_context = PluginRequestContext {
-            rule_config: match &plugin_info.config {
-                serde_json::Value::Object(map) => {
-                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-                }
-                _ => std::collections::HashMap::new(),
-            },
-            matched_pattern: url.clone(),
-        };
-
-        let plugin_manager = ctx.app_state.plugin_manager.read().await;
-        match plugin_manager
-            .handle_request(&plugin_info.name, plugin_request, plugin_context)
-            .await
-        {
-            Ok(Some(modified)) => {
-                let duration = start_time.elapsed().as_millis() as u64;
-                let decoded_body = if modified.body_base64 {
-                    modified
-                        .body
-                        .as_ref()
-                        .and_then(|b| {
-                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b)
-                                .ok()
-                        })
-                        .map(Bytes::from)
-                } else {
-                    modified.body.as_ref().map(|b| Bytes::from(b.clone()))
-                };
-                let body_bytes = decoded_body.unwrap_or_default();
-
-                let response_body = CapturedBody {
-                    data: body_bytes.clone(),
-                    size: body_bytes.len(),
-                    truncated: false,
-                };
-                ctx.body_storage
-                    .store_response_body(&request_id, response_body.clone())
-                    .await;
-                ctx.app_state
-                    .persist_body(request_id.clone(), body_bytes.clone(), false);
-
-                ctx.app_state.emit_request_event(&CapturedRequestEvent {
-                    id: request_id.clone(),
-                    event_type: RequestEventType::Completed,
-                    data: CapturedRequestData {
-                        id: request_id.clone(),
-                        timestamp,
-                        method: method_str.clone(),
-                        url: url.clone(),
-                        host: host.to_string(),
-                        path: path.clone(),
-                        request_headers: Some(request_headers.clone()),
-                        response_status: Some(modified.status),
-                        response_headers: Some(modified.headers.clone()),
-                        duration_ms: Some(duration),
-                        matched_rules: matched_rule_ids.clone(),
-                        protocol: "h2".to_string(),
-                        content_type: modified.headers.get("content-type").cloned(),
-                        request_size,
-                        response_size: Some(body_bytes.len() as u64),
-                        tls_version: Some(tls_version.to_string()),
-                        ..Default::default()
-                    },
-                });
-
-                let mut resp_headers = modified.headers.clone();
-                resp_headers.remove("content-encoding");
-                resp_headers.remove("transfer-encoding");
-                send_h2_response(&mut respond, modified.status, &resp_headers, body_bytes)?;
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(
-                    "Plugin handleRequest failed for {}: {}",
-                    plugin_info.name,
-                    e
-                );
-            }
-        }
-    }
-
-    // Apply request delay if specified
-    if let Some(delay_ms) = request_modification.delay_ms {
-        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-    }
-
-    // Forward upstream — honor target_host rewrites (may switch protocol/port).
-    // All forwarding goes through the shared pooled client in ProxyContext so
-    // we reuse TCP + TLS connections (including h2 multiplexing) across every
-    // proxied request.
-    let body_to_send = request_modification
+    let mut body_to_send = request_modification
         .body
         .clone()
         .unwrap_or(request_body.data.clone());
+    if let Some(speed_kbps) = request_modification.speed_kbps {
+        body_to_send = super::throttle::apply_throttle(body_to_send, Some(speed_kbps)).await;
+    }
+    sync_request_body_headers(
+        &mut request_modification.headers,
+        &request_body.data,
+        &body_to_send,
+    );
 
-    let absolute_url: std::result::Result<String, PostGateError> =
+    let base_absolute_url: std::result::Result<String, PostGateError> =
         if let Some(target_host) = &request_modification.target_host {
             let remaining_path = request_modification.remaining_path.as_deref().unwrap_or("");
             match ForwardTarget::parse(target_host, remaining_path, "https") {
@@ -402,30 +248,271 @@ async fn handle_http2_request(
             };
             Ok(format!("https://{}{}", authority, original_path))
         };
+    let absolute_url = base_absolute_url.and_then(|base_url| {
+        apply_request_url_modifications(
+            &base_url,
+            request_modification.path.as_deref(),
+            request_modification.query_params.as_deref(),
+        )
+    });
+    let display_url = absolute_url.as_ref().cloned().unwrap_or_else(|e| {
+        tracing::error!("Failed to apply h2 URL modifications for {}: {}", url, e);
+        url.clone()
+    });
+    let display_path = path_and_query_from_url(&display_url).unwrap_or_else(|| path.clone());
 
-    // Streaming path: no rule rewrites the body — pump bytes to the h2 client
-    // as they arrive instead of waiting for the full upstream body. This is
-    // the main TTFB lever.
-    let buffer_response_body = crate::rules::rules_require_response_body(&matched_rules);
-
-    // Build the upstream HeaderMap once, reusing the multi-value-preserving
-    // builder shared with the h1 path.
+    // Build the upstream HeaderMap once the final URL/body are known so
+    // reqWrite:// also fires for short-circuit/plugin responses.
     let forward_header_map: HeaderMap = build_forward_request_headers(
         &original_request_headers,
         &request_headers,
         &request_modification.headers,
         &request_modification.headers_to_remove,
     );
+    let forward_headers = headermap_to_flat(&forward_header_map);
+    persist_request_writes(
+        &request_modification.write_files,
+        RequestWriteContext {
+            method: &final_method_str,
+            url: &display_url,
+            headers: &forward_headers,
+            body: &body_to_send,
+            force: is_enabled(&request_modification, feature::FORCE_REQ_WRITE),
+        },
+    );
+
+    if capture {
+        ctx.body_storage
+            .store_request_body(&request_id, request_body.clone())
+            .await;
+        ctx.app_state
+            .persist_body(request_id.clone(), request_body.data.clone(), true);
+
+        ctx.app_state.emit_request_event(&CapturedRequestEvent {
+            id: request_id.clone(),
+            event_type: RequestEventType::Started,
+            data: CapturedRequestData {
+                id: request_id.clone(),
+                timestamp,
+                method: final_method_str.clone(),
+                url: display_url.clone(),
+                host: host.to_string(),
+                path: display_path.clone(),
+                request_headers: Some(request_headers.clone()),
+                protocol: "h2".to_string(),
+                content_type: content_type.clone(),
+                matched_rules: matched_rule_ids.clone(),
+                tls_version: Some(tls_version.to_string()),
+                ..Default::default()
+            },
+        });
+    }
+
+    // Handle short-circuit responses (redirect / file / statusCode / ...)
+    if let Some(short_circuit) = request_modification.short_circuit {
+        let final_response = super::direct_response::finalize_direct_response(
+            super::direct_response::DirectResponseContext {
+                matched_rules: &matched_rules,
+                url: &display_url,
+                method: &final_method_str,
+                request_headers: &request_headers,
+                status: short_circuit.status,
+                response_headers: short_circuit.headers,
+                body: short_circuit.body,
+                resolve_ctx: &resolve_ctx,
+                force_res_write,
+            },
+        )
+        .await;
+        let duration = start_time.elapsed().as_millis() as u64;
+
+        let response_body = CapturedBody {
+            data: final_response.body.clone(),
+            size: final_response.body.len(),
+            truncated: false,
+        };
+        if capture {
+            ctx.body_storage
+                .store_response_body(&request_id, response_body.clone())
+                .await;
+            ctx.app_state
+                .persist_body(request_id.clone(), response_body.data.clone(), false);
+
+            ctx.app_state.emit_request_event(&CapturedRequestEvent {
+                id: request_id.clone(),
+                event_type: RequestEventType::Completed,
+                data: CapturedRequestData {
+                    id: request_id.clone(),
+                    timestamp,
+                    method: final_method_str.clone(),
+                    url: display_url.clone(),
+                    host: host.to_string(),
+                    path: display_path.clone(),
+                    request_headers: Some(request_headers.clone()),
+                    response_status: Some(final_response.status),
+                    response_headers: Some(final_response.flat_headers.clone()),
+                    duration_ms: Some(duration),
+                    matched_rules: matched_rule_ids.clone(),
+                    protocol: "h2".to_string(),
+                    content_type: final_response.flat_headers.get("content-type").cloned(),
+                    request_size,
+                    response_size: Some(final_response.body.len() as u64),
+                    tls_version: Some(tls_version.to_string()),
+                    ..Default::default()
+                },
+            });
+        }
+
+        send_h2_response_headermap(
+            &mut respond,
+            final_response.status,
+            &final_response.headers,
+            final_response.body,
+        )?;
+        return Ok(());
+    }
+
+    // Apply plugin handleRequest if a plugin was matched
+    if let Some(ref plugin_info) = request_modification.plugin {
+        let plugin_request = PluginRequest {
+            id: request_id.clone(),
+            method: final_method_str.clone(),
+            url: display_url.clone(),
+            host: host.to_string(),
+            path: display_path.clone(),
+            query: extract_query_params(&display_url),
+            headers: request_headers.clone(),
+            body: Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &body_to_send,
+            )),
+            body_base64: true,
+            timestamp,
+        };
+
+        let plugin_context = PluginRequestContext {
+            rule_config: match &plugin_info.config {
+                serde_json::Value::Object(map) => {
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+                }
+                _ => std::collections::HashMap::new(),
+            },
+            matched_pattern: display_url.clone(),
+        };
+
+        let plugin_manager = ctx.app_state.plugin_manager.read().await;
+        match plugin_manager
+            .handle_request(&plugin_info.name, plugin_request, plugin_context)
+            .await
+        {
+            Ok(Some(modified)) => {
+                let decoded_body = if modified.body_base64 {
+                    modified
+                        .body
+                        .as_ref()
+                        .and_then(|b| {
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b)
+                                .ok()
+                        })
+                        .map(Bytes::from)
+                } else {
+                    modified.body.as_ref().map(|b| Bytes::from(b.clone()))
+                };
+                let body_bytes = decoded_body.unwrap_or_default();
+                let final_response = super::direct_response::finalize_direct_response(
+                    super::direct_response::DirectResponseContext {
+                        matched_rules: &matched_rules,
+                        url: &display_url,
+                        method: &final_method_str,
+                        request_headers: &request_headers,
+                        status: modified.status,
+                        response_headers: modified.headers,
+                        body: body_bytes,
+                        resolve_ctx: &resolve_ctx,
+                        force_res_write,
+                    },
+                )
+                .await;
+                let duration = start_time.elapsed().as_millis() as u64;
+
+                if capture {
+                    let response_body = CapturedBody {
+                        data: final_response.body.clone(),
+                        size: final_response.body.len(),
+                        truncated: false,
+                    };
+                    ctx.body_storage
+                        .store_response_body(&request_id, response_body.clone())
+                        .await;
+                    ctx.app_state.persist_body(
+                        request_id.clone(),
+                        response_body.data.clone(),
+                        false,
+                    );
+
+                    ctx.app_state.emit_request_event(&CapturedRequestEvent {
+                        id: request_id.clone(),
+                        event_type: RequestEventType::Completed,
+                        data: CapturedRequestData {
+                            id: request_id.clone(),
+                            timestamp,
+                            method: final_method_str.clone(),
+                            url: display_url.clone(),
+                            host: host.to_string(),
+                            path: display_path.clone(),
+                            request_headers: Some(request_headers.clone()),
+                            response_status: Some(final_response.status),
+                            response_headers: Some(final_response.flat_headers.clone()),
+                            duration_ms: Some(duration),
+                            matched_rules: matched_rule_ids.clone(),
+                            protocol: "h2".to_string(),
+                            content_type: final_response.flat_headers.get("content-type").cloned(),
+                            request_size,
+                            response_size: Some(final_response.body.len() as u64),
+                            tls_version: Some(tls_version.to_string()),
+                            ..Default::default()
+                        },
+                    });
+                }
+
+                send_h2_response_headermap(
+                    &mut respond,
+                    final_response.status,
+                    &final_response.headers,
+                    final_response.body,
+                )?;
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Plugin handleRequest failed for {}: {}",
+                    plugin_info.name,
+                    e
+                );
+            }
+        }
+    }
+
+    // Apply request delay if specified
+    if let Some(delay_ms) = request_modification.delay_ms {
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+    }
+
+    // Streaming path: no rule rewrites the body — pump bytes to the h2 client
+    // as they arrive instead of waiting for the full upstream body. This is
+    // the main TTFB lever.
+    let buffer_response_body = crate::rules::rules_require_response_body(&matched_rules);
 
     if !buffer_response_body && request_modification.upstream_proxy.is_none() {
         let stream_result = match absolute_url {
             Ok(target_url) => {
                 super::upstream::forward_stream_headermap(
                     &ctx.upstream_client,
-                    method.clone(),
+                    final_method.clone(),
                     &target_url,
                     &forward_header_map,
-                    body_to_send,
+                    body_to_send.clone(),
                     request_modification.timeout_ms,
                 )
                 .await
@@ -443,18 +530,16 @@ async fn handle_http2_request(
                 let response_content_type = upstream_headers.get("content-type").cloned();
                 let response_modification = apply_response_rules_with_values(
                     &matched_rules,
-                    &url,
-                    &method_str,
+                    &display_url,
+                    &final_method_str,
                     &request_headers,
                     &upstream_headers,
+                    status,
                     None,
                     response_content_type.as_deref(),
                     &resolve_ctx,
                 );
                 let final_status = response_modification.status_code.unwrap_or(status);
-                // HeaderMap-preserving finalization — keep multi-value
-                // Set-Cookie from upstream and append resCookies:// entries
-                // as distinct header lines.
                 let final_header_map: HeaderMap = build_forward_response_headers(
                     &original_resp_headers,
                     &upstream_headers,
@@ -463,12 +548,10 @@ async fn handle_http2_request(
                 );
                 let final_headers = headermap_to_flat(&final_header_map);
 
-                // resDelay:// — sleep before sending the first h2 HEADERS frame.
                 if let Some(delay_ms) = response_modification.delay_ms {
                     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                 }
 
-                // Send headers to the h2 client (no end-of-stream yet)
                 let builder = Response::builder().status(final_status);
                 let builder = apply_headers_to_response_builder_h2(builder, &final_header_map);
                 let h2_response = builder.body(()).map_err(|e| {
@@ -478,14 +561,13 @@ async fn handle_http2_request(
                     PostGateError::Proxy(format!("Failed to send h2 headers: {}", e))
                 })?;
 
-                // Pump upstream body → h2 client; capture a copy for the UI.
                 let pump_meta = super::passthrough::PassthroughMeta {
                     request_id: request_id.clone(),
                     timestamp,
-                    method: method_str.clone(),
-                    url: url.clone(),
+                    method: final_method_str.clone(),
+                    url: display_url.clone(),
                     host: host.to_string(),
-                    path: path.clone(),
+                    path: display_path.clone(),
                     request_headers: request_headers.clone(),
                     response_status: final_status,
                     response_headers: final_headers.clone(),
@@ -512,26 +594,28 @@ async fn handle_http2_request(
             Err(e) => {
                 let duration = start_time.elapsed().as_millis() as u64;
                 tracing::error!("HTTP/2 forward error: {}", e);
-                ctx.app_state.emit_request_event(&CapturedRequestEvent {
-                    id: request_id.clone(),
-                    event_type: RequestEventType::Error,
-                    data: CapturedRequestData {
+                if capture {
+                    ctx.app_state.emit_request_event(&CapturedRequestEvent {
                         id: request_id.clone(),
-                        timestamp,
-                        method: method_str.clone(),
-                        url: url.clone(),
-                        host: host.to_string(),
-                        path: path.clone(),
-                        request_headers: Some(request_headers.clone()),
-                        duration_ms: Some(duration),
-                        matched_rules: matched_rule_ids.clone(),
-                        protocol: "h2".to_string(),
-                        request_size,
-                        error: Some(e.to_string()),
-                        tls_version: Some(tls_version.to_string()),
-                        ..Default::default()
-                    },
-                });
+                        event_type: RequestEventType::Error,
+                        data: CapturedRequestData {
+                            id: request_id.clone(),
+                            timestamp,
+                            method: final_method_str.clone(),
+                            url: display_url.clone(),
+                            host: host.to_string(),
+                            path: display_path.clone(),
+                            request_headers: Some(request_headers.clone()),
+                            duration_ms: Some(duration),
+                            matched_rules: matched_rule_ids.clone(),
+                            protocol: "h2".to_string(),
+                            request_size,
+                            error: Some(e.to_string()),
+                            tls_version: Some(tls_version.to_string()),
+                            ..Default::default()
+                        },
+                    });
+                }
 
                 let _ = send_h2_error_response(
                     &mut respond,
@@ -551,10 +635,10 @@ async fn handle_http2_request(
                 let flat_for_chain = headermap_to_flat(&forward_header_map);
                 super::upstream::forward_collect_with_proxy(
                     &ctx.upstream_client,
-                    method.clone(),
+                    final_method.clone(),
                     &absolute,
                     &flat_for_chain,
-                    body_to_send,
+                    body_to_send.clone(),
                     request_modification.timeout_ms,
                     Some(proxy),
                 )
@@ -562,10 +646,10 @@ async fn handle_http2_request(
             } else {
                 super::upstream::forward_collect_headermap(
                     &ctx.upstream_client,
-                    method.clone(),
+                    final_method.clone(),
                     &absolute,
                     &forward_header_map,
-                    body_to_send,
+                    body_to_send.clone(),
                     request_modification.timeout_ms,
                 )
                 .await
@@ -583,32 +667,31 @@ async fn handle_http2_request(
 
             let response_content_type = upstream_headers.get("content-type").cloned();
 
-            // Apply response rules
             let response_modification = apply_response_rules_with_values(
                 &matched_rules,
-                &url,
-                &method_str,
+                &display_url,
+                &final_method_str,
                 &request_headers,
                 &upstream_headers,
+                status,
                 Some(&response_body.data),
                 response_content_type.as_deref(),
                 &resolve_ctx,
             );
 
-            // Apply plugin handleResponse if a plugin was matched
             let (plugin_modified_body, plugin_modified_headers) =
                 if let Some(ref plugin_info) = request_modification.plugin {
                     let plugin_request = PluginRequest {
                         id: request_id.clone(),
-                        method: method_str.clone(),
-                        url: url.clone(),
+                        method: final_method_str.clone(),
+                        url: display_url.clone(),
                         host: host.to_string(),
-                        path: path.clone(),
-                        query: extract_query_params(&url),
+                        path: display_path.clone(),
+                        query: extract_query_params(&display_url),
                         headers: request_headers.clone(),
                         body: Some(base64::Engine::encode(
                             &base64::engine::general_purpose::STANDARD,
-                            &request_body.data,
+                            &body_to_send,
                         )),
                         body_base64: true,
                         timestamp,
@@ -631,7 +714,7 @@ async fn handle_http2_request(
                             }
                             _ => std::collections::HashMap::new(),
                         },
-                        matched_pattern: url.clone(),
+                        matched_pattern: display_url.clone(),
                     };
 
                     let plugin_manager = ctx.app_state.plugin_manager.read().await;
@@ -675,7 +758,6 @@ async fn handle_http2_request(
                     (None, None)
                 };
 
-            // Apply response delay if specified
             if let Some(delay_ms) = response_modification.delay_ms {
                 tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
             }
@@ -688,7 +770,6 @@ async fn handle_http2_request(
             let headers_source =
                 plugin_modified_headers.unwrap_or_else(|| response_modification.headers.clone());
 
-            // Inject debug script if enabled
             if response_modification.inject_debug {
                 let injector = ScriptInjector::new(9229);
                 if let Ok(html) = String::from_utf8(final_body.to_vec()) {
@@ -698,16 +779,11 @@ async fn handle_http2_request(
                 }
             }
 
-            // Apply response speed throttling if specified
             if let Some(speed_kbps) = response_modification.speed_kbps {
                 final_body = super::throttle::apply_throttle(final_body, Some(speed_kbps)).await;
             }
-
             let body_was_modified = final_body != response_body.data;
 
-            // Unified header finalization: apply headers_to_remove, fold
-            // resCookies:// Set-Cookie, strip stale length/encoding when
-            // the body was replaced.
             let mut modified_for_finalize = crate::rules::ResponseModification {
                 headers: headers_source,
                 headers_to_remove: response_modification.headers_to_remove.clone(),
@@ -715,9 +791,6 @@ async fn handle_http2_request(
                 ..Default::default()
             };
             modified_for_finalize.status_code = response_modification.status_code;
-            // Plugin-authored header maps are already flat; everything else
-            // rides on the original upstream HeaderMap so multi-value
-            // Set-Cookie survives.
             let (base_headers, base_flat): (HeaderMap, HashMap<String, String>) =
                 if plugin_replaced_headers {
                     let hm = flat_to_headermap(&modified_for_finalize.headers);
@@ -737,6 +810,16 @@ async fn handle_http2_request(
                 },
             );
             let final_headers = headermap_to_flat(&final_header_map);
+            persist_response_writes(
+                &response_modification.write_files,
+                ResponseWriteContext {
+                    method: &final_method_str,
+                    status: final_status,
+                    headers: &final_headers,
+                    body: &final_body,
+                    force: is_enabled(&request_modification, feature::FORCE_RES_WRITE),
+                },
+            );
 
             let final_size = final_body.len() as u64;
             let final_duration = start_time.elapsed().as_millis() as u64;
@@ -746,36 +829,37 @@ async fn handle_http2_request(
                 size: final_body.len(),
                 truncated: response_body.truncated,
             };
-            ctx.body_storage
-                .store_response_body(&request_id, stored_body.clone())
-                .await;
-            ctx.app_state
-                .persist_body(request_id.clone(), stored_body.data.clone(), false);
+            if capture {
+                ctx.body_storage
+                    .store_response_body(&request_id, stored_body.clone())
+                    .await;
+                ctx.app_state
+                    .persist_body(request_id.clone(), stored_body.data.clone(), false);
 
-            // Emit completion event
-            ctx.app_state.emit_request_event(&CapturedRequestEvent {
-                id: request_id.clone(),
-                event_type: RequestEventType::Completed,
-                data: CapturedRequestData {
+                ctx.app_state.emit_request_event(&CapturedRequestEvent {
                     id: request_id.clone(),
-                    timestamp,
-                    method: method_str.clone(),
-                    url: url.clone(),
-                    host: host.to_string(),
-                    path: path.clone(),
-                    request_headers: Some(request_headers.clone()),
-                    response_status: Some(final_status),
-                    response_headers: Some(final_headers.clone()),
-                    duration_ms: Some(final_duration),
-                    matched_rules: matched_rule_ids.clone(),
-                    protocol: "h2".to_string(),
-                    content_type: final_headers.get("content-type").cloned(),
-                    request_size,
-                    response_size: Some(final_size),
-                    tls_version: Some(tls_version.to_string()),
-                    ..Default::default()
-                },
-            });
+                    event_type: RequestEventType::Completed,
+                    data: CapturedRequestData {
+                        id: request_id.clone(),
+                        timestamp,
+                        method: final_method_str.clone(),
+                        url: display_url.clone(),
+                        host: host.to_string(),
+                        path: display_path.clone(),
+                        request_headers: Some(request_headers.clone()),
+                        response_status: Some(final_status),
+                        response_headers: Some(final_headers.clone()),
+                        duration_ms: Some(final_duration),
+                        matched_rules: matched_rule_ids.clone(),
+                        protocol: "h2".to_string(),
+                        content_type: final_headers.get("content-type").cloned(),
+                        request_size,
+                        response_size: Some(final_size),
+                        tls_version: Some(tls_version.to_string()),
+                        ..Default::default()
+                    },
+                });
+            }
 
             send_h2_response_headermap(&mut respond, final_status, &final_header_map, final_body)?;
         }
@@ -783,28 +867,29 @@ async fn handle_http2_request(
             let duration = start_time.elapsed().as_millis() as u64;
             tracing::error!("HTTP/2 forward error: {}", e);
 
-            ctx.app_state.emit_request_event(&CapturedRequestEvent {
-                id: request_id.clone(),
-                event_type: RequestEventType::Error,
-                data: CapturedRequestData {
+            if capture {
+                ctx.app_state.emit_request_event(&CapturedRequestEvent {
                     id: request_id.clone(),
-                    timestamp,
-                    method: method_str.clone(),
-                    url: url.clone(),
-                    host: host.to_string(),
-                    path: path.clone(),
-                    request_headers: Some(request_headers.clone()),
-                    duration_ms: Some(duration),
-                    matched_rules: matched_rule_ids.clone(),
-                    protocol: "h2".to_string(),
-                    request_size,
-                    error: Some(e.to_string()),
-                    tls_version: Some(tls_version.to_string()),
-                    ..Default::default()
-                },
-            });
+                    event_type: RequestEventType::Error,
+                    data: CapturedRequestData {
+                        id: request_id.clone(),
+                        timestamp,
+                        method: final_method_str.clone(),
+                        url: display_url.clone(),
+                        host: host.to_string(),
+                        path: display_path.clone(),
+                        request_headers: Some(request_headers.clone()),
+                        duration_ms: Some(duration),
+                        matched_rules: matched_rule_ids.clone(),
+                        protocol: "h2".to_string(),
+                        request_size,
+                        error: Some(e.to_string()),
+                        tls_version: Some(tls_version.to_string()),
+                        ..Default::default()
+                    },
+                });
+            }
 
-            // Best-effort; if sending the error itself fails, there's nothing to do.
             let _ =
                 send_h2_error_response(&mut respond, 502, ProxyErrorKind::Upstream, &e.to_string());
         }
@@ -981,7 +1066,7 @@ async fn pump_incoming_into_h2(
 
             // Capture for the UI up to MAX_BODY_SIZE — bytes flow to the
             // client regardless of whether we buffer them locally.
-            if collected.len() < MAX_BODY_SIZE {
+            if meta.capture && collected.len() < MAX_BODY_SIZE {
                 let remaining = MAX_BODY_SIZE - collected.len();
                 if chunk.len() <= remaining {
                     collected.extend_from_slice(chunk);
@@ -989,7 +1074,7 @@ async fn pump_incoming_into_h2(
                     collected.extend_from_slice(&chunk[..remaining]);
                     truncated = true;
                 }
-            } else {
+            } else if meta.capture {
                 truncated = true;
             }
 
@@ -1008,9 +1093,15 @@ async fn pump_incoming_into_h2(
         .send_data(Bytes::new(), true)
         .map_err(|e| PostGateError::Proxy(format!("h2 end-of-stream error: {}", e)))?;
 
-    let collected = collected.freeze();
     let duration = meta.start_time.elapsed().as_millis() as u64;
 
+    // Honor `disable://capture`: suppress storage, persistence, and emit while
+    // still letting the body flow through to the client.
+    if !meta.capture {
+        return Ok(());
+    }
+
+    let collected = collected.freeze();
     // Store body in the in-memory DashMap (fire & forget).
     let stored = CapturedBody {
         data: collected.clone(),
@@ -1023,11 +1114,6 @@ async fn pump_incoming_into_h2(
         tokio::spawn(async move {
             body_storage.store_response_body(&request_id, stored).await;
         });
-    }
-    // Honor `disable://capture`: suppress persistence + emit but still let
-    // the body flow through to the client.
-    if !meta.capture {
-        return Ok(());
     }
     if meta.persistence_enabled {
         app_state.persist_body(meta.request_id.clone(), collected.clone(), false);

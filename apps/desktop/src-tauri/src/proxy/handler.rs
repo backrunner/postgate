@@ -7,14 +7,16 @@ use crate::proxy::error_page::ProxyErrorKind;
 use crate::proxy::headers::{
     apply_headers_to_response_builder, build_forward_request_headers,
     build_forward_response_headers, flat_to_headermap, headermap_to_flat,
+    sync_request_body_headers,
 };
 use crate::proxy::pool::ConnectionPool;
 use crate::proxy::sse;
 use crate::proxy::websocket;
 use crate::proxy::BodyStorage;
 use crate::rules::{
-    apply_request_rules_with_values, apply_response_rules_with_values, ResolveCtx,
-    ResponseModification, RuleEngine,
+    apply_request_rules_with_values, apply_response_rules_with_values, feature, is_enabled,
+    persist_request_writes, persist_response_writes, RequestWriteContext, ResolveCtx,
+    ResponseModification, ResponseWriteContext, RuleEngine,
 };
 use crate::state::{AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
@@ -95,7 +97,7 @@ async fn handle_request(
 
     // Check if this is a CONNECT request (HTTPS tunnel)
     if req.method() == Method::CONNECT {
-        return handle_connect(req, &request_id, timestamp, ctx).await;
+        return handle_connect(req, &request_id, timestamp, peer_addr, ctx).await;
     }
 
     // Extract request info
@@ -143,9 +145,16 @@ async fn handle_request(
         .uri()
         .port_u16()
         .unwrap_or(if protocol == "https" { 443 } else { 80 });
-    let matched_rules =
-        ctx.rule_engine
-            .match_request(&method, &host, &path, &protocol, port, &request_headers);
+    let client_ip = peer_addr.ip().to_string();
+    let matched_rules = ctx.rule_engine.match_request_with_client_ip(
+        &method,
+        &host,
+        &path,
+        &protocol,
+        port,
+        &request_headers,
+        Some(&client_ip),
+    );
     let matched_rule_ids: Vec<String> = matched_rules
         .iter()
         .map(|r| r.rule.raw_line.clone())
@@ -178,14 +187,6 @@ async fn handle_request(
 
     let request_size = request_body.size as u64;
 
-    // Store original request body
-    ctx.body_storage
-        .store_request_body(&request_id, request_body.clone())
-        .await;
-    // Persist request body
-    ctx.app_state
-        .persist_body(request_id.clone(), request_body.data.clone(), true);
-
     // Ensure the in-memory values store is populated so `{name}` references
     // in rule actions resolve on the first request after startup.
     let _ = ctx.app_state.ensure_values_loaded().await;
@@ -197,7 +198,7 @@ async fn handle_request(
     let values_ctx = RequestCtx {
         url: &uri,
         method: &method,
-        client_ip: &peer_addr.ip().to_string(),
+        client_ip: &client_ip,
         req_headers: &request_headers,
         query: &query_map,
         req_cookies: &cookie_map,
@@ -209,7 +210,7 @@ async fn handle_request(
     };
 
     // Apply request rules
-    let request_modification = apply_request_rules_with_values(
+    let mut request_modification = apply_request_rules_with_values(
         &matched_rules,
         &uri,
         &method,
@@ -235,10 +236,94 @@ async fn handle_request(
             .unwrap());
     }
 
+    let final_method = request_modification
+        .method
+        .as_deref()
+        .and_then(|m| Method::from_bytes(m.as_bytes()).ok())
+        .unwrap_or_else(|| parts.method.clone());
+    let final_method_str = final_method.to_string();
+
+    let mut body_to_send = request_modification
+        .body
+        .clone()
+        .unwrap_or(request_body.data.clone());
+    if let Some(speed_kbps) = request_modification.speed_kbps {
+        body_to_send = super::throttle::apply_throttle(body_to_send, Some(speed_kbps)).await;
+    }
+    sync_request_body_headers(
+        &mut request_modification.headers,
+        &request_body.data,
+        &body_to_send,
+    );
+
+    // Build the target URI using ForwardTarget for whistle-compatible path forwarding.
+    let base_target_uri = if let Some(target) = &request_modification.target_host {
+        let remaining_path = request_modification.remaining_path.as_deref().unwrap_or("");
+
+        match super::forward::ForwardTarget::parse(target, remaining_path, &protocol) {
+            Ok(ft) => {
+                tracing::debug!(
+                    "Forwarding {} to {} (remaining: {})",
+                    uri,
+                    ft.build_url(),
+                    remaining_path
+                );
+                ft.build_url()
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse target {}: {}", target, e);
+                parts.uri.to_string()
+            }
+        }
+    } else {
+        parts.uri.to_string()
+    };
+    let target_uri = match super::forward::apply_request_url_modifications(
+        &base_target_uri,
+        request_modification.path.as_deref(),
+        request_modification.query_params.as_deref(),
+    ) {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::error!("Failed to apply URL modifications for {}: {}", uri, e);
+            base_target_uri
+        }
+    };
+    let display_uri = target_uri.clone();
+    let display_path = path_and_query_from_url(&display_uri).unwrap_or_else(|| path.clone());
+
+    // Build the outgoing request headers as soon as the final URL/body are
+    // known so reqWrite:// also fires for short-circuit/plugin responses.
+    let forward_header_map: HeaderMap = build_forward_request_headers(
+        &original_request_headers,
+        &request_headers,
+        &request_modification.headers,
+        &request_modification.headers_to_remove,
+    );
+    let forward_headers = headermap_to_flat(&forward_header_map);
+    persist_request_writes(
+        &request_modification.write_files,
+        RequestWriteContext {
+            method: &final_method_str,
+            url: &target_uri,
+            headers: &forward_headers,
+            body: &body_to_send,
+            force: is_enabled(&request_modification, feature::FORCE_REQ_WRITE),
+        },
+    );
+
     // Emit request started event (after rule match so `disable://capture`
     // can suppress it). Users typically care about the Completed event in
     // the UI, but we still want to surface Started for long-running requests.
     let capture = crate::rules::capture_enabled(&request_modification);
+    let force_res_write = is_enabled(&request_modification, feature::FORCE_RES_WRITE);
+    if capture {
+        ctx.body_storage
+            .store_request_body(&request_id, request_body.clone())
+            .await;
+        ctx.app_state
+            .persist_body(request_id.clone(), request_body.data.clone(), true);
+    }
     if capture {
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
             id: request_id.clone(),
@@ -246,10 +331,10 @@ async fn handle_request(
             data: CapturedRequestData {
                 id: request_id.clone(),
                 timestamp,
-                method: method.clone(),
-                url: uri.clone(),
+                method: final_method_str.clone(),
+                url: display_uri.clone(),
                 host: host.clone(),
-                path: path.clone(),
+                path: display_path.clone(),
                 request_headers: Some(request_headers.clone()),
                 protocol: "http1".to_string(),
                 content_type: content_type.clone(),
@@ -262,63 +347,66 @@ async fn handle_request(
 
     // Handle short-circuit responses (e.g., redirect, file, statusCode)
     if let Some(short_circuit) = request_modification.short_circuit {
+        let final_response = super::direct_response::finalize_direct_response(
+            super::direct_response::DirectResponseContext {
+                matched_rules: &matched_rules,
+                url: &display_uri,
+                method: &final_method_str,
+                request_headers: &request_headers,
+                status: short_circuit.status,
+                response_headers: short_circuit.headers,
+                body: short_circuit.body,
+                resolve_ctx: &resolve_ctx,
+                force_res_write,
+            },
+        )
+        .await;
         let duration = start_time.elapsed().as_millis() as u64;
 
-        // Store the short-circuit response as response body
         let response_body = CapturedBody {
-            data: short_circuit.body.clone(),
-            size: short_circuit.body.len(),
+            data: final_response.body.clone(),
+            size: final_response.body.len(),
             truncated: false,
         };
-        ctx.body_storage
-            .store_response_body(&request_id, response_body.clone())
-            .await;
-        // Persist response body
-        ctx.app_state
-            .persist_body(request_id.clone(), response_body.data.clone(), false);
+        if capture {
+            ctx.body_storage
+                .store_response_body(&request_id, response_body.clone())
+                .await;
+            ctx.app_state
+                .persist_body(request_id.clone(), response_body.data.clone(), false);
+        }
 
         // Emit completion event
-        ctx.app_state.emit_request_event(&CapturedRequestEvent {
-            id: request_id.clone(),
-            event_type: RequestEventType::Completed,
-            data: CapturedRequestData {
-                id: request_id,
-                timestamp,
-                method,
-                url: uri,
-                host,
-                path,
-                request_headers: Some(request_headers),
-                response_status: Some(short_circuit.status),
-                response_headers: Some(short_circuit.headers.clone()),
-                duration_ms: Some(duration),
-                matched_rules: matched_rule_ids,
-                protocol: "http1".to_string(),
-                content_type: short_circuit.headers.get("content-type").cloned(),
-                request_size,
-                response_size: Some(short_circuit.body.len() as u64),
-                ..Default::default()
-            },
-        });
-
-        // Build short-circuit response.
-        // Ensure Content-Length matches the body we're sending. Hyper's
-        // `Full::new` already sets it, but being explicit avoids any
-        // transfer-encoding confusion.
-        let mut builder = Response::builder().status(short_circuit.status);
-        let mut sc_headers = short_circuit.headers.clone();
-        sc_headers.remove("content-encoding");
-        sc_headers.remove("transfer-encoding");
-        sc_headers.insert(
-            "content-length".to_string(),
-            short_circuit.body.len().to_string(),
-        );
-        for (k, v) in &sc_headers {
-            builder = builder.header(k.as_str(), v.as_str());
+        if capture {
+            ctx.app_state.emit_request_event(&CapturedRequestEvent {
+                id: request_id.clone(),
+                event_type: RequestEventType::Completed,
+                data: CapturedRequestData {
+                    id: request_id,
+                    timestamp,
+                    method: final_method_str,
+                    url: display_uri,
+                    host,
+                    path: display_path,
+                    request_headers: Some(request_headers),
+                    response_status: Some(final_response.status),
+                    response_headers: Some(final_response.flat_headers.clone()),
+                    duration_ms: Some(duration),
+                    matched_rules: matched_rule_ids,
+                    protocol: "http1".to_string(),
+                    content_type: final_response.flat_headers.get("content-type").cloned(),
+                    request_size,
+                    response_size: Some(final_response.body.len() as u64),
+                    ..Default::default()
+                },
+            });
         }
+
+        let builder = Response::builder().status(final_response.status);
+        let builder = apply_headers_to_response_builder(builder, &final_response.headers);
         return Ok(builder
             .body(
-                Full::new(short_circuit.body)
+                Full::new(final_response.body)
                     .map_err(|_| unreachable!())
                     .boxed(),
             )
@@ -329,15 +417,15 @@ async fn handle_request(
     if let Some(ref plugin_info) = request_modification.plugin {
         let plugin_request = PluginRequest {
             id: request_id.clone(),
-            method: method.clone(),
-            url: uri.clone(),
+            method: final_method_str.clone(),
+            url: display_uri.clone(),
             host: host.clone(),
-            path: path.clone(),
-            query: extract_query_params(&uri),
+            path: display_path.clone(),
+            query: extract_query_params(&display_uri),
             headers: request_headers.clone(),
             body: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &request_body.data,
+                &body_to_send,
             )),
             body_base64: true,
             timestamp,
@@ -350,7 +438,7 @@ async fn handle_request(
                 }
                 _ => std::collections::HashMap::new(),
             },
-            matched_pattern: uri.clone(),
+            matched_pattern: display_uri.clone(),
         };
 
         let plugin_manager = ctx.app_state.plugin_manager.read().await;
@@ -359,7 +447,6 @@ async fn handle_request(
             .await
         {
             Ok(Some(modified)) => {
-                let duration = start_time.elapsed().as_millis() as u64;
                 let decoded_body = if modified.body_base64 {
                     modified
                         .body
@@ -373,51 +460,71 @@ async fn handle_request(
                     modified.body.as_ref().map(|b| Bytes::from(b.clone()))
                 };
                 let body_bytes = decoded_body.unwrap_or_default();
+                let final_response = super::direct_response::finalize_direct_response(
+                    super::direct_response::DirectResponseContext {
+                        matched_rules: &matched_rules,
+                        url: &display_uri,
+                        method: &final_method_str,
+                        request_headers: &request_headers,
+                        status: modified.status,
+                        response_headers: modified.headers,
+                        body: body_bytes,
+                        resolve_ctx: &resolve_ctx,
+                        force_res_write,
+                    },
+                )
+                .await;
+                let duration = start_time.elapsed().as_millis() as u64;
 
                 let response_body = CapturedBody {
-                    data: body_bytes.clone(),
-                    size: body_bytes.len(),
+                    data: final_response.body.clone(),
+                    size: final_response.body.len(),
                     truncated: false,
                 };
-                ctx.body_storage
-                    .store_response_body(&request_id, response_body.clone())
-                    .await;
-                ctx.app_state
-                    .persist_body(request_id.clone(), body_bytes.clone(), false);
-
-                ctx.app_state.emit_request_event(&CapturedRequestEvent {
-                    id: request_id.clone(),
-                    event_type: RequestEventType::Completed,
-                    data: CapturedRequestData {
-                        id: request_id,
-                        timestamp,
-                        method,
-                        url: uri,
-                        host,
-                        path,
-                        request_headers: Some(request_headers),
-                        response_status: Some(modified.status),
-                        response_headers: Some(modified.headers.clone()),
-                        duration_ms: Some(duration),
-                        matched_rules: matched_rule_ids,
-                        protocol: "http1".to_string(),
-                        content_type: modified.headers.get("content-type").cloned(),
-                        request_size,
-                        response_size: Some(body_bytes.len() as u64),
-                        ..Default::default()
-                    },
-                });
-
-                let mut builder = Response::builder().status(modified.status);
-                let mut resp_headers = modified.headers.clone();
-                resp_headers.remove("content-encoding");
-                resp_headers.remove("transfer-encoding");
-                resp_headers.insert("content-length".to_string(), body_bytes.len().to_string());
-                for (k, v) in &resp_headers {
-                    builder = builder.header(k.as_str(), v.as_str());
+                if capture {
+                    ctx.body_storage
+                        .store_response_body(&request_id, response_body.clone())
+                        .await;
+                    ctx.app_state.persist_body(
+                        request_id.clone(),
+                        response_body.data.clone(),
+                        false,
+                    );
                 }
+
+                if capture {
+                    ctx.app_state.emit_request_event(&CapturedRequestEvent {
+                        id: request_id.clone(),
+                        event_type: RequestEventType::Completed,
+                        data: CapturedRequestData {
+                            id: request_id,
+                            timestamp,
+                            method: final_method_str,
+                            url: display_uri,
+                            host,
+                            path: display_path,
+                            request_headers: Some(request_headers),
+                            response_status: Some(final_response.status),
+                            response_headers: Some(final_response.flat_headers.clone()),
+                            duration_ms: Some(duration),
+                            matched_rules: matched_rule_ids,
+                            protocol: "http1".to_string(),
+                            content_type: final_response.flat_headers.get("content-type").cloned(),
+                            request_size,
+                            response_size: Some(final_response.body.len() as u64),
+                            ..Default::default()
+                        },
+                    });
+                }
+
+                let builder = Response::builder().status(final_response.status);
+                let builder = apply_headers_to_response_builder(builder, &final_response.headers);
                 return Ok(builder
-                    .body(Full::new(body_bytes).map_err(|_| unreachable!()).boxed())
+                    .body(
+                        Full::new(final_response.body)
+                            .map_err(|_| unreachable!())
+                            .boxed(),
+                    )
                     .unwrap());
             }
             Ok(None) => {}
@@ -436,52 +543,9 @@ async fn handle_request(
         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
     }
 
-    // Use modified headers and body for the forwarded request
-    let modified_body = request_modification
-        .body
-        .unwrap_or(request_body.data.clone());
-
-    // Build the target URI using ForwardTarget for whistle-compatible path forwarding
-    let target_uri = if let Some(target) = &request_modification.target_host {
-        let remaining_path = request_modification.remaining_path.as_deref().unwrap_or("");
-
-        // Parse target and build final URL with remaining path
-        match super::forward::ForwardTarget::parse(target, remaining_path, &protocol) {
-            Ok(ft) => {
-                tracing::debug!(
-                    "Forwarding {} to {} (remaining: {})",
-                    uri,
-                    ft.build_url(),
-                    remaining_path
-                );
-                ft.build_url()
-            }
-            Err(e) => {
-                tracing::error!("Failed to parse target {}: {}", target, e);
-                parts.uri.to_string()
-            }
-        }
-    } else {
-        // No target_host override - use original URI
-        parts.uri.to_string()
-    };
-
-    // Rebuild the outgoing request headers starting from the ORIGINAL
-    // `HeaderMap` (preserving multi-value fidelity) and only overlaying
-    // keys the rules actually changed. This is the fix for
-    // "cookies lost through the proxy": previously we flattened headers
-    // into a `HashMap<String,String>` which silently collapsed multi-value
-    // `cookie` headers (common over HTTP/2) down to a single crumble.
-    let forward_header_map: HeaderMap = build_forward_request_headers(
-        &original_request_headers,
-        &request_headers,
-        &request_modification.headers,
-        &request_modification.headers_to_remove,
-    );
-
     // Rebuild request with modified body and headers
     let mut new_req = Request::builder()
-        .method(parts.method.clone())
+        .method(final_method.clone())
         .uri(&target_uri);
 
     // Apply the preserved/merged header map.
@@ -494,7 +558,11 @@ async fn handle_request(
     }
 
     let req = new_req
-        .body(Full::new(modified_body).map_err(|_| unreachable!()).boxed())
+        .body(
+            Full::new(body_to_send.clone())
+                .map_err(|_| unreachable!())
+                .boxed(),
+        )
         .unwrap();
 
     // Forward request to upstream. If no matched rule needs the response body,
@@ -591,26 +659,28 @@ async fn handle_request(
                 headermap_to_flat(&original_resp_headers);
 
             // Emit started event with SSE protocol
-            ctx.app_state.emit_request_event(&CapturedRequestEvent {
-                id: request_id.clone(),
-                event_type: RequestEventType::Started,
-                data: CapturedRequestData {
+            if capture {
+                ctx.app_state.emit_request_event(&CapturedRequestEvent {
                     id: request_id.clone(),
-                    timestamp,
-                    method: method.clone(),
-                    url: uri.clone(),
-                    host: host.clone(),
-                    path: path.clone(),
-                    request_headers: Some(request_headers.clone()),
-                    response_status: Some(status),
-                    response_headers: Some(response_headers.clone()),
-                    matched_rules: matched_rule_ids.clone(),
-                    protocol: "sse".to_string(),
-                    content_type,
-                    request_size,
-                    ..Default::default()
-                },
-            });
+                    event_type: RequestEventType::Started,
+                    data: CapturedRequestData {
+                        id: request_id.clone(),
+                        timestamp,
+                        method: final_method_str.clone(),
+                        url: display_uri.clone(),
+                        host: host.clone(),
+                        path: display_path.clone(),
+                        request_headers: Some(request_headers.clone()),
+                        response_status: Some(status),
+                        response_headers: Some(response_headers.clone()),
+                        matched_rules: matched_rule_ids.clone(),
+                        protocol: "sse".to_string(),
+                        content_type,
+                        request_size,
+                        ..Default::default()
+                    },
+                });
+            }
 
             // For SSE, we need to stream the body while capturing events
             // Use a wrapping stream that captures data as it passes through
@@ -619,7 +689,7 @@ async fn handle_request(
 
             // Create a wrapper that captures SSE events while streaming
             let wrapped_body =
-                SseCapturingBody::new(body, request_id_clone, ctx_clone.app_state.clone());
+                SseCapturingBody::new(body, request_id_clone, ctx_clone.app_state.clone(), capture);
 
             // Build streaming response — preserve multi-value headers
             // (particularly `Set-Cookie`) by starting from the original
@@ -646,10 +716,11 @@ async fn handle_request(
             let response_content_type = upstream_headers.get("content-type").cloned();
             let response_modification = apply_response_rules_with_values(
                 &matched_rules,
-                &uri,
-                &method,
+                &display_uri,
+                &final_method_str,
                 &request_headers,
                 &upstream_headers,
+                status,
                 None,
                 response_content_type.as_deref(),
                 &resolve_ctx,
@@ -682,10 +753,10 @@ async fn handle_request(
                 PassthroughMeta {
                     request_id: request_id.clone(),
                     timestamp,
-                    method: method.clone(),
-                    url: uri.clone(),
+                    method: final_method_str.clone(),
+                    url: display_uri.clone(),
                     host: host.clone(),
-                    path: path.clone(),
+                    path: display_path.clone(),
                     request_headers: request_headers.clone(),
                     response_status: final_status,
                     response_headers: final_headers.clone(),
@@ -720,10 +791,11 @@ async fn handle_request(
             // Apply response rules
             let response_modification = apply_response_rules_with_values(
                 &matched_rules,
-                &uri,
-                &method,
+                &display_uri,
+                &final_method_str,
                 &request_headers,
                 &response_headers,
+                status,
                 Some(&response_body.data),
                 response_content_type.as_deref(),
                 &resolve_ctx,
@@ -735,15 +807,15 @@ async fn handle_request(
                     // Build PluginRequest from request data
                     let plugin_request = PluginRequest {
                         id: request_id.clone(),
-                        method: method.clone(),
-                        url: uri.clone(),
+                        method: final_method_str.clone(),
+                        url: display_uri.clone(),
                         host: host.clone(),
-                        path: path.clone(),
-                        query: extract_query_params(&uri),
+                        path: display_path.clone(),
+                        query: extract_query_params(&display_uri),
                         headers: request_headers.clone(),
                         body: Some(base64::Engine::encode(
                             &base64::engine::general_purpose::STANDARD,
-                            &request_body.data,
+                            &body_to_send,
                         )),
                         body_base64: true,
                         timestamp,
@@ -768,7 +840,7 @@ async fn handle_request(
                             }
                             _ => std::collections::HashMap::new(),
                         },
-                        matched_pattern: uri.clone(),
+                        matched_pattern: display_uri.clone(),
                     };
 
                     // Call plugin handleResponse
@@ -842,7 +914,6 @@ async fn handle_request(
             if let Some(speed_kbps) = response_modification.speed_kbps {
                 final_body = super::throttle::apply_throttle(final_body, Some(speed_kbps)).await;
             }
-
             let body_was_modified = final_body != response_body.data;
 
             // Finalize headers: apply `headers_to_remove`, fold in cookies,
@@ -883,6 +954,16 @@ async fn handle_request(
                 },
             );
             let final_headers = headermap_to_flat(&final_header_map);
+            persist_response_writes(
+                &response_modification.write_files,
+                ResponseWriteContext {
+                    method: &final_method_str,
+                    status: response_modification.status_code.unwrap_or(status),
+                    headers: &final_headers,
+                    body: &final_body,
+                    force: is_enabled(&request_modification, feature::FORCE_RES_WRITE),
+                },
+            );
 
             let final_size = final_body.len() as u64;
 
@@ -892,39 +973,41 @@ async fn handle_request(
                 size: final_body.len(),
                 truncated: response_body.truncated,
             };
-            ctx.body_storage
-                .store_response_body(&request_id, stored_body.clone())
-                .await;
-            // Persist response body
-            ctx.app_state
-                .persist_body(request_id.clone(), stored_body.data.clone(), false);
+            if capture {
+                ctx.body_storage
+                    .store_response_body(&request_id, stored_body.clone())
+                    .await;
+                ctx.app_state
+                    .persist_body(request_id.clone(), stored_body.data.clone(), false);
+            }
 
             let final_duration = start_time.elapsed().as_millis() as u64;
             let final_status = response_modification.status_code.unwrap_or(status);
 
-            // Emit completion event
-            ctx.app_state.emit_request_event(&CapturedRequestEvent {
-                id: request_id.clone(),
-                event_type: RequestEventType::Completed,
-                data: CapturedRequestData {
-                    id: request_id,
-                    timestamp,
-                    method,
-                    url: uri,
-                    host,
-                    path,
-                    request_headers: Some(request_headers),
-                    response_status: Some(final_status),
-                    response_headers: Some(final_headers.clone()),
-                    duration_ms: Some(final_duration),
-                    matched_rules: matched_rule_ids,
-                    protocol: "http1".to_string(),
-                    content_type: final_headers.get("content-type").cloned(),
-                    request_size,
-                    response_size: Some(final_size),
-                    ..Default::default()
-                },
-            });
+            if capture {
+                ctx.app_state.emit_request_event(&CapturedRequestEvent {
+                    id: request_id.clone(),
+                    event_type: RequestEventType::Completed,
+                    data: CapturedRequestData {
+                        id: request_id,
+                        timestamp,
+                        method: final_method_str,
+                        url: display_uri,
+                        host,
+                        path: display_path,
+                        request_headers: Some(request_headers),
+                        response_status: Some(final_status),
+                        response_headers: Some(final_headers.clone()),
+                        duration_ms: Some(final_duration),
+                        matched_rules: matched_rule_ids,
+                        protocol: "http1".to_string(),
+                        content_type: final_headers.get("content-type").cloned(),
+                        request_size,
+                        response_size: Some(final_size),
+                        ..Default::default()
+                    },
+                });
+            }
 
             // Build final response with modified headers and body
             let builder = Response::builder().status(final_status);
@@ -963,6 +1046,7 @@ async fn handle_connect(
     req: Request<Incoming>,
     request_id: &str,
     timestamp: i64,
+    peer_addr: SocketAddr,
     ctx: Arc<ProxyContext>,
 ) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     // Validate and extract hostname
@@ -1011,6 +1095,7 @@ async fn handle_connect(
     let ca = ctx.ca.clone();
     let request_id = request_id.to_string();
     let ctx_clone = ctx.clone();
+    let client_ip = peer_addr.ip().to_string();
 
     // Upgrade the connection
     tokio::task::spawn(async move {
@@ -1024,7 +1109,8 @@ async fn handle_connect(
                         // Pass the upgraded connection wrapped in TokioIo
                         let io = TokioIo::new(upgraded);
                         if let Err(e) =
-                            tunnel_connection(io, acceptor, &host, port, ca, ctx_clone).await
+                            tunnel_connection(io, acceptor, &host, port, ca, ctx_clone, client_ip)
+                                .await
                         {
                             tracing::debug!("Tunnel error for {}: {}", request_id, e);
                         }
@@ -1092,7 +1178,7 @@ async fn forward_http_request_check_sse(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    if sse::is_sse_response(content_type.as_deref()) {
+    if sse::is_sse_response(content_type.as_deref()) && !buffer_body {
         // Return SSE info for streaming
         let (parts, body) = resp.into_parts();
         return Ok(ForwardResult::Sse {
@@ -1152,6 +1238,19 @@ fn extract_query_params(uri: &str) -> HashMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn path_and_query_from_url(uri: &str) -> Option<String> {
+    let url = url::Url::parse(uri).ok()?;
+    let mut path = url.path().to_string();
+    if path.is_empty() {
+        path.push('/');
+    }
+    if let Some(query) = url.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    Some(path)
 }
 
 /// Extract host from request
@@ -1343,6 +1442,7 @@ struct SseCapturingBody {
     inner: Incoming,
     connection_id: String,
     app_state: Arc<AppState>,
+    capture: bool,
     parser: sse::SseParser,
     message_count: u64,
     total_bytes: u64,
@@ -1351,11 +1451,17 @@ struct SseCapturingBody {
 }
 
 impl SseCapturingBody {
-    fn new(inner: Incoming, connection_id: String, app_state: Arc<AppState>) -> Self {
+    fn new(
+        inner: Incoming,
+        connection_id: String,
+        app_state: Arc<AppState>,
+        capture: bool,
+    ) -> Self {
         Self {
             inner,
             connection_id,
             app_state,
+            capture,
             parser: sse::SseParser::new(),
             message_count: 0,
             total_bytes: 0,
@@ -1365,6 +1471,9 @@ impl SseCapturingBody {
     }
 
     fn emit_stream_ended(&self) {
+        if !self.capture {
+            return;
+        }
         self.app_state
             .emit_stream_ended(&crate::state::StreamEndedEvent {
                 connection_id: self.connection_id.clone(),
@@ -1391,6 +1500,10 @@ impl Body for SseCapturingBody {
                 if let Some(data) = frame.data_ref() {
                     let chunk = data.clone();
                     self.total_bytes += chunk.len() as u64;
+
+                    if !self.capture {
+                        return Poll::Ready(Some(Ok(frame)));
+                    }
 
                     // Parse SSE events from the chunk
                     let events = self.parser.feed(&chunk);

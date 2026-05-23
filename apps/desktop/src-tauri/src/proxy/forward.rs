@@ -115,6 +115,64 @@ impl ForwardTarget {
     }
 }
 
+/// Apply request-side URL rewrites from `urlParams://` and
+/// `pathReplace://`/`urlReplace://` to an already resolved absolute upstream
+/// URL. Host rewrites happen first via `ForwardTarget`; this final pass keeps
+/// all proxy entry points aligned.
+pub fn apply_request_url_modifications(
+    base_url: &str,
+    path: Option<&str>,
+    query_params: Option<&str>,
+) -> Result<String> {
+    if path.is_none() && query_params.is_none() {
+        return Ok(base_url.to_string());
+    }
+
+    let mut url = Url::parse(base_url)
+        .map_err(|e| PostGateError::Proxy(format!("Invalid upstream URL {}: {}", base_url, e)))?;
+
+    if let Some(path) = path {
+        let (path_part, query_from_path) = path.split_once('?').unwrap_or((path, ""));
+        let normalized_path = if path_part.is_empty() {
+            "/".to_string()
+        } else if path_part.starts_with('/') {
+            path_part.to_string()
+        } else {
+            format!("/{}", path_part)
+        };
+        url.set_path(&normalized_path);
+
+        // `pathReplace://` normally targets only the path, but accepting a
+        // replacement that includes `?query` makes `urlReplace://` useful too.
+        if !query_from_path.is_empty() && query_params.is_none() {
+            url.set_query(Some(query_from_path));
+        }
+    }
+
+    if let Some(query_params) = query_params {
+        if query_params.is_empty() {
+            url.set_query(None);
+        } else {
+            url.set_query(Some(query_params));
+        }
+    }
+
+    Ok(url.to_string())
+}
+
+pub fn path_and_query_from_url(uri: &str) -> Option<String> {
+    let url = Url::parse(uri).ok()?;
+    let mut path = url.path().to_string();
+    if path.is_empty() {
+        path.push('/');
+    }
+    if let Some(query) = url.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    Some(path)
+}
+
 /// Join two paths whistle-style
 ///
 /// Examples:
@@ -426,5 +484,26 @@ mod tests {
         let target = ForwardTarget::parse("http://127.0.0.1:3000/browser", "", "https").unwrap();
 
         assert_eq!(target.build_url(), "http://127.0.0.1:3000/browser");
+    }
+
+    #[test]
+    fn test_apply_request_url_modifications_path_and_query() {
+        let url = apply_request_url_modifications(
+            "https://example.com/api/users?debug=false",
+            Some("/v2/users"),
+            Some("debug=true&cache=off"),
+        )
+        .unwrap();
+
+        assert_eq!(url, "https://example.com/v2/users?debug=true&cache=off");
+    }
+
+    #[test]
+    fn test_apply_request_url_modifications_empty_query_removes_query() {
+        let url =
+            apply_request_url_modifications("https://example.com/api?debug=true", None, Some(""))
+                .unwrap();
+
+        assert_eq!(url, "https://example.com/api");
     }
 }

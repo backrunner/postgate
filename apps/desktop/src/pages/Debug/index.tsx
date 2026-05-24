@@ -22,26 +22,38 @@ export function DebugPage() {
     status,
     sessions,
     selectedSessionId,
-    fetchStatus,
-    syncWithRules,
-    fetchSessions,
     selectSession,
   } = useDebugStore();
 
   // Initialize and sync with rules
   useEffect(() => {
-    fetchStatus();
-    syncWithRules();
-    setupDebugListeners();
+    let active = true;
+
+    const refresh = async () => {
+      const { fetchStatus, fetchSessions } = useDebugStore.getState();
+      const currentStatus = await fetchStatus();
+      if (!active || !currentStatus.is_running) {
+        return;
+      }
+      await fetchSessions();
+    };
+
+    void (async () => {
+      const { syncWithRules } = useDebugStore.getState();
+      await syncWithRules();
+      if (active) {
+        await refresh();
+      }
+    })();
+
+    void setupDebugListeners();
 
     const interval = setInterval(() => {
-      fetchStatus();
-      if (status.is_running) {
-        fetchSessions();
-      }
+      void refresh();
     }, 2000);
 
     return () => {
+      active = false;
       clearInterval(interval);
       cleanupDebugListeners();
     };

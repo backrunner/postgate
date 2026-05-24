@@ -120,6 +120,11 @@ interface SyncPullResult {
   path: string;
 }
 
+interface CertificateInfo {
+  installed: boolean;
+  pem: string;
+}
+
 const profileOptions: ProfileOptions = {
   includeRules: true,
   includeValues: true,
@@ -185,6 +190,27 @@ export function SettingsPage() {
 
   useEffect(() => {
     initUpdaterSettings();
+  }, []);
+
+  useEffect(() => {
+    let isCurrent = true;
+
+    void (async () => {
+      try {
+        const info = await invoke<CertificateInfo>("get_ca_certificate");
+        if (isCurrent) {
+          setCertInstalled(info.installed);
+        }
+      } catch (e) {
+        if (isCurrent) {
+          setCertError(String(e));
+        }
+      }
+    })();
+
+    return () => {
+      isCurrent = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -428,7 +454,8 @@ export function SettingsPage() {
     setCertError(null);
     try {
       await invoke("install_ca_certificate");
-      setCertInstalled(true);
+      const info = await invoke<CertificateInfo>("get_ca_certificate");
+      setCertInstalled(info.installed);
     } catch (e) {
       setCertError(String(e));
     } finally {

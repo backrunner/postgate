@@ -98,7 +98,7 @@ interface DebugState {
   autoScroll: boolean;
 
   // Actions
-  fetchStatus: () => Promise<void>;
+  fetchStatus: () => Promise<DebugStatus>;
   syncWithRules: () => Promise<void>;
   startServer: (port?: number) => Promise<void>;
   stopServer: () => Promise<void>;
@@ -141,8 +141,10 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     try {
       const status = await invoke<DebugStatus>("get_debug_status");
       set({ status });
+      return status;
     } catch (e) {
       set({ error: String(e) });
+      return get().status;
     }
   },
 
@@ -331,8 +333,9 @@ export async function setupDebugListeners() {
 
   // Listen for server started
   unlistenFns.push(
-    await listen("debug:server_started", () => {
-      store.fetchStatus();
+    await listen("debug:server_started", async () => {
+      await store.fetchStatus();
+      await store.fetchSessions();
     })
   );
 

@@ -15,9 +15,19 @@ pub struct CertificateInfo {
 #[tauri::command]
 pub async fn get_ca_certificate(state: State<'_, Arc<AppState>>) -> Result<CertificateInfo> {
     let ca = state.get_or_init_ca()?;
+    let app_handle = &state.app_handle;
+    let data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| crate::error::PostGateError::Storage(e.to_string()))?;
+    let store = CertStore::new(data_dir);
+    let installed = store.is_installed(ca.get_ca_pem()).unwrap_or_else(|e| {
+        tracing::warn!("Failed to check CA certificate install status: {}", e);
+        false
+    });
 
     Ok(CertificateInfo {
-        installed: false, // TODO: Check if actually installed
+        installed,
         pem: ca.get_ca_pem().to_string(),
     })
 }

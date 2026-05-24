@@ -33,7 +33,7 @@ export function Toolbar() {
   // flush (which mutates `requestMap`) would re-render the toolbar and
   // its children, compounding with the list below on busy capture.
   const isPaused = useCaptureStore((state) => state.isPaused);
-  const clearRequests = useCaptureStore((state) => state.clearRequests);
+  const clearHistory = useCaptureStore((state) => state.clearHistory);
   const filter = useCaptureStore((state) => state.filter);
   const setFilter = useCaptureStore((state) => state.setFilter);
   const resetFilter = useCaptureStore((state) => state.resetFilter);
@@ -204,7 +204,7 @@ export function Toolbar() {
         <Button
           variant="ghost"
           size="sm"
-          onClick={clearRequests}
+          onClick={() => void clearHistory()}
           title="Clear all requests"
           className="h-7 px-2 text-muted-foreground hover:text-destructive"
         >

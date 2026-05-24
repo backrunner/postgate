@@ -12,6 +12,7 @@ use crate::proxy::headers::{
     build_forward_response_headers, flat_to_headermap, headermap_to_flat,
     sync_request_body_headers,
 };
+use crate::proxy::websocket;
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, feature, is_enabled,
     persist_request_writes, persist_response_writes, remote_resource_urls_for_request,
@@ -86,6 +87,7 @@ where
                     }
                 }),
             )
+            .with_upgrades()
             .await
             .map_err(|e| PostGateError::Proxy(format!("HTTPS tunnel error: {}", e)))
     }
@@ -128,13 +130,14 @@ async fn handle_https_request(
     let request_headers: HashMap<String, String> = headermap_to_flat(&original_request_headers);
 
     let content_type = request_headers.get("content-type").cloned();
+    let is_websocket = websocket::is_websocket_upgrade(&request_headers);
 
     // Match rules - now returns MatchedRule with remaining_path
     let matched_rules = ctx.rule_engine.match_request_with_client_ip(
         &method_str,
         host,
         &path,
-        "https",
+        if is_websocket { "wss" } else { "https" },
         port,
         &request_headers,
         Some(client_ip),
@@ -143,6 +146,84 @@ async fn handle_https_request(
         .iter()
         .map(|r| r.rule.raw_line.clone())
         .collect();
+
+    if is_websocket {
+        let target_url = websocket::build_ws_url(host, port, &path, true);
+
+        let _ = ctx.app_state.ensure_values_loaded().await;
+        let query_map = super::handler::tunnel_value_helpers::query_map(&target_url);
+        let cookie_map = super::handler::tunnel_value_helpers::cookie_map(&request_headers);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let values_ctx = RequestCtx {
+            url: &target_url,
+            method: &method_str,
+            client_ip,
+            req_headers: &request_headers,
+            query: &query_map,
+            req_cookies: &cookie_map,
+            now_ms,
+        };
+        let remote_resources = ResolvedResources::new();
+        let request_modification = {
+            let resolve_ctx = ResolveCtx {
+                store: Some(&ctx.app_state.values_store),
+                ctx: Some(&values_ctx),
+                remote_resources: Some(&remote_resources),
+            };
+            apply_request_rules_with_values(
+                &matched_rules,
+                &target_url,
+                &method_str,
+                &request_headers,
+                None,
+                &resolve_ctx,
+            )
+        };
+
+        if crate::rules::should_abort(&request_modification) {
+            return Ok(Response::builder()
+                .status(444)
+                .header("connection", "close")
+                .body(Full::new(Bytes::new()).map_err(|_| unreachable!()).boxed())
+                .unwrap());
+        }
+
+        if let Some(delay_ms) = request_modification.delay_ms {
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        }
+
+        let capture = crate::rules::capture_enabled(&request_modification);
+        let meta = websocket::WebSocketCaptureMeta {
+            request_id,
+            timestamp,
+            method: method_str,
+            url: target_url.clone(),
+            host: host.to_string(),
+            path,
+            request_headers: request_headers.clone(),
+            matched_rules: matched_rule_ids,
+            tls_version: Some(tls_version.to_string()),
+            remote_addr: Some(client_ip.to_string()),
+            capture,
+        };
+
+        return match websocket::handle_hyper_upgrade(
+            req,
+            target_url,
+            original_request_headers,
+            ctx.app_state.clone(),
+            meta,
+        )
+        .await
+        {
+            Ok(response) => Ok(response),
+            Err(e) => Ok(html_error_response(
+                502,
+                ProxyErrorKind::Upstream,
+                &e.to_string(),
+            )),
+        };
+    }
 
     // Collect request body
     let (parts, body) = req.into_parts();

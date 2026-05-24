@@ -248,7 +248,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
   addRequests: (requests) => {
     set((state) => {
       const newMap = new Map(state.requestMap);
-      const newIds = [...state.requestIds];
+      const addedIds: string[] = [];
 
       // Sort by timestamp descending (newest first)
       const sortedRequests = [...requests].sort((a, b) => b.timestamp - a.timestamp);
@@ -256,9 +256,13 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
       for (const request of sortedRequests) {
         if (!newMap.has(request.id)) {
           newMap.set(request.id, request);
-          newIds.unshift(request.id);
+          addedIds.push(request.id);
         }
       }
+
+      const newIds = addedIds.length > 0
+        ? [...addedIds, ...state.requestIds]
+        : [...state.requestIds];
 
       // Trim if exceeds max
       while (newIds.length > state.maxRequests) {
@@ -475,7 +479,7 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
       });
     } catch (e) {
       console.error("Failed to load history:", e);
-      set({ isLoadingHistory: false, historyLoaded: true });
+      set({ isLoadingHistory: false, historyLoaded: false });
     }
   },
 

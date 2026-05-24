@@ -126,6 +126,8 @@ async fn handle_request(
     let request_headers: HashMap<String, String> = headermap_to_flat(&original_request_headers);
 
     let content_type = request_headers.get("content-type").cloned();
+    let protocol = req.uri().scheme_str().unwrap_or("http").to_string();
+    let port = extract_port(&req, if protocol == "https" { 443 } else { 80 });
 
     // Check if this is a WebSocket upgrade request
     if websocket::is_websocket_upgrade(&request_headers) {
@@ -135,6 +137,9 @@ async fn handle_request(
             timestamp,
             &host,
             &path,
+            port,
+            matches!(protocol.as_str(), "https" | "wss"),
+            &original_request_headers,
             &request_headers,
             peer_addr,
             ctx,
@@ -144,11 +149,6 @@ async fn handle_request(
 
     // Match rules for this request
     // Extract protocol and port for filter matching
-    let protocol = req.uri().scheme_str().unwrap_or("http").to_string();
-    let port = req
-        .uri()
-        .port_u16()
-        .unwrap_or(if protocol == "https" { 443 } else { 80 });
     let client_ip = peer_addr.ip().to_string();
     let matched_rules = ctx.rule_engine.match_request_with_client_ip(
         &method,
@@ -1374,15 +1374,55 @@ fn path_and_query_from_url(uri: &str) -> Option<String> {
 /// Extract host from request
 fn extract_host(req: &Request<Incoming>) -> String {
     req.uri().host().map(|h| h.to_string()).unwrap_or_else(|| {
-        req.headers()
+        let authority = req
+            .headers()
             .get("host")
             .and_then(|h| h.to_str().ok())
-            .unwrap_or("unknown")
-            .split(':')
-            .next()
-            .unwrap_or("unknown")
-            .to_string()
+            .unwrap_or("unknown");
+        extract_authority_host(authority)
     })
+}
+
+fn extract_authority_host(authority: &str) -> String {
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some((host, _)) = rest.split_once(']') {
+            return host.to_string();
+        }
+    }
+
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            return host.to_string();
+        }
+    }
+
+    authority.to_string()
+}
+
+fn extract_port(req: &Request<Incoming>, default_port: u16) -> u16 {
+    req.uri()
+        .port_u16()
+        .or_else(|| {
+            req.headers()
+                .get("host")
+                .and_then(|h| h.to_str().ok())
+                .and_then(extract_authority_port)
+        })
+        .unwrap_or(default_port)
+}
+
+fn extract_authority_port(authority: &str) -> Option<u16> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (_, port) = rest.split_once("]:")?;
+        return port.parse().ok();
+    }
+
+    let (_, port) = authority.rsplit_once(':')?;
+    if port.chars().all(|c| c.is_ascii_digit()) {
+        port.parse().ok()
+    } else {
+        None
+    }
 }
 
 /// Validate hostname for CONNECT requests
@@ -1488,65 +1528,108 @@ async fn handle_websocket_upgrade(
     timestamp: i64,
     host: &str,
     path: &str,
+    port: u16,
+    secure: bool,
+    original_request_headers: &HeaderMap,
     request_headers: &HashMap<String, String>,
     peer_addr: SocketAddr,
     ctx: Arc<ProxyContext>,
 ) -> std::result::Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    let url = format!("ws://{}{}", host, path);
+    let method = req.method().to_string();
+    let target_url = websocket::build_ws_url(host, port, path, secure);
+    let client_ip = peer_addr.ip().to_string();
+    let rule_protocol = if secure { "wss" } else { "ws" };
+    let matched_rules = ctx.rule_engine.match_request_with_client_ip(
+        &method,
+        host,
+        path,
+        rule_protocol,
+        port,
+        request_headers,
+        Some(&client_ip),
+    );
+    let matched_rule_ids: Vec<String> = matched_rules
+        .iter()
+        .map(|r| r.rule.raw_line.clone())
+        .collect();
 
-    // Emit request started event with websocket protocol
-    ctx.app_state.emit_request_event(&CapturedRequestEvent {
-        id: request_id.to_string(),
-        event_type: RequestEventType::Started,
-        data: CapturedRequestData {
-            id: request_id.to_string(),
-            timestamp,
-            method: "GET".to_string(),
-            url: url.clone(),
-            host: host.to_string(),
-            path: path.to_string(),
-            request_headers: Some(request_headers.clone()),
-            protocol: "websocket".to_string(),
-            remote_addr: Some(peer_addr.to_string()),
-            ..Default::default()
-        },
-    });
-
-    let request_id = request_id.to_string();
-    let host = host.to_string();
-    let path = path.to_string();
-    let ctx_clone = ctx.clone();
-    let target_url = websocket::build_ws_url(&host, 80, &path, false);
-
-    // Spawn the WebSocket upgrade handling
-    tokio::task::spawn(async move {
-        match hyper::upgrade::on(req).await {
-            Ok(upgraded) => {
-                let io = TokioIo::new(upgraded);
-                let ws_proxy =
-                    websocket::WebSocketProxy::new(request_id.clone(), ctx_clone.app_state.clone());
-
-                if let Err(e) = ws_proxy.proxy(io, &target_url).await {
-                    tracing::debug!("WebSocket proxy error for {}: {}", request_id, e);
-                }
-            }
-            Err(e) => {
-                tracing::error!("WebSocket upgrade error: {}", e);
-            }
-        }
-    });
-
-    // Return 101 Switching Protocols
-    Ok(Response::builder()
-        .status(101)
-        .header("Upgrade", "websocket")
-        .header("Connection", "Upgrade")
-        .body(
-            Empty::<Bytes>::new()
-                .map_err(|_: std::convert::Infallible| unreachable!())
-                .boxed(),
+    let _ = ctx.app_state.ensure_values_loaded().await;
+    let query_map = build_query_map(&target_url);
+    let cookie_map = build_cookie_map(request_headers);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let values_ctx = RequestCtx {
+        url: &target_url,
+        method: &method,
+        client_ip: &client_ip,
+        req_headers: request_headers,
+        query: &query_map,
+        req_cookies: &cookie_map,
+        now_ms,
+    };
+    let remote_resources = ResolvedResources::new();
+    let request_modification = {
+        let resolve_ctx = ResolveCtx {
+            store: Some(&ctx.app_state.values_store),
+            ctx: Some(&values_ctx),
+            remote_resources: Some(&remote_resources),
+        };
+        apply_request_rules_with_values(
+            &matched_rules,
+            &target_url,
+            &method,
+            request_headers,
+            None,
+            &resolve_ctx,
         )
-        .unwrap())
+    };
+
+    if crate::rules::should_abort(&request_modification) {
+        return Ok(Response::builder()
+            .status(444)
+            .header("connection", "close")
+            .body(
+                Empty::<Bytes>::new()
+                    .map_err(|_: std::convert::Infallible| unreachable!())
+                    .boxed(),
+            )
+            .unwrap());
+    }
+
+    if let Some(delay_ms) = request_modification.delay_ms {
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+    }
+
+    let capture = crate::rules::capture_enabled(&request_modification);
+    let meta = websocket::WebSocketCaptureMeta {
+        request_id: request_id.to_string(),
+        timestamp,
+        method,
+        url: target_url.clone(),
+        host: host.to_string(),
+        path: path.to_string(),
+        request_headers: request_headers.clone(),
+        matched_rules: matched_rule_ids,
+        tls_version: None,
+        remote_addr: Some(peer_addr.to_string()),
+        capture,
+    };
+
+    match websocket::handle_hyper_upgrade(
+        req,
+        target_url,
+        original_request_headers.clone(),
+        ctx.app_state.clone(),
+        meta,
+    )
+    .await
+    {
+        Ok(response) => Ok(response),
+        Err(e) => Ok(error_response(
+            502,
+            ProxyErrorKind::Upstream,
+            &e.to_string(),
+        )),
+    }
 }
 
 // ==================== SSE Capturing Body ====================

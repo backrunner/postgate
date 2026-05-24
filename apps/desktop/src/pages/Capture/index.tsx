@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { RequestList } from "./RequestList";
 import { RequestDetail } from "./RequestDetail";
 import { Toolbar } from "./Toolbar";
@@ -8,6 +8,7 @@ import { useProxy } from "@/hooks/useProxy";
 export function CapturePage() {
   const [splitRatio] = useState(0.5);
   const selectedId = useCaptureStore((state) => state.selectedId);
+  const loadHistory = useCaptureStore((state) => state.loadHistory);
   const filteredRequests = useFilteredRequests();
   const selectedRequest = useCaptureStore((state) =>
     state.selectedId ? state.requestMap.get(state.selectedId) : undefined
@@ -15,6 +16,10 @@ export function CapturePage() {
 
   // Initialize proxy event listeners
   useProxy();
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
 
   return (
     <div className="flex h-full flex-col">

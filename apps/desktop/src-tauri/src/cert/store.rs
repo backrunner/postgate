@@ -42,6 +42,12 @@ impl CertStore {
         self.ca_cert_path().exists()
     }
 
+    /// Check whether this exact CA certificate is present in the system trust
+    /// location PostGate installs to.
+    pub fn is_installed(&self, pem: &str) -> Result<bool> {
+        is_installed_platform(pem, &self.data_dir)
+    }
+
     /// Install CA certificate to system trust store (platform-specific)
     #[cfg(target_os = "macos")]
     pub fn install_to_system(&self, pem: &str) -> Result<()> {
@@ -170,4 +176,96 @@ impl CertStore {
             "Could not find system certificate directory".into(),
         ))
     }
+}
+
+fn normalized_pem_blocks(contents: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut in_block = false;
+
+    for line in contents.lines().map(str::trim) {
+        if line == "-----BEGIN CERTIFICATE-----" {
+            in_block = true;
+            current.clear();
+        }
+
+        if in_block {
+            current.push(line.to_string());
+        }
+
+        if line == "-----END CERTIFICATE-----" && in_block {
+            blocks.push(current.join("\n"));
+            current.clear();
+            in_block = false;
+        }
+    }
+
+    blocks
+}
+
+fn pem_matches(contents: &str, expected_pem: &str) -> bool {
+    let expected = normalized_pem_blocks(expected_pem)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| expected_pem.trim().to_string());
+
+    normalized_pem_blocks(contents)
+        .into_iter()
+        .any(|block| block == expected)
+}
+
+#[cfg(target_os = "macos")]
+fn is_installed_platform(pem: &str, _data_dir: &std::path::Path) -> Result<bool> {
+    use std::process::Command;
+
+    let output = Command::new("security")
+        .args(["find-certificate", "-a", "-p", "-c", "PostGate Root CA"])
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(pem_matches(&stdout, pem))
+}
+
+#[cfg(target_os = "windows")]
+fn is_installed_platform(_pem: &str, _data_dir: &std::path::Path) -> Result<bool> {
+    use std::process::Command;
+
+    let output = Command::new("certutil")
+        .args(["-user", "-store", "ROOT", "PostGate Root CA"])
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.contains("PostGate Root CA"))
+}
+
+#[cfg(target_os = "linux")]
+fn is_installed_platform(pem: &str, _data_dir: &std::path::Path) -> Result<bool> {
+    let candidates = [
+        std::path::PathBuf::from("/usr/local/share/ca-certificates/postgate-ca.crt"),
+        std::path::PathBuf::from("/etc/pki/ca-trust/source/anchors/postgate-ca.crt"),
+    ];
+
+    for path in candidates {
+        if path.exists() {
+            let contents = std::fs::read_to_string(path)?;
+            if pem_matches(&contents, pem) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn is_installed_platform(_pem: &str, _data_dir: &std::path::Path) -> Result<bool> {
+    Ok(false)
 }

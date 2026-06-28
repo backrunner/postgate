@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 
+mod api;
+mod capture_index;
 mod cert;
 mod commands;
 mod debug;
 mod error;
+mod mcp;
 mod plugin;
 mod proxy;
 mod replay;
@@ -52,6 +55,14 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = initialize_plugin_system(state_clone, app_handle).await {
                     tracing::error!("Failed to initialize plugin system: {}", e);
+                }
+            });
+
+            // Restore MCP server asynchronously if the user enabled it.
+            let state_clone = state.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = initialize_mcp_system(state_clone).await {
+                    tracing::error!("Failed to initialize MCP system: {}", e);
                 }
             });
 
@@ -136,9 +147,34 @@ pub fn run() {
             commands::profile::save_sync_settings,
             commands::profile::push_sync_profile,
             commands::profile::pull_sync_profile,
+            commands::mcp::get_mcp_status,
+            commands::mcp::start_mcp_server,
+            commands::mcp::stop_mcp_server,
+            commands::mcp::create_mcp_client,
+            commands::mcp::list_mcp_clients,
+            commands::mcp::revoke_mcp_client,
+            commands::mcp::rotate_mcp_client_token,
+            commands::mcp::set_mcp_client_scopes,
+            commands::mcp::get_mcp_client_config,
+            commands::mcp::list_mcp_audit_events,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Restore the MCP server if the persisted settings have it enabled.
+async fn initialize_mcp_system(state: Arc<AppState>) -> error::Result<()> {
+    let db = state.get_database().await?;
+    let settings = db.get_mcp_settings().await?;
+    if settings.enabled {
+        crate::mcp::manager::start_server(
+            state,
+            Some(settings.port),
+            Some(settings.allowed_origins),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Initialize the plugin system

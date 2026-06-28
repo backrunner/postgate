@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { 
-  AlertCircle,
   Settings, 
   Shield, 
   Network, 
@@ -50,6 +49,15 @@ import { useRulesStore, type RuleGroup } from "@/stores/rules";
 import { useValuesStore } from "@/stores/values";
 import { useReplayStore } from "@/stores/replay";
 import { useColumnsStore, type ColumnConfig } from "@/stores/columns";
+import { McpAccessSection } from "./McpAccessSection";
+import {
+  formatTimestamp,
+  InfoItem,
+  ProfileChip,
+  Section,
+  SettingRow,
+  StatusLine,
+} from "./components";
 
 type SyncProvider = "icloud" | "webdav";
 
@@ -661,6 +669,8 @@ export function SettingsPage() {
             </div>
           </Section>
 
+          <McpAccessSection />
+
           {/* HTTPS & Security */}
           <Section title="HTTPS & Security">
             <div className="space-y-4">
@@ -1021,109 +1031,4 @@ export function SettingsPage() {
       </ScrollArea>
     </div>
   );
-}
-
-function Section({ 
-  title, 
-  children 
-}: { 
-  title: string; 
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-lg border bg-card">
-      <div className="px-4 py-3 border-b">
-        <h2 className="text-sm font-medium">{title}</h2>
-      </div>
-      <div className="p-4">
-        {children}
-      </div>
-    </section>
-  );
-}
-
-function SettingRow({
-  icon,
-  label,
-  description,
-  children,
-}: {
-  icon?: React.ReactNode;
-  label: string;
-  description?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <div className="flex items-center gap-3 min-w-0">
-        {icon && (
-          <span className="text-muted-foreground shrink-0">{icon}</span>
-        )}
-        <div className="min-w-0">
-          <p className="text-sm font-medium">{label}</p>
-          {description && (
-            <p className="text-xs text-muted-foreground truncate">{description}</p>
-          )}
-        </div>
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  );
-}
-
-function InfoItem({ 
-  label, 
-  value, 
-  mono 
-}: { 
-  label: string; 
-  value: string; 
-  mono?: boolean;
-}) {
-  return (
-    <div className="space-y-1">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={cn("text-sm", mono && "font-mono")}>{value}</p>
-    </div>
-  );
-}
-
-function ProfileChip({ label, active }: { label: string; active: boolean }) {
-  return (
-    <div className="flex h-8 items-center gap-2 rounded-md border bg-muted/20 px-2.5 text-xs">
-      <span
-        className={cn(
-          "h-1.5 w-1.5 rounded-full",
-          active ? "bg-emerald-500" : "bg-muted-foreground/40",
-        )}
-      />
-      <span className="truncate text-muted-foreground">{label}</span>
-    </div>
-  );
-}
-
-function StatusLine({ status, error }: { status: string | null; error: string | null }) {
-  if (!status && !error) return null;
-
-  return (
-    <div
-      className={cn(
-        "flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
-        error
-          ? "border-destructive/20 bg-destructive/10 text-destructive"
-          : "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-      )}
-    >
-      {error ? (
-        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      ) : (
-        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      )}
-      <span className="break-words">{error ?? status}</span>
-    </div>
-  );
-}
-
-function formatTimestamp(timestamp: number) {
-  return new Date(timestamp).toLocaleString();
 }

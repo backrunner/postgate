@@ -149,6 +149,7 @@ pub async fn get_response_body(
 #[tauri::command]
 pub async fn clear_captured_data(state: State<'_, Arc<AppState>>) -> Result<()> {
     state.body_storage.clear().await;
+    state.capture_index.clear();
     Ok(())
 }
 
@@ -190,6 +191,7 @@ pub async fn get_persisted_response_body(
 pub async fn clear_captured_history(state: State<'_, Arc<AppState>>) -> Result<()> {
     // Clear memory storage
     state.body_storage.clear().await;
+    state.capture_index.clear();
 
     // Clear persistent storage
     let storage = state.get_captured_storage().await?;

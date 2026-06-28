@@ -1,5 +1,6 @@
 pub mod cert;
 pub mod debug;
+pub mod mcp;
 pub mod plugin;
 pub mod profile;
 pub mod proxy;

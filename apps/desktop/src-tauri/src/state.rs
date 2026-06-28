@@ -1,8 +1,10 @@
+use crate::capture_index::CaptureIndex;
 use crate::cert::CertificateAuthority;
 use crate::debug::{
     ConsoleLog, DebugServer, DebugSession, DebugStatus, PageError, PageNetworkRequest,
     SessionManager,
 };
+use crate::mcp::manager::McpRuntime;
 use crate::plugin::PluginManager;
 use crate::proxy::{BodyStorage, ProxyServer};
 use crate::rules::RuleEngine;
@@ -23,6 +25,7 @@ pub struct AppState {
     pub rule_engine: Arc<RuleEngine>,
     pub request_tx: broadcast::Sender<CapturedRequestEvent>,
     pub body_storage: Arc<BodyStorage>,
+    pub capture_index: Arc<CaptureIndex>,
     pub plugin_manager: tokio::sync::RwLock<PluginManager>,
     pub plugins_dir: PathBuf,
     pub data_dir: PathBuf,
@@ -34,6 +37,7 @@ pub struct AppState {
     values_loaded: AtomicBool,
     database: tokio::sync::RwLock<Option<std::sync::Arc<Database>>>,
     debug_server: tokio::sync::RwLock<Option<Arc<DebugServer>>>,
+    pub mcp_runtime: tokio::sync::RwLock<Option<McpRuntime>>,
     debug_session_manager: Arc<SessionManager>,
     // Captured request persistence
     captured_storage: tokio::sync::RwLock<Option<Arc<CapturedRequestStorage>>>,
@@ -85,6 +89,7 @@ impl AppState {
             rule_engine: Arc::new(RuleEngine::new()),
             request_tx,
             body_storage: Arc::new(BodyStorage::default()),
+            capture_index: Arc::new(CaptureIndex::default()),
             plugin_manager: tokio::sync::RwLock::new(plugin_manager),
             plugins_dir,
             data_dir,
@@ -92,6 +97,7 @@ impl AppState {
             values_loaded: AtomicBool::new(false),
             database: tokio::sync::RwLock::new(None),
             debug_server: tokio::sync::RwLock::new(None),
+            mcp_runtime: tokio::sync::RwLock::new(None),
             debug_session_manager,
             captured_storage: tokio::sync::RwLock::new(None),
             persistence_enabled: AtomicBool::new(false),
@@ -201,6 +207,8 @@ impl AppState {
     /// to add milliseconds per request on busy pages (80+ resources each
     /// emitting started + completed events).
     pub fn emit_request_event(self: &Arc<Self>, event: &CapturedRequestEvent) {
+        self.capture_index.record(event.data.clone());
+
         // Broadcast for in-process subscribers — skip the clone cost if no
         // one is listening (there are currently no subscribers in tree, but
         // the API is retained for future use).

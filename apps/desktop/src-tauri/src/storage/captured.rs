@@ -267,6 +267,26 @@ impl CapturedRequestStorage {
         })
     }
 
+    /// Get a captured request by ID.
+    pub async fn get_request(&self, id: &str) -> Result<Option<StoredCapturedRequest>> {
+        let row = sqlx::query_as::<_, CapturedRequestRow>(
+            r#"
+            SELECT id, timestamp, method, url, host, path, protocol,
+                   request_headers, request_size, response_status, response_headers,
+                   response_size, content_type, duration_ms, matched_rules,
+                   error, tls_version, remote_addr, is_complete
+            FROM captured_requests
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Failed to fetch request: {}", e)))?;
+
+        Ok(row.map(Into::into))
+    }
+
     /// Get body data
     pub async fn get_body(&self, request_id: &str, is_request: bool) -> Result<Option<Bytes>> {
         let (inline_col, path_col) = if is_request {

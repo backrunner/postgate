@@ -138,6 +138,8 @@ async fn persist_rule_group(group: RuleGroup, state: &Arc<AppState>) -> Result<R
     let db = state.get_database().await?;
     db.save_rule_group(&group).await?;
 
+    crate::rule_events::notify_rule_groups_changed(state).await;
+
     Ok(group)
 }
 
@@ -162,9 +164,13 @@ pub async fn delete_rule_group(id: String, state: State<'_, Arc<AppState>>) -> R
 
     // Delete from database
     let db = state.get_database().await?;
-    db.delete_rule_group(&id).await?;
+    let deleted = db.delete_rule_group(&id).await?;
 
-    Ok(removed.is_some())
+    if deleted || removed.is_some() {
+        crate::rule_events::notify_rule_groups_changed(&state).await;
+    }
+
+    Ok(deleted || removed.is_some())
 }
 
 /// Toggle a rule group's enabled state
@@ -183,6 +189,8 @@ pub async fn toggle_rule_group(
             let db = state.get_database().await?;
             db.save_rule_group(&group).await?;
         }
+
+        crate::rule_events::notify_rule_groups_changed(&state).await;
     }
 
     Ok(toggled)

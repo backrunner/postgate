@@ -66,6 +66,7 @@ impl PostGateApi {
         self.state.rule_engine.upsert_group(group.clone());
         let db = self.state.get_database().await?;
         db.save_rule_group(&group).await?;
+        crate::rule_events::notify_rule_groups_changed(&self.state).await;
         Ok(group)
     }
 
@@ -89,6 +90,7 @@ impl PostGateApi {
                 let db = self.state.get_database().await?;
                 db.save_rule_group(&group).await?;
             }
+            crate::rule_events::notify_rule_groups_changed(&self.state).await;
         }
         Ok(toggled)
     }
@@ -96,7 +98,10 @@ impl PostGateApi {
     pub async fn delete_rule_group(&self, id: &str) -> Result<bool> {
         let removed = self.state.rule_engine.remove_group(id);
         let db = self.state.get_database().await?;
-        db.delete_rule_group(id).await?;
-        Ok(removed.is_some())
+        let deleted = db.delete_rule_group(id).await?;
+        if deleted || removed.is_some() {
+            crate::rule_events::notify_rule_groups_changed(&self.state).await;
+        }
+        Ok(deleted || removed.is_some())
     }
 }

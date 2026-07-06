@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 mod api;
+#[cfg(target_os = "macos")]
+mod app_tray;
 mod capture_index;
 mod cert;
 mod commands;
@@ -10,6 +12,7 @@ mod mcp;
 mod plugin;
 mod proxy;
 mod replay;
+mod rule_events;
 mod rules;
 mod state;
 mod storage;
@@ -51,6 +54,11 @@ pub fn run() {
             let state = Arc::new(AppState::new(app_handle.clone()));
 
             commands::rules::start_external_rule_file_watcher(state.clone());
+
+            #[cfg(target_os = "macos")]
+            if let Err(e) = app_tray::setup(app, state.clone()) {
+                tracing::error!("Failed to initialize macOS tray: {}", e);
+            }
 
             // Initialize plugin system asynchronously
             let state_clone = state.clone();

@@ -3,6 +3,7 @@ import { Suspense, lazy, useEffect } from "react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useThemeStore } from "@/stores/theme";
 import { usePluginsStore } from "@/stores/plugins";
+import { useRulesStore } from "@/stores/rules";
 
 // 路由懒加载
 const CapturePage = lazy(() => import("@/pages/Capture").then(m => ({ default: m.CapturePage })));
@@ -25,6 +26,7 @@ function PageLoading() {
 function App() {
   const theme = useThemeStore((state) => state.theme);
   const setupPluginEventListeners = usePluginsStore((state) => state.setupEventListeners);
+  const setupRuleEventListeners = useRulesStore((state) => state.setupEventListeners);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -66,6 +68,28 @@ function App() {
       unlisteners.forEach((unlisten) => unlisten());
     };
   }, [setupPluginEventListeners]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisteners: (() => void)[] = [];
+
+    setupRuleEventListeners()
+      .then((listeners) => {
+        if (cancelled) {
+          listeners.forEach((unlisten) => unlisten());
+          return;
+        }
+        unlisteners = listeners;
+      })
+      .catch((error) => {
+        console.error('Failed to setup rule event listeners:', error);
+      });
+
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, [setupRuleEventListeners]);
 
   return (
     <Routes>

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { useDebugStore } from './debug';
 
 export interface RuleGroup {
@@ -81,6 +82,7 @@ interface RulesState {
   renameGroup: (id: string, newName: string) => Promise<void>;
   toggleGroup: (id: string, enabled: boolean) => Promise<void>;
   selectGroup: (id: string | null) => void;
+  setupEventListeners: () => Promise<UnlistenFn[]>;
   
   // Editor actions
   setEditorContent: (content: string) => void;
@@ -163,6 +165,14 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     await get().loadGroups();
     // Sync debug server with rule changes
     useDebugStore.getState().syncWithRules();
+  },
+
+  setupEventListeners: async () => {
+    const unlistenRuleGroupsChanged = await listen('rules:groups_changed', async () => {
+      await get().loadGroups();
+    });
+
+    return [unlistenRuleGroupsChanged];
   },
   
   selectGroup: (id: string | null) => {

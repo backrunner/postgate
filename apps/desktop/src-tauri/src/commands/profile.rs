@@ -438,6 +438,8 @@ async fn apply_snapshot(
             db.save_rule_group(&group).await?;
             state.rule_engine.upsert_group(group);
         }
+
+        crate::rule_events::notify_rule_groups_changed(state).await;
     }
 
     if profile_options.include_values {

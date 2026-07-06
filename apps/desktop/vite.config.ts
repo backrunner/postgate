@@ -35,8 +35,9 @@ export default defineConfig({
   // Env variables starting with TAURI_ are exposed to the client
   envPrefix: ["VITE_", "TAURI_ENV_*"],
   build: {
-    // Tauri uses Chromium on Windows and WebKit on macOS and Linux
-    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari14",
+    // Tauri runs in modern desktop WebViews; avoid downleveling dependencies
+    // that newer Vite/esbuild cannot safely transform for legacy Safari targets.
+    target: "es2022",
     // Don't minify for debug builds
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     // Produce sourcemaps for debug builds

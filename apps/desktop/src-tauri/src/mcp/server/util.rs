@@ -1,13 +1,8 @@
-use rmcp::{
-    model::{AnnotateAble, RawResource},
-    ErrorData,
-};
+use rmcp::{model::Resource, ErrorData};
 use serde::Serialize;
 
-pub(super) fn resource(uri: &str, name: &str) -> rmcp::model::Resource {
-    RawResource::new(uri, name)
-        .with_mime_type("application/json")
-        .no_annotation()
+pub(super) fn resource(uri: &str, name: &str) -> Resource {
+    Resource::new(uri, name).with_mime_type("application/json")
 }
 
 pub(super) fn to_json<T: Serialize>(value: T) -> Result<String, String> {

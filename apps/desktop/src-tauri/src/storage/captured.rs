@@ -130,13 +130,12 @@ impl CapturedRequestStorage {
     pub async fn save_body(&self, request_id: &str, body: &Bytes, is_request: bool) -> Result<()> {
         if body.len() < INLINE_BODY_THRESHOLD {
             // Inline storage
-            let column = if is_request {
-                "request_body_inline"
+            let query = if is_request {
+                "UPDATE captured_requests SET request_body_inline = ? WHERE id = ?"
             } else {
-                "response_body_inline"
+                "UPDATE captured_requests SET response_body_inline = ? WHERE id = ?"
             };
-            let query = format!("UPDATE captured_requests SET {} = ? WHERE id = ?", column);
-            self.update_body_column(&query, body.to_vec(), request_id)
+            self.update_body_column(query, body.to_vec(), request_id)
                 .await
                 .map_err(|e| {
                     PostGateError::Storage(format!("Failed to save body inline: {}", e))
@@ -158,14 +157,13 @@ impl CapturedRequestStorage {
             tokio::fs::create_dir_all(&dir).await?;
             tokio::fs::write(&path, body.as_ref()).await?;
 
-            let column = if is_request {
-                "request_body_path"
+            let query = if is_request {
+                "UPDATE captured_requests SET request_body_path = ? WHERE id = ?"
             } else {
-                "response_body_path"
+                "UPDATE captured_requests SET response_body_path = ? WHERE id = ?"
             };
-            let query = format!("UPDATE captured_requests SET {} = ? WHERE id = ?", column);
             let updated = self
-                .update_body_column(&query, path.to_string_lossy().to_string(), request_id)
+                .update_body_column(query, path.to_string_lossy().to_string(), request_id)
                 .await
                 .map_err(|e| PostGateError::Storage(format!("Failed to save body path: {}", e)))?;
             if !updated {
@@ -178,7 +176,7 @@ impl CapturedRequestStorage {
 
     async fn update_body_column<'a, T>(
         &self,
-        query: &'a str,
+        query: &'static str,
         value: T,
         request_id: &'a str,
     ) -> std::result::Result<bool, sqlx::Error>
@@ -289,18 +287,13 @@ impl CapturedRequestStorage {
 
     /// Get body data
     pub async fn get_body(&self, request_id: &str, is_request: bool) -> Result<Option<Bytes>> {
-        let (inline_col, path_col) = if is_request {
-            ("request_body_inline", "request_body_path")
+        let query = if is_request {
+            "SELECT request_body_inline, request_body_path FROM captured_requests WHERE id = ?"
         } else {
-            ("response_body_inline", "response_body_path")
+            "SELECT response_body_inline, response_body_path FROM captured_requests WHERE id = ?"
         };
 
-        let query = format!(
-            "SELECT {}, {} FROM captured_requests WHERE id = ?",
-            inline_col, path_col
-        );
-
-        let row: Option<(Option<Vec<u8>>, Option<String>)> = sqlx::query_as(&query)
+        let row: Option<(Option<Vec<u8>>, Option<String>)> = sqlx::query_as(query)
             .bind(request_id)
             .fetch_optional(&self.pool)
             .await

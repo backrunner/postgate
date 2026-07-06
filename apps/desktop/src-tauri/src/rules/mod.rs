@@ -1,5 +1,6 @@
 mod applicator;
 mod engine;
+mod external;
 mod parser;
 mod types;
 
@@ -15,6 +16,11 @@ pub use applicator::{
 };
 #[allow(unused_imports)]
 pub use engine::{MatchedRule, RuleEngine};
+#[allow(unused_imports)]
+pub use external::{
+    collect_external_include_files, parse_rules_with_external_includes,
+    parse_rules_with_external_includes_and_deps, ExpandedRuleSet,
+};
 pub use parser::{parse_rules, parse_rules_with_inline};
 #[allow(unused_imports)]
 pub use types::{Rule, RuleAction, RuleGroup};

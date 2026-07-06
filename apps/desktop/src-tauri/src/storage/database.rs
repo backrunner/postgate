@@ -75,7 +75,8 @@ impl Database {
             .into_iter()
             .map(|row| {
                 let (rules, inline_values) =
-                    crate::rules::parse_rules_with_inline(&row.raw_content).unwrap_or_default();
+                    crate::rules::parse_rules_with_external_includes(&row.raw_content, None)
+                        .unwrap_or_default();
                 RuleGroup {
                     id: row.id,
                     name: row.name,

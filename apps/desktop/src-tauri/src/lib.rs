@@ -50,6 +50,8 @@ pub fn run() {
             // Initialize app state
             let state = Arc::new(AppState::new(app_handle.clone()));
 
+            commands::rules::start_external_rule_file_watcher(state.clone());
+
             // Initialize plugin system asynchronously
             let state_clone = state.clone();
             tauri::async_runtime::spawn(async move {

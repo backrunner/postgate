@@ -1,7 +1,7 @@
 use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
 use crate::replay::{Collection, SavedRequest};
-use crate::rules::{parse_rules_with_inline, RuleGroup};
+use crate::rules::{parse_rules_with_external_includes, RuleGroup};
 use crate::state::AppState;
 use crate::values::ValueEntry;
 use reqwest::Method;
@@ -832,7 +832,7 @@ impl From<RuleGroup> for RuleGroupBackup {
 
 impl RuleGroupBackup {
     fn to_rule_group(&self) -> Result<RuleGroup> {
-        let (rules, inline_values) = parse_rules_with_inline(&self.raw_content)?;
+        let (rules, inline_values) = parse_rules_with_external_includes(&self.raw_content, None)?;
         Ok(RuleGroup {
             id: self.id.clone(),
             name: self.name.clone(),

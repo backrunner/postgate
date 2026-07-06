@@ -39,6 +39,9 @@ export const whistleLanguage: languages.IMonarchLanguage = {
       
       // Filter modifiers (purple)
       [/(?:m|method|i|ip|clientIp|serverIp|p|protocol|h|host|hostname|port|path|pathPrefix|u|url|urlPrefix|s|statusCode|ct|contentType|reqContentType|resContentType|b|body|reqBody|resBody|header|reqHeader|resHeader|excludeFilter|includeFilter):[^\s]+/, 'modifier'],
+
+      // External rule-file include (Whistle @file syntax)
+      [/@[^\s]+/, 'action'],
       
       // Action with :// but NOT http/https (blue)
       [/(?!https?:\/\/)[a-zA-Z][\w-]*:\/\/[^\s]+/, 'action'],

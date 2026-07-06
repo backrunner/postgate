@@ -1,13 +1,19 @@
 use crate::error::{PostGateError, Result};
 use crate::rules::{
-    parse_rules as parse_rules_internal, parse_rules_with_inline, Rule, RuleAction, RuleGroup,
+    collect_external_include_files, parse_rules_with_external_includes,
+    parse_rules_with_external_includes_and_deps, Rule, RuleAction, RuleGroup,
 };
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::State;
+use std::time::{Duration, SystemTime};
+use tauri::{Emitter, State};
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
+
+const EXTERNAL_RULE_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Result of parsing rules
 #[derive(Debug, Clone, Serialize)]
@@ -103,7 +109,7 @@ async fn persist_rule_group(group: RuleGroup, state: &Arc<AppState>) -> Result<R
     let now = chrono::Utc::now().timestamp_millis();
 
     // Parse rules + inline values from raw content.
-    let (rules, inline_values) = parse_rules_with_inline(&group.raw_content)?;
+    let (rules, inline_values) = parse_rules_with_external_includes(&group.raw_content, None)?;
 
     let group = RuleGroup {
         id: if group.id.is_empty() {
@@ -185,11 +191,11 @@ pub async fn toggle_rule_group(
 /// Parse rules from text (returns success/errors for validation)
 #[tauri::command]
 pub async fn parse_rules(content: String) -> Result<ParseResult> {
-    match parse_rules_internal(&content) {
-        Ok(rules) => Ok(ParseResult {
+    match parse_rules_with_external_includes_and_deps(&content, None) {
+        Ok(parsed) => Ok(ParseResult {
             success: true,
-            warnings: collect_parse_warnings(&content, &rules),
-            rules,
+            warnings: collect_parse_warnings(&content, &parsed.rules),
+            rules: parsed.rules,
             errors: vec![],
         }),
         Err(e) => {
@@ -207,6 +213,104 @@ pub async fn parse_rules(content: String) -> Result<ParseResult> {
             })
         }
     }
+}
+
+pub fn start_external_rule_file_watcher(state: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        let mut known_files: HashMap<std::path::PathBuf, Option<SystemTime>> = HashMap::new();
+        let mut initialized = false;
+        let mut ticker = tokio::time::interval(EXTERNAL_RULE_WATCH_INTERVAL);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        loop {
+            ticker.tick().await;
+
+            match refresh_external_rule_files(&state, &mut known_files, initialized).await {
+                Ok(changed) => {
+                    if changed {
+                        tracing::info!("External rule files changed; refreshed rule engine");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to refresh external rule files: {}", e);
+                }
+            }
+
+            initialized = true;
+        }
+    });
+}
+
+async fn refresh_external_rule_files(
+    state: &Arc<AppState>,
+    known_files: &mut HashMap<std::path::PathBuf, Option<SystemTime>>,
+    initialized: bool,
+) -> Result<bool> {
+    ensure_rule_groups_loaded(state).await?;
+
+    let groups = state.rule_engine.get_all_groups();
+    let current_files = external_rule_file_snapshot(&groups);
+
+    if !initialized {
+        *known_files = current_files;
+        return Ok(false);
+    }
+
+    if *known_files == current_files {
+        return Ok(false);
+    }
+
+    for mut group in groups {
+        match parse_rules_with_external_includes(&group.raw_content, None) {
+            Ok((rules, inline_values)) => {
+                group.rules = rules;
+                group.inline_values = inline_values;
+                state.rule_engine.upsert_group(group);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to refresh rule group from external files; keeping previous parsed rules: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    *known_files = current_files;
+
+    if let Err(e) = state.app_handle.emit("rules-external-files-changed", ()) {
+        tracing::warn!("Failed to emit rules-external-files-changed: {}", e);
+    }
+
+    Ok(true)
+}
+
+async fn ensure_rule_groups_loaded(state: &Arc<AppState>) -> Result<()> {
+    if !state.rule_engine.get_all_groups().is_empty() {
+        return Ok(());
+    }
+
+    let db = state.get_database().await?;
+    let groups = db.get_rule_groups().await?;
+    for group in groups {
+        state.rule_engine.upsert_group(group);
+    }
+    Ok(())
+}
+
+fn external_rule_file_snapshot(
+    groups: &[RuleGroup],
+) -> HashMap<std::path::PathBuf, Option<SystemTime>> {
+    groups
+        .iter()
+        .flat_map(|group| collect_external_include_files(&group.raw_content, None))
+        .map(|path| {
+            let modified = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            (path, modified)
+        })
+        .collect()
 }
 
 fn collect_parse_warnings(content: &str, rules: &[Rule]) -> Vec<ParseError> {
@@ -250,7 +354,7 @@ mod tests {
     #[test]
     fn test_collect_parse_warnings_for_unsupported_protocols() {
         let content = "\nexample.com host://127.0.0.1\napi.example.com style://dark\n";
-        let rules = parse_rules_internal(content).unwrap();
+        let rules = parse_rules_with_external_includes(content, None).unwrap().0;
 
         let warnings = collect_parse_warnings(content, &rules);
 

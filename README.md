@@ -25,6 +25,7 @@ It is built for daily development work: compact UI, fast capture views, local-fi
 
 - HTTP and HTTPS traffic capture with method, status, timing, headers, body metadata, TLS details, and matched rules.
 - Whistle-compatible rule groups for host mapping, redirects, status overrides, headers, body replacement, injection, delay, throttle, CORS, auth, cookies, debug, and plugin actions.
+- External local rule files via Whistle-style `@/path/to/rules.txt` or PostGate's `includeFile:///path/to/rules.txt`; files are watched and merged into the active rule set.
 - Local CA generation, certificate export, and system trust installation for HTTPS inspection.
 - Replay collections for saving, organizing, editing, and re-running requests.
 - Browser debug mode with CDP-style target discovery, console capture, errors, fetch, and XHR instrumentation.

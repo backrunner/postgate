@@ -1,6 +1,6 @@
 use super::{PostGateApi, RuleParseIssue, RuleParseResult};
 use crate::error::{PostGateError, Result};
-use crate::rules::{parse_rules, parse_rules_with_inline, RuleGroup};
+use crate::rules::{parse_rules_with_external_includes, RuleGroup};
 use uuid::Uuid;
 
 impl PostGateApi {
@@ -30,8 +30,8 @@ impl PostGateApi {
     }
 
     pub fn validate_rules(&self, content: &str) -> RuleParseResult {
-        match parse_rules(content) {
-            Ok(rules) => RuleParseResult {
+        match parse_rules_with_external_includes(content, None) {
+            Ok((rules, _inline_values)) => RuleParseResult {
                 success: true,
                 rules,
                 errors: vec![],
@@ -52,7 +52,7 @@ impl PostGateApi {
 
     pub async fn save_rule_group(&self, mut group: RuleGroup) -> Result<RuleGroup> {
         let now = chrono::Utc::now().timestamp_millis();
-        let (rules, inline_values) = parse_rules_with_inline(&group.raw_content)?;
+        let (rules, inline_values) = parse_rules_with_external_includes(&group.raw_content, None)?;
         if group.id.is_empty() {
             group.id = Uuid::new_v4().to_string();
         }

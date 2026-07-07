@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::proxy::{ProxyConfig, ProxyServer, ProxyStatus};
-use crate::state::AppState;
+use crate::state::{redact_headers, AppState};
 use crate::storage::{PaginatedResult, StoredCapturedRequest};
 use serde::Serialize;
 use std::net::{IpAddr, UdpSocket};
@@ -161,7 +161,16 @@ pub async fn load_captured_history(
     state: State<'_, Arc<AppState>>,
 ) -> Result<PaginatedResult<StoredCapturedRequest>> {
     let storage = state.get_captured_storage().await?;
-    storage.get_requests_paginated(page, page_size).await
+    let mut result = storage.get_requests_paginated(page, page_size).await?;
+    for item in &mut result.items {
+        if let Some(headers) = &mut item.request_headers {
+            redact_headers(headers);
+        }
+        if let Some(headers) = &mut item.response_headers {
+            redact_headers(headers);
+        }
+    }
+    Ok(result)
 }
 
 /// Get persisted request body

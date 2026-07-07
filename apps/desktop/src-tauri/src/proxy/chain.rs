@@ -10,8 +10,8 @@
 //! * opens a TCP connection to the proxy, sends HTTP CONNECT to tunnel, and
 //!   does TLS / plain-HTTP over the tunnel (HTTPS targets via HTTP proxy).
 //!
-//! SOCKS is currently a TODO; the action is recognised but we log a warning
-//! and fall back to direct forwarding.
+//! SOCKS4/5 targets perform the corresponding handshake and then forward
+//! HTTP/1.1 bytes through the tunneled stream.
 
 use crate::error::{PostGateError, Result};
 use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};

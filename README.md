@@ -54,8 +54,8 @@ PostGate is split into a React/Tauri desktop shell and a Rust backend. The front
 
 Requirements:
 
-- Node.js 20 or newer
-- pnpm 10 or newer
+- Node.js 22.13 or newer
+- pnpm 11.10 or newer
 - Rust 1.77 or newer
 - Platform prerequisites for Tauri 2
 

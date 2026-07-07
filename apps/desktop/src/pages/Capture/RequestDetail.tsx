@@ -246,6 +246,7 @@ export function RequestDetail({ request }: RequestDetailProps) {
             onClick={async () => {
               try {
                 await importFromCapture({
+                  id: request.id,
                   method: request.method,
                   url: request.url,
                   path: request.path,

@@ -11,6 +11,11 @@ use hyper_util::rt::TokioExecutor;
 use std::collections::HashMap;
 use std::time::Instant;
 
+struct BuiltRequestBody {
+    bytes: Vec<u8>,
+    content_type: Option<String>,
+}
+
 /// Execute a saved request and return the response
 pub async fn execute_request(request: &SavedRequest) -> Result<ReplayResponse> {
     let start = Instant::now();
@@ -54,7 +59,7 @@ pub async fn execute_request(request: &SavedRequest) -> Result<ReplayResponse> {
         .unwrap_or(if scheme == "https" { 443 } else { 80 });
 
     // Build request body
-    let body_bytes = build_request_body(&request.body)?;
+    let body = build_request_body(&request.body)?;
 
     // Create the HTTP request
     let method: Method = request
@@ -81,7 +86,7 @@ pub async fn execute_request(request: &SavedRequest) -> Result<ReplayResponse> {
     }
 
     // Add Content-Type header for body if needed
-    if let Some(content_type) = get_body_content_type(&request.body) {
+    if let Some(content_type) = body.content_type.as_deref() {
         let has_content_type = request
             .headers
             .iter()
@@ -92,12 +97,12 @@ pub async fn execute_request(request: &SavedRequest) -> Result<ReplayResponse> {
     }
 
     // Add Content-Length
-    if !body_bytes.is_empty() {
-        req_builder = req_builder.header("Content-Length", body_bytes.len().to_string());
+    if !body.bytes.is_empty() {
+        req_builder = req_builder.header("Content-Length", body.bytes.len().to_string());
     }
 
     let req = req_builder
-        .body(Full::new(Bytes::from(body_bytes)))
+        .body(Full::new(Bytes::from(body.bytes)))
         .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
 
     // Create HTTP client based on scheme
@@ -189,14 +194,26 @@ async fn execute_https_request(
         .map_err(|e| PostGateError::Proxy(format!("HTTPS request failed: {}", e)))
 }
 
-/// Build request body bytes from RequestBody
-fn build_request_body(body: &RequestBody) -> Result<Vec<u8>> {
+/// Build request body bytes and the Content-Type implied by the body editor.
+fn build_request_body(body: &RequestBody) -> Result<BuiltRequestBody> {
     match body {
-        RequestBody::None => Ok(Vec::new()),
+        RequestBody::None => Ok(BuiltRequestBody {
+            bytes: Vec::new(),
+            content_type: None,
+        }),
 
-        RequestBody::Raw { content, .. } => Ok(content.as_bytes().to_vec()),
+        RequestBody::Raw {
+            content,
+            content_type,
+        } => Ok(BuiltRequestBody {
+            bytes: content.as_bytes().to_vec(),
+            content_type: Some(content_type.clone()),
+        }),
 
-        RequestBody::Json { content } => Ok(content.as_bytes().to_vec()),
+        RequestBody::Json { content } => Ok(BuiltRequestBody {
+            bytes: content.as_bytes().to_vec(),
+            content_type: Some("application/json".to_string()),
+        }),
 
         RequestBody::UrlEncoded { fields } => {
             let encoded = fields
@@ -211,7 +228,10 @@ fn build_request_body(body: &RequestBody) -> Result<Vec<u8>> {
                 })
                 .collect::<Vec<_>>()
                 .join("&");
-            Ok(encoded.into_bytes())
+            Ok(BuiltRequestBody {
+                bytes: encoded.into_bytes(),
+                content_type: Some("application/x-www-form-urlencoded".to_string()),
+            })
         }
 
         RequestBody::FormData { fields } => {
@@ -261,31 +281,24 @@ fn build_request_body(body: &RequestBody) -> Result<Vec<u8>> {
             }
 
             body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-            Ok(body)
+            Ok(BuiltRequestBody {
+                bytes: body,
+                content_type: Some(format!("multipart/form-data; boundary={}", boundary)),
+            })
         }
 
         RequestBody::Binary { data, .. } => {
-            if let Some(data) = data {
+            let bytes = if let Some(data) = data {
                 base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
                     .map_err(|e| PostGateError::Proxy(format!("Invalid base64 body: {}", e)))
             } else {
                 Ok(Vec::new())
-            }
+            }?;
+            Ok(BuiltRequestBody {
+                bytes,
+                content_type: Some("application/octet-stream".to_string()),
+            })
         }
-    }
-}
-
-/// Get content type for request body
-fn get_body_content_type(body: &RequestBody) -> Option<&'static str> {
-    match body {
-        RequestBody::None => None,
-        RequestBody::Raw { content_type, .. } => {
-            Some(Box::leak(content_type.clone().into_boxed_str()))
-        }
-        RequestBody::Json { .. } => Some("application/json"),
-        RequestBody::UrlEncoded { .. } => Some("application/x-www-form-urlencoded"),
-        RequestBody::FormData { .. } => None, // Will be set with boundary
-        RequestBody::Binary { .. } => Some("application/octet-stream"),
     }
 }
 
@@ -294,6 +307,7 @@ fn is_text_content(content_type: &Option<String>) -> bool {
     content_type
         .as_ref()
         .map(|ct| {
+            let ct = ct.to_ascii_lowercase();
             ct.contains("text/")
                 || ct.contains("json")
                 || ct.contains("xml")
@@ -301,4 +315,57 @@ fn is_text_content(content_type: &Option<String>) -> bool {
                 || ct.contains("html")
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_body_content_type_does_not_leak_static_string() {
+        let built = build_request_body(&RequestBody::Raw {
+            content: "hello".to_string(),
+            content_type: "text/plain; charset=utf-8".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(built.bytes, b"hello");
+        assert_eq!(
+            built.content_type.as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn form_data_body_sets_boundary_content_type() {
+        let built = build_request_body(&RequestBody::FormData {
+            fields: vec![FormDataField {
+                key: "name".to_string(),
+                value: "codex".to_string(),
+                field_type: FormDataFieldType::Text,
+                enabled: true,
+                file_name: None,
+                content_type: None,
+            }],
+        })
+        .unwrap();
+
+        let content_type = built.content_type.expect("form-data content type");
+        let boundary = content_type
+            .strip_prefix("multipart/form-data; boundary=")
+            .expect("multipart boundary");
+        let body = String::from_utf8(built.bytes).unwrap();
+
+        assert!(body.starts_with(&format!("--{}\r\n", boundary)));
+        assert!(body.contains("Content-Disposition: form-data; name=\"name\""));
+        assert!(body.contains("codex"));
+        assert!(body.ends_with(&format!("--{}--\r\n", boundary)));
+    }
+
+    #[test]
+    fn text_content_detection_is_case_insensitive() {
+        assert!(is_text_content(&Some(
+            "Application/JSON; Charset=UTF-8".to_string()
+        )));
+    }
 }

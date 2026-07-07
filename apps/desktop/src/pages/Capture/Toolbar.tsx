@@ -59,8 +59,13 @@ export function Toolbar() {
       .catch(() => setAddresses([{ ip: "127.0.0.1", name: "Localhost", is_default: false }]));
   }, []);
 
-  // Find the default or first non-localhost IP for display
-  const defaultAddr = addresses.find((a) => a.is_default) || addresses.find((a) => a.ip !== "127.0.0.1") || addresses[0];
+  // The proxy server binds to 127.0.0.1 by default, so only show addresses
+  // that are actually reachable for the current listener.
+  const proxyAddresses = addresses.filter((a) => a.ip === "127.0.0.1");
+  const displayAddresses = proxyAddresses.length > 0
+    ? proxyAddresses
+    : [{ ip: "127.0.0.1", name: "Localhost", is_default: false }];
+  const defaultAddr = displayAddresses[0];
   const displayIp = defaultAddr?.ip || "127.0.0.1";
 
   const handleToggleProxy = async () => {
@@ -166,7 +171,7 @@ export function Toolbar() {
               <div className="px-2 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
                 Proxy Addresses
               </div>
-              {addresses.map((addr) => (
+              {displayAddresses.map((addr) => (
                 <button
                   key={addr.ip}
                   onClick={() => handleCopy(addr.ip)}

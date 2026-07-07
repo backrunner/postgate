@@ -572,7 +572,10 @@ export const useFilteredRequests = () => {
       }
 
       // Status code filter
-      if (filter.statusCodes.length > 0 && req.responseStatus) {
+      if (filter.statusCodes.length > 0) {
+        if (req.responseStatus === null) {
+          return false;
+        }
         const statusGroup = Math.floor(req.responseStatus / 100) + "xx";
         if (!filter.statusCodes.includes(statusGroup)) {
           return false;
@@ -580,7 +583,10 @@ export const useFilteredRequests = () => {
       }
 
       // Content type filter
-      if (filter.contentTypes.length > 0 && req.contentType) {
+      if (filter.contentTypes.length > 0) {
+        if (!req.contentType) {
+          return false;
+        }
         if (!filter.contentTypes.some((ct: string) => req.contentType?.includes(ct))) {
           return false;
         }

@@ -11,6 +11,7 @@ use crate::rules::RuleEngine;
 use crate::storage::{CapturedRequestStorage, Database};
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -207,6 +208,7 @@ impl AppState {
     /// to add milliseconds per request on busy pages (80+ resources each
     /// emitting started + completed events).
     pub fn emit_request_event(self: &Arc<Self>, event: &CapturedRequestEvent) {
+        let event = event.redacted_sensitive_headers();
         self.capture_index.record(event.data.clone());
 
         // Broadcast for in-process subscribers — skip the clone cost if no
@@ -232,7 +234,7 @@ impl AppState {
         // try_send keeps the hot path non-blocking. If the worker is saturated
         // (e.g. frontend paused), drop the event rather than back-pressure the
         // proxy — the UI is informational, not critical correctness.
-        if let Err(e) = tx.try_send(event.clone()) {
+        if let Err(e) = tx.try_send(event) {
             self.record_drop();
             match e {
                 mpsc::error::TrySendError::Full(_) => {
@@ -598,6 +600,72 @@ pub struct CapturedRequestData {
     pub tls_version: Option<String>,
     #[serde(rename = "remoteAddr", skip_serializing_if = "Option::is_none")]
     pub remote_addr: Option<String>,
+}
+
+impl CapturedRequestEvent {
+    fn redacted_sensitive_headers(&self) -> Self {
+        let mut event = self.clone();
+        redact_capture_headers(&mut event.data);
+        event
+    }
+}
+
+pub(crate) fn redact_capture_headers(data: &mut CapturedRequestData) {
+    if let Some(headers) = &mut data.request_headers {
+        redact_headers(headers);
+    }
+    if let Some(headers) = &mut data.response_headers {
+        redact_headers(headers);
+    }
+}
+
+pub(crate) fn redact_headers(headers: &mut HashMap<String, String>) {
+    for (name, value) in headers.iter_mut() {
+        if is_sensitive_header(name) {
+            *value = "[redacted]".to_string();
+        }
+    }
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization" | "cookie" | "set-cookie" | "proxy-authorization"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_sensitive_headers_case_insensitively() {
+        let mut headers = HashMap::from([
+            ("Authorization".to_string(), "Bearer secret".to_string()),
+            ("cookie".to_string(), "sid=secret".to_string()),
+            ("Set-Cookie".to_string(), "sid=secret; HttpOnly".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ]);
+
+        redact_headers(&mut headers);
+
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("[redacted]")
+        );
+        assert_eq!(
+            headers.get("cookie").map(String::as_str),
+            Some("[redacted]")
+        );
+        assert_eq!(
+            headers.get("Set-Cookie").map(String::as_str),
+            Some("[redacted]")
+        );
+        assert_eq!(
+            headers.get("Content-Type").map(String::as_str),
+            Some("application/json")
+        );
+    }
 }
 
 // ==================== Streaming Events (SSE/WebSocket) ====================

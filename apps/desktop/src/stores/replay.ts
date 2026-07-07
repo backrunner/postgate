@@ -122,7 +122,7 @@ interface ReplayState {
   loadHistoryItem: (historyItem: RequestHistory) => void;
   
   // Import
-  importFromCapture: (data: { method: string; url: string; path: string; request_headers?: Record<string, string> }, collectionId?: string) => Promise<SavedRequest>;
+  importFromCapture: (data: { id?: string; method: string; url: string; path: string; request_headers?: Record<string, string> }, collectionId?: string) => Promise<SavedRequest>;
 }
 
 const defaultRequest: SavedRequest = {

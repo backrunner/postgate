@@ -216,19 +216,20 @@ impl RuleFilters {
             }
         }
 
-        // Check content type filter
-        // Note: don't reject if Content-Type is missing; many GET requests have no body.
+        // Check content type filter. Once a content-type filter is present, a
+        // missing Content-Type should not match; otherwise `ct:json` becomes a
+        // broad rule for body-less GETs and unrelated responses.
         if !self.content_types.is_empty() {
-            if let Some(ct) = ctx.content_type {
-                if !self
-                    .content_types
-                    .iter()
-                    .any(|t| ct.to_lowercase().contains(&t.to_lowercase()))
-                {
-                    return false;
-                }
+            let Some(ct) = ctx.content_type else {
+                return false;
+            };
+            if !self
+                .content_types
+                .iter()
+                .any(|t| ct.to_lowercase().contains(&t.to_lowercase()))
+            {
+                return false;
             }
-            // If no content-type header, allow the request to pass through
         }
 
         // Check client IP filter when the caller has IP context. Some internal
@@ -1363,6 +1364,23 @@ mod tests {
         assert!(filters.matches("POST", "https", 443, &headers, "https://example.com"));
         assert!(!filters.matches("DELETE", "https", 443, &headers, "https://example.com"));
         assert!(!filters.matches("GET", "http", 80, &headers, "http://example.com"));
+    }
+
+    #[test]
+    fn test_content_type_filter_requires_header_match() {
+        let filters = RuleFilters {
+            content_types: vec!["json".to_string()],
+            ..Default::default()
+        };
+
+        let mut headers = HashMap::new();
+        assert!(!filters.matches("GET", "https", 443, &headers, "https://example.com"));
+
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        assert!(filters.matches("GET", "https", 443, &headers, "https://example.com"));
+
+        headers.insert("content-type".to_string(), "text/html".to_string());
+        assert!(!filters.matches("GET", "https", 443, &headers, "https://example.com"));
     }
 
     #[test]

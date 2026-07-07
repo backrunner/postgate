@@ -58,6 +58,33 @@ interface Har {
   log: HarLog;
 }
 
+const REDACTED_HEADER_VALUE = '[redacted]';
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'proxy-authorization',
+]);
+
+function isSensitiveHeader(name: string): boolean {
+  return SENSITIVE_HEADER_NAMES.has(name.toLowerCase());
+}
+
+function redactHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [
+      name,
+      isSensitiveHeader(name) ? REDACTED_HEADER_VALUE : value,
+    ])
+  );
+}
+
+function getHeader(headers: Record<string, string> | null | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1];
+}
+
 /**
  * Convert captured requests to HAR format
  */
@@ -68,6 +95,8 @@ export function requestsToHar(
 ): Har {
   const entries: HarEntry[] = requests.map(request => {
     const url = new URL(request.url.startsWith('http') ? request.url : `http://${request.host}${request.url}`);
+    const safeRequestHeaders = redactHeaders(request.requestHeaders);
+    const safeResponseHeaders = request.responseHeaders ? redactHeaders(request.responseHeaders) : null;
     
     // Parse query string
     const queryString = Array.from(url.searchParams.entries()).map(([name, value]) => ({
@@ -76,21 +105,29 @@ export function requestsToHar(
     }));
 
     // Convert headers to HAR format
-    const requestHeaders = Object.entries(request.requestHeaders).map(([name, value]) => ({
+    const requestHeaders = Object.entries(safeRequestHeaders).map(([name, value]) => ({
       name,
       value,
     }));
 
-    const responseHeaders = request.responseHeaders
-      ? Object.entries(request.responseHeaders).map(([name, value]) => ({
+    const responseHeaders = safeResponseHeaders
+      ? Object.entries(safeResponseHeaders).map(([name, value]) => ({
           name,
           value,
         }))
       : [];
 
     // Parse cookies from headers
-    const requestCookies = parseCookies(request.requestHeaders['cookie'] || '');
-    const responseCookies = parseSetCookies(request.responseHeaders?.['set-cookie'] || '');
+    const requestCookieHeader = getHeader(safeRequestHeaders, 'cookie');
+    const responseCookieHeader = getHeader(safeResponseHeaders, 'set-cookie');
+    const requestCookies =
+      requestCookieHeader && requestCookieHeader !== REDACTED_HEADER_VALUE
+        ? parseCookies(requestCookieHeader)
+        : [];
+    const responseCookies =
+      responseCookieHeader && responseCookieHeader !== REDACTED_HEADER_VALUE
+        ? parseSetCookies(responseCookieHeader)
+        : [];
 
     // Get body content
     const reqBody = requestBodies?.get(request.id);
@@ -106,7 +143,7 @@ export function requestsToHar(
         cookies: requestCookies,
         headers: requestHeaders,
         queryString,
-        headersSize: calculateHeadersSize(request.requestHeaders),
+        headersSize: calculateHeadersSize(safeRequestHeaders),
         bodySize: request.requestSize,
       },
       response: {
@@ -119,8 +156,8 @@ export function requestsToHar(
           size: request.responseSize ?? 0,
           mimeType: request.contentType || 'application/octet-stream',
         },
-        redirectURL: request.responseHeaders?.['location'] || '',
-        headersSize: calculateHeadersSize(request.responseHeaders || {}),
+        redirectURL: getHeader(safeResponseHeaders, 'location') || '',
+        headersSize: calculateHeadersSize(safeResponseHeaders || {}),
         bodySize: request.responseSize ?? 0,
       },
       cache: {},
@@ -139,7 +176,7 @@ export function requestsToHar(
     if (reqBody && reqBody.length > 0) {
       try {
         entry.request.postData = {
-          mimeType: request.requestHeaders['content-type'] || 'application/octet-stream',
+          mimeType: getHeader(safeRequestHeaders, 'content-type') || 'application/octet-stream',
           text: new TextDecoder().decode(reqBody),
         };
       } catch {
@@ -210,7 +247,8 @@ export function requestToCurl(
   parts.push(`'${escapeShell(request.url)}'`);
 
   // Headers
-  for (const [name, value] of Object.entries(request.requestHeaders)) {
+  const safeRequestHeaders = redactHeaders(request.requestHeaders);
+  for (const [name, value] of Object.entries(safeRequestHeaders)) {
     // Skip pseudo-headers and host (curl adds it)
     if (name.startsWith(':') || name.toLowerCase() === 'host') continue;
     // Skip content-length (curl calculates it)
@@ -224,7 +262,7 @@ export function requestToCurl(
     try {
       const text = new TextDecoder().decode(requestBody);
       // Check if it's JSON
-      const contentType = request.requestHeaders['content-type'] || '';
+      const contentType = getHeader(safeRequestHeaders, 'content-type') || '';
       if (contentType.includes('json')) {
         parts.push(`-d '${escapeShell(text)}'`);
       } else if (contentType.includes('x-www-form-urlencoded')) {
@@ -270,7 +308,8 @@ export function requestToFetch(
 
   // Headers
   const headers: Record<string, string> = {};
-  for (const [name, value] of Object.entries(request.requestHeaders)) {
+  const safeRequestHeaders = redactHeaders(request.requestHeaders);
+  for (const [name, value] of Object.entries(safeRequestHeaders)) {
     if (name.startsWith(':') || name.toLowerCase() === 'host') continue;
     if (name.toLowerCase() === 'content-length') continue;
     headers[name] = value;
@@ -284,7 +323,7 @@ export function requestToFetch(
   if (requestBody && requestBody.length > 0) {
     try {
       const text = new TextDecoder().decode(requestBody);
-      const contentType = request.requestHeaders['content-type'] || '';
+      const contentType = getHeader(safeRequestHeaders, 'content-type') || '';
       
       if (contentType.includes('json')) {
         try {
@@ -435,10 +474,10 @@ export function parseHar(harContent: string): CapturedRequest[] {
       url: entry.request.url,
       host: url.host,
       path: url.pathname + url.search,
-      requestHeaders,
+      requestHeaders: redactHeaders(requestHeaders),
       requestBody,
       responseStatus: entry.response.status,
-      responseHeaders,
+      responseHeaders: redactHeaders(responseHeaders),
       responseBody,
       durationMs: entry.time > 0 ? entry.time : null,
       matchedRules: [],

@@ -4,11 +4,11 @@ use super::{
 };
 use crate::capture_index::{capture_matches, CaptureIndexQuery};
 use crate::error::Result;
-use crate::state::CapturedRequestData;
+use crate::state::{redact_capture_headers, CapturedRequestData};
 use crate::storage::StoredCapturedRequest;
 use base64::{engine::general_purpose, Engine as _};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 const PERSISTED_SCAN_PAGE_SIZE: i32 = 500;
 
@@ -224,30 +224,6 @@ pub(crate) fn stored_to_capture_data(stored: StoredCapturedRequest) -> CapturedR
         tls_version: stored.tls_version,
         remote_addr: stored.remote_addr,
     }
-}
-
-fn redact_capture_headers(data: &mut CapturedRequestData) {
-    if let Some(headers) = &mut data.request_headers {
-        redact_headers(headers);
-    }
-    if let Some(headers) = &mut data.response_headers {
-        redact_headers(headers);
-    }
-}
-
-fn redact_headers(headers: &mut HashMap<String, String>) {
-    for (name, value) in headers.iter_mut() {
-        if is_sensitive_header(name) {
-            *value = "[redacted]".to_string();
-        }
-    }
-}
-
-fn is_sensitive_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "authorization" | "cookie" | "set-cookie" | "proxy-authorization"
-    )
 }
 
 fn encode_body_content(

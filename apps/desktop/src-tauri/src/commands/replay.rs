@@ -2,10 +2,12 @@
 
 use crate::error::Result;
 use crate::replay::{
-    execute_request, Collection, CollectionNode, CollectionTree, ReplayResponse, RequestHistory,
-    SavedRequest,
+    execute_request, Collection, CollectionNode, CollectionTree, KeyValuePair, ReplayResponse,
+    RequestBody, RequestHistory, SavedRequest,
 };
 use crate::state::AppState;
+use base64::{engine::general_purpose, Engine as _};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
@@ -257,10 +259,11 @@ pub async fn clear_request_history(state: State<'_, Arc<AppState>>) -> Result<()
 /// Import request data from capture
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ImportCaptureInput {
+    pub id: Option<String>,
     pub method: String,
     pub url: String,
     pub path: String,
-    pub request_headers: Option<std::collections::HashMap<String, String>>,
+    pub request_headers: Option<HashMap<String, String>>,
 }
 
 /// Import a request from captured data
@@ -272,12 +275,15 @@ pub async fn import_from_capture(
 ) -> Result<SavedRequest> {
     let now = chrono::Utc::now().timestamp_millis();
 
+    let request_headers = captured_request.request_headers.unwrap_or_default();
+    let content_type = header_value(&request_headers, "content-type").map(str::to_string);
+    let body_bytes = load_captured_request_body(&state, captured_request.id.as_deref()).await?;
+    let body = request_body_from_capture(body_bytes.as_deref(), content_type.as_deref());
+
     // Convert headers to KeyValuePairs
-    let headers = captured_request
-        .request_headers
-        .unwrap_or_default()
+    let headers = request_headers
         .into_iter()
-        .map(|(key, value)| crate::replay::KeyValuePair {
+        .map(|(key, value)| KeyValuePair {
             key,
             value,
             enabled: true,
@@ -291,7 +297,7 @@ pub async fn import_from_capture(
         .as_ref()
         .map(|u| {
             u.query_pairs()
-                .map(|(k, v)| crate::replay::KeyValuePair {
+                .map(|(k, v)| KeyValuePair {
                     key: k.to_string(),
                     value: v.to_string(),
                     enabled: true,
@@ -317,7 +323,7 @@ pub async fn import_from_capture(
         url: base_url,
         headers,
         query_params,
-        body: crate::replay::RequestBody::None, // Body would need to be loaded separately
+        body,
         created_at: now,
         updated_at: now,
     };
@@ -326,6 +332,111 @@ pub async fn import_from_capture(
     db.save_request(&request).await?;
 
     Ok(request)
+}
+
+async fn load_captured_request_body(
+    state: &State<'_, Arc<AppState>>,
+    capture_id: Option<&str>,
+) -> Result<Option<Vec<u8>>> {
+    let Some(capture_id) = capture_id else {
+        return Ok(None);
+    };
+
+    if let Some(body) = state.body_storage.get_request_body(capture_id).await {
+        return Ok(Some(body.data.to_vec()));
+    }
+
+    let storage = state.get_captured_storage().await?;
+    storage
+        .get_body(capture_id, true)
+        .await
+        .map(|body| body.map(|bytes| bytes.to_vec()))
+}
+
+fn request_body_from_capture(body: Option<&[u8]>, content_type: Option<&str>) -> RequestBody {
+    let Some(body) = body else {
+        return RequestBody::None;
+    };
+    if body.is_empty() {
+        return RequestBody::None;
+    }
+
+    let content_type = content_type.unwrap_or("application/octet-stream");
+    if looks_textual_content_type(content_type) {
+        if let Ok(content) = std::str::from_utf8(body) {
+            return RequestBody::Raw {
+                content: content.to_string(),
+                content_type: content_type.to_string(),
+            };
+        }
+    }
+
+    RequestBody::Binary {
+        file_name: None,
+        data: Some(general_purpose::STANDARD.encode(body)),
+    }
+}
+
+fn looks_textual_content_type(content_type: &str) -> bool {
+    let content_type = content_type.to_ascii_lowercase();
+    content_type.starts_with("text/")
+        || content_type.contains("json")
+        || content_type.contains("xml")
+        || content_type.contains("javascript")
+        || content_type.contains("ecmascript")
+        || content_type.contains("x-www-form-urlencoded")
+        || content_type.contains("graphql")
+}
+
+fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_body_from_capture_preserves_text_body_as_raw() {
+        let body = request_body_from_capture(
+            Some(br#"{"ok":true}"#),
+            Some("application/json; charset=utf-8"),
+        );
+
+        match body {
+            RequestBody::Raw {
+                content,
+                content_type,
+            } => {
+                assert_eq!(content, r#"{"ok":true}"#);
+                assert_eq!(content_type, "application/json; charset=utf-8");
+            }
+            other => panic!("expected raw body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_body_from_capture_uses_binary_for_non_text_body() {
+        let bytes = [0, 255, 16];
+        let body = request_body_from_capture(Some(&bytes), Some("application/octet-stream"));
+
+        match body {
+            RequestBody::Binary { file_name, data } => {
+                assert!(file_name.is_none());
+                assert_eq!(data.as_deref(), Some("AP8Q"));
+            }
+            other => panic!("expected binary body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn header_value_matches_case_insensitively() {
+        let headers = HashMap::from([("Content-Type".to_string(), "text/plain".to_string())]);
+
+        assert_eq!(header_value(&headers, "content-type"), Some("text/plain"));
+    }
 }
 
 // Helper function to build collection tree

@@ -12,6 +12,7 @@ import {
   ExternalLink,
   Download,
   FolderInput,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +35,8 @@ import {
 import { usePluginsStore, PluginInfo, type PluginPanel } from "@/stores/plugins";
 import { cn } from "@/lib/utils";
 
+const PLUGIN_DOCS_HINT_DISMISSED_KEY = "postgate:pluginDocsHintDismissed";
+
 export function PluginsPage() {
   const {
     plugins,
@@ -54,6 +57,9 @@ export function PluginsPage() {
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [npmPackage, setNpmPackage] = useState("");
   const [selectedPanelKey, setSelectedPanelKey] = useState("");
+  const [showDocsHint, setShowDocsHint] = useState(
+    () => localStorage.getItem(PLUGIN_DOCS_HINT_DISMISSED_KEY) !== "true",
+  );
   const activePanelKey = panels.some(
     (panel) => pluginPanelKey(panel) === selectedPanelKey,
   )
@@ -141,6 +147,19 @@ export function PluginsPage() {
           navigator.clipboard.writeText(pluginsDir);
         });
     }
+  };
+
+  const openPluginDocs = () => {
+    void import("@tauri-apps/plugin-shell")
+      .then(({ open }) => open("https://github.com/backrunner/postgate/blob/main/docs/plugins.md"))
+      .catch((error) => {
+        console.error("Failed to open plugin documentation:", error);
+      });
+  };
+
+  const dismissDocsHint = () => {
+    localStorage.setItem(PLUGIN_DOCS_HINT_DISMISSED_KEY, "true");
+    setShowDocsHint(false);
   };
 
   return (
@@ -285,20 +304,31 @@ export function PluginsPage() {
       )}
 
       {/* Help Footer */}
-      <div className="border-t p-3 text-xs text-muted-foreground">
-        <p className="flex items-center gap-1">
-          <ExternalLink className="h-3 w-3" />
-          Learn how to create plugins in the{" "}
-          <a
-            href="https://github.com/nicepkg/postgate/blob/main/docs/plugins.md"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-primary hover:underline"
+      {showDocsHint && (
+        <div className="flex items-center justify-between gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
+          <p className="flex min-w-0 items-center gap-1">
+            <ExternalLink className="h-3 w-3 shrink-0" />
+            <span>Learn how to create plugins in the</span>
+            <button
+              type="button"
+              className="shrink-0 text-primary hover:underline"
+              onClick={openPluginDocs}
+            >
+              documentation
+            </button>
+          </p>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0"
+            onClick={dismissDocsHint}
+            aria-label="Dismiss plugin documentation hint"
+            title="Dismiss"
           >
-            documentation
-          </a>
-        </p>
-      </div>
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

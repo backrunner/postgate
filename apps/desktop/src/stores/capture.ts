@@ -233,14 +233,17 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
       const newIds = [request.id, ...state.requestIds];
 
       // Trim if exceeds max
+      let selectedId = state.selectedId;
       if (newIds.length > state.maxRequests) {
         const removedId = newIds.pop()!;
         newMap.delete(removedId);
+        if (selectedId === removedId) selectedId = null;
       }
 
       return {
         requestMap: newMap,
         requestIds: newIds,
+        selectedId,
       };
     });
   },
@@ -265,14 +268,17 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
         : [...state.requestIds];
 
       // Trim if exceeds max
+      let selectedId = state.selectedId;
       while (newIds.length > state.maxRequests) {
         const removedId = newIds.pop()!;
         newMap.delete(removedId);
+        if (selectedId === removedId) selectedId = null;
       }
 
       return {
         requestMap: newMap,
         requestIds: newIds,
+        selectedId,
       };
     });
   },
@@ -393,14 +399,17 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
       }
       
       // Trim if exceeds max
+      let selectedId = currentState.selectedId;
       while (newIds.length > currentState.maxRequests) {
         const removedId = newIds.pop()!;
         newMap.delete(removedId);
+        if (selectedId === removedId) selectedId = null;
       }
       
       return {
         requestMap: newMap,
         requestIds: newIds,
+        selectedId,
         _flushTimer: null,
       };
     });
@@ -469,9 +478,17 @@ export const useCaptureStore = create<CaptureState>()((set, get) => ({
           }
         }
 
+        let selectedId = state.selectedId;
+        while (newIds.length > state.maxRequests) {
+          const removedId = newIds.pop()!;
+          newMap.delete(removedId);
+          if (selectedId === removedId) selectedId = null;
+        }
+
         return {
           requestMap: newMap,
           requestIds: newIds,
+          selectedId,
           historyLoaded: true,
           historyTotal: result.total,
           isLoadingHistory: false,
@@ -525,6 +542,62 @@ export const useRequestCount = () => {
   return useCaptureStore((state) => state.requestIds.length);
 };
 
+function isFilterEmpty(filter: FilterOptions): boolean {
+  return !filter.search &&
+    filter.methods.length === 0 &&
+    filter.statusCodes.length === 0 &&
+    filter.contentTypes.length === 0 &&
+    filter.hosts.length === 0 &&
+    filter.hasRules === null &&
+    filter.protocols.length === 0;
+}
+
+function matchesFilter(req: CapturedRequest, filter: FilterOptions): boolean {
+  const searchLower = filter.search.toLowerCase();
+  if (searchLower &&
+    !req.url.toLowerCase().includes(searchLower) &&
+    !req.host.toLowerCase().includes(searchLower) &&
+    !req.path.toLowerCase().includes(searchLower)) {
+    return false;
+  }
+  if (filter.methods.length > 0 && !filter.methods.includes(req.method)) return false;
+  if (filter.statusCodes.length > 0) {
+    if (req.responseStatus === null) return false;
+    const statusGroup = Math.floor(req.responseStatus / 100) + "xx";
+    if (!filter.statusCodes.includes(statusGroup)) return false;
+  }
+  if (filter.contentTypes.length > 0) {
+    const contentType = req.contentType?.toLowerCase();
+    if (!contentType || !filter.contentTypes.some((type) => contentType.includes(type.toLowerCase()))) {
+      return false;
+    }
+  }
+  if (filter.hosts.length > 0 && !filter.hosts.includes(req.host)) return false;
+  if (filter.hasRules === true && req.matchedRules.length === 0) return false;
+  if (filter.hasRules === false && req.matchedRules.length > 0) return false;
+  if (filter.protocols.length > 0 && !filter.protocols.includes(req.protocol)) return false;
+  return true;
+}
+
+// In the common unfiltered case this returns the store's ID array directly
+// and deliberately does not subscribe to requestMap updates. Visible rows
+// subscribe to their own request object, avoiding a 10k-item array rebuild
+// for every response/status update.
+export const useFilteredRequestIds = () => {
+  const requestIds = useCaptureStore((state) => state.requestIds);
+  const filter = useCaptureStore((state) => state.filter);
+  const emptyFilter = isFilterEmpty(filter);
+  const requestMap = useCaptureStore((state) => emptyFilter ? null : state.requestMap);
+
+  return useMemo(() => {
+    if (emptyFilter || !requestMap) return requestIds;
+    return requestIds.filter((id) => {
+      const request = requestMap.get(id);
+      return request ? matchesFilter(request, filter) : false;
+    });
+  }, [emptyFilter, filter, requestIds, requestMap]);
+};
+
 // Optimized filtered requests selector with memoized filter check
 export const useFilteredRequests = () => {
   const requestMap = useCaptureStore((state) => state.requestMap);
@@ -533,14 +606,7 @@ export const useFilteredRequests = () => {
 
   return useMemo(() => {
     // Quick check if filter is empty (common case)
-    const isEmptyFilter =
-      !filter.search &&
-      filter.methods.length === 0 &&
-      filter.statusCodes.length === 0 &&
-      filter.contentTypes.length === 0 &&
-      filter.hosts.length === 0 &&
-      filter.hasRules === null &&
-      filter.protocols.length === 0;
+    const isEmptyFilter = isFilterEmpty(filter);
 
     // Build requests array
     const requests = requestIds
@@ -551,69 +617,6 @@ export const useFilteredRequests = () => {
       return requests;
     }
 
-    // Pre-compute lowercase search once
-    const searchLower = filter.search.toLowerCase();
-
-    return requests.filter((req) => {
-      // Search filter
-      if (searchLower) {
-        if (
-          !req.url.toLowerCase().includes(searchLower) &&
-          !req.host.toLowerCase().includes(searchLower) &&
-          !req.path.toLowerCase().includes(searchLower)
-        ) {
-          return false;
-        }
-      }
-
-      // Method filter
-      if (filter.methods.length > 0 && !filter.methods.includes(req.method)) {
-        return false;
-      }
-
-      // Status code filter
-      if (filter.statusCodes.length > 0) {
-        if (req.responseStatus === null) {
-          return false;
-        }
-        const statusGroup = Math.floor(req.responseStatus / 100) + "xx";
-        if (!filter.statusCodes.includes(statusGroup)) {
-          return false;
-        }
-      }
-
-      // Content type filter
-      if (filter.contentTypes.length > 0) {
-        if (!req.contentType) {
-          return false;
-        }
-        if (!filter.contentTypes.some((ct: string) => req.contentType?.includes(ct))) {
-          return false;
-        }
-      }
-
-      // Host filter
-      if (filter.hosts.length > 0 && !filter.hosts.includes(req.host)) {
-        return false;
-      }
-
-      // Has rules filter
-      if (filter.hasRules === true && req.matchedRules.length === 0) {
-        return false;
-      }
-      if (filter.hasRules === false && req.matchedRules.length > 0) {
-        return false;
-      }
-
-      // Protocol filter
-      if (
-        filter.protocols.length > 0 &&
-        !filter.protocols.includes(req.protocol)
-      ) {
-        return false;
-      }
-
-      return true;
-    });
+    return requests.filter((request) => matchesFilter(request, filter));
   }, [requestMap, requestIds, filter]);
 };

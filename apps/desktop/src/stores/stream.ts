@@ -221,12 +221,9 @@ function enforceHardCap(connections: Map<string, StreamConnection>) {
 
 // Hook to get a specific connection's messages
 export const useStreamConnection = (connectionId: string | null) => {
-  const connections = useStreamStore((state) => state.connections);
-
-  return useMemo(() => {
-    if (!connectionId) return undefined;
-    return connections.get(connectionId);
-  }, [connections, connectionId]);
+  return useStreamStore((state) =>
+    connectionId ? state.connections.get(connectionId) : undefined
+  );
 };
 
 // Hook to get messages filtered by direction

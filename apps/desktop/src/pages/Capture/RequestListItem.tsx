@@ -1,5 +1,5 @@
 import { memo, CSSProperties } from "react";
-import { CapturedRequest } from "@/stores/capture";
+import { CapturedRequest, useCaptureStore } from "@/stores/capture";
 import { ColumnConfig } from "@/stores/columns";
 import { StreamConnection, useStreamStore } from "@/stores/stream";
 
@@ -72,7 +72,7 @@ const MATCHED_COLOR = "text-indigo-700 dark:text-indigo-300";
 const MUTED_COLOR = "text-muted-foreground";
 
 interface RequestListItemProps {
-  request: CapturedRequest;
+  requestId: string;
   isSelected: boolean;
   onSelect: (id: string) => void;
   translateY: number;
@@ -80,41 +80,34 @@ interface RequestListItemProps {
   columns: ColumnConfig[];
 }
 
-// Optimized comparison - check primitives first, skip deep object comparisons
+// Request data is subscribed by ID inside the row, so parent updates only
+// need to compare stable virtualization/layout props.
 const areEqual = (prev: RequestListItemProps, next: RequestListItemProps): boolean => {
-  // Fast primitive checks first
+  if (prev.requestId !== next.requestId) return false;
   if (prev.isSelected !== next.isSelected) return false;
   if (prev.translateY !== next.translateY) return false;
   if (prev.height !== next.height) return false;
   if (prev.columns !== next.columns) return false;
   if (prev.onSelect !== next.onSelect) return false;
-  
-  // Request comparison - only fields that affect display
-  const p = prev.request;
-  const n = next.request;
-  return (
-    p.id === n.id &&
-    p.method === n.method &&
-    p.responseStatus === n.responseStatus &&
-    p.host === n.host &&
-    p.path === n.path &&
-    p.durationMs === n.durationMs &&
-    p.responseSize === n.responseSize &&
-    p.protocol === n.protocol &&
-    p.remoteAddr === n.remoteAddr &&
-    p.tlsInfo === n.tlsInfo &&
-    p.matchedRules.length === n.matchedRules.length
-  );
+  return true;
 };
 
 export const RequestListItem = memo(function RequestListItem({
-  request,
+  requestId,
   isSelected,
   onSelect,
   translateY,
   height,
   columns,
 }: RequestListItemProps) {
+  const request = useCaptureStore((state) => state.requestMap.get(requestId));
+  const isStream = request?.protocol === "websocket" || request?.protocol === "sse";
+  const streamConnection = useStreamStore((state) =>
+    isStream ? state.connections.get(requestId) : undefined
+  );
+
+  if (!request) return null;
+
   const hasMatchedRules = request.matchedRules.length > 0;
 
   // Subscribe to ONLY this row's stream connection. For non-stream protocols
@@ -123,12 +116,6 @@ export const RequestListItem = memo(function RequestListItem({
   // connection actually changed will re-render — see RequestList for why
   // we do per-row subscription instead of pulling the whole Map into the
   // parent.
-  const isStream =
-    request.protocol === "websocket" || request.protocol === "sse";
-  const streamConnection = useStreamStore((state) =>
-    isStream ? state.connections.get(request.id) : undefined
-  );
-
   // Use pre-computed class strings
   const rowClass = isSelected ? ROW_SELECTED : hasMatchedRules ? ROW_MATCHED : ROW_NORMAL;
   

@@ -1,6 +1,6 @@
-import { useRef, useCallback, useEffect, useMemo } from "react";
+import { useRef, useCallback, useEffect, useLayoutEffect, useMemo } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { CapturedRequest, useCaptureStore } from "@/stores/capture";
+import { useCaptureStore } from "@/stores/capture";
 import { useColumnsStore } from "@/stores/columns";
 import { RequestListItem } from "./RequestListItem";
 import { TableHeader } from "./TableHeader";
@@ -11,11 +11,12 @@ const HEADER_HEIGHT = 28;
 const OVERSCAN = 20;
 
 interface RequestListProps {
-  requests: CapturedRequest[];
+  requestIds: string[];
 }
 
-export function RequestList({ requests }: RequestListProps) {
+export function RequestList({ requestIds }: RequestListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const previousIdsRef = useRef<string[]>([]);
   const selectedId = useCaptureStore((state) => state.selectedId);
   const setSelected = useCaptureStore((state) => state.setSelected);
   const columns = useColumnsStore((state) => state.columns);
@@ -35,13 +36,13 @@ export function RequestList({ requests }: RequestListProps) {
   );
 
   const getItemKey = useCallback(
-    (index: number) => requests[index]?.id ?? `idx-${index}`,
-    [requests]
+    (index: number) => requestIds[index] ?? `idx-${index}`,
+    [requestIds]
   );
 
   // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual manages scroll state internally and is intentionally kept outside React Compiler memoization.
   const virtualizer = useVirtualizer({
-    count: requests.length,
+    count: requestIds.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: OVERSCAN,
@@ -49,10 +50,34 @@ export function RequestList({ requests }: RequestListProps) {
   });
 
   useEffect(() => {
-    if (requests.length === 0) {
+    if (requestIds.length === 0) {
       virtualizer.scrollToOffset(0);
     }
-  }, [requests.length, virtualizer]);
+  }, [requestIds.length, virtualizer]);
+
+  // New captures are prepended. If the user is inspecting older rows, keep
+  // the same request anchored in the viewport instead of replacing the view
+  // on every incoming request. At the top we intentionally follow new traffic.
+  useLayoutEffect(() => {
+    const scrollElement = parentRef.current;
+    const previousIds = previousIdsRef.current;
+
+    if (scrollElement && scrollElement.scrollTop > ROW_HEIGHT && previousIds.length > 0) {
+      const previousFirst = previousIds[0];
+      const insertionCount = requestIds.indexOf(previousFirst);
+      const sampleSize = Math.min(previousIds.length, 3);
+      const stillAligned = insertionCount > 0 &&
+        Array.from({ length: sampleSize }, (_, index) =>
+          requestIds[insertionCount + index] === previousIds[index]
+        ).every(Boolean);
+
+      if (stillAligned) {
+        scrollElement.scrollTop += insertionCount * ROW_HEIGHT;
+      }
+    }
+
+    previousIdsRef.current = requestIds.slice(0, 3);
+  }, [requestIds]);
 
   // Stable callback - doesn't depend on selectedId
   const handleSelect = useCallback(
@@ -65,7 +90,7 @@ export function RequestList({ requests }: RequestListProps) {
   const virtualItems = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
 
-  if (requests.length === 0) {
+  if (requestIds.length === 0) {
     return (
       <div className="flex flex-col h-full">
         <TableHeader height={HEADER_HEIGHT} />
@@ -84,11 +109,12 @@ export function RequestList({ requests }: RequestListProps) {
       <TableHeader height={HEADER_HEIGHT} />
       <div
         ref={parentRef}
-        className="flex-1 overflow-auto"
+        className="min-h-0 min-w-0 flex-1 overflow-auto"
         style={{
           // Optimize scroll container
           contain: "strict",
           overscrollBehavior: "contain",
+          scrollbarGutter: "stable",
         }}
       >
         <div
@@ -101,8 +127,8 @@ export function RequestList({ requests }: RequestListProps) {
           }}
         >
           {virtualItems.map((virtualRow) => {
-            const request = requests[virtualRow.index];
-            if (!request) return null;
+            const requestId = requestIds[virtualRow.index];
+            if (!requestId) return null;
 
             // Each item subscribes to its own stream connection internally;
             // see RequestListItem. Only rows that are actually streams pay
@@ -111,8 +137,8 @@ export function RequestList({ requests }: RequestListProps) {
             return (
               <RequestListItem
                 key={virtualRow.key}
-                request={request}
-                isSelected={request.id === selectedId}
+                requestId={requestId}
+                isSelected={requestId === selectedId}
                 onSelect={handleSelect}
                 translateY={virtualRow.start}
                 height={ROW_HEIGHT}

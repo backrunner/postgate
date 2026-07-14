@@ -33,6 +33,12 @@ interface RequestDetailProps {
   request: CapturedRequest;
 }
 
+function getHeaderValue(headers: Record<string, string> | null, name: string): string | null {
+  if (!headers) return null;
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1] ?? null;
+}
+
 export function RequestDetail({ request }: RequestDetailProps) {
   const navigate = useNavigate();
   const setSelected = useCaptureStore((state) => state.setSelected);
@@ -391,7 +397,7 @@ export function RequestDetail({ request }: RequestDetailProps) {
                 <div className="rounded border overflow-hidden">
                   <BodyPreview
                     body={requestBody}
-                    contentType={request.requestHeaders["content-type"]}
+                    contentType={getHeaderValue(request.requestHeaders, "content-type")}
                     loading={loadingRequest}
                     className="min-h-[150px]"
                   />
@@ -436,7 +442,7 @@ export function RequestDetail({ request }: RequestDetailProps) {
                 <div className="rounded border overflow-hidden">
                   <BodyPreview
                     body={responseBody}
-                    contentType={request.responseHeaders?.["content-type"] ?? request.contentType}
+                    contentType={getHeaderValue(request.responseHeaders, "content-type") ?? request.contentType}
                     loading={loadingResponse}
                     className="min-h-[150px]"
                   />

@@ -36,18 +36,24 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
   /** User override: render anyway even if the body is above the decode limit. */
   const [forceRender, setForceRender] = useState(false);
 
+  useEffect(() => {
+    setViewMode('pretty');
+    setForceRender(false);
+  }, [body, contentType]);
+
   const contentInfo = useMemo(() => {
     if (!body || body.length === 0) {
       return { type: 'empty' as const, text: null, parsed: null };
     }
 
-    const isImage = contentType?.startsWith('image/');
-    const isJson = contentType?.includes('json');
-    const isHtml = contentType?.includes('html');
-    const isXml = contentType?.includes('xml');
-    const isCss = contentType?.includes('css');
-    const isJs = contentType?.includes('javascript') || contentType?.includes('ecmascript');
-    const isText = contentType?.startsWith('text/') || isJson || isHtml || isXml || isCss || isJs;
+    const normalizedContentType = contentType?.toLowerCase() || '';
+    const isImage = normalizedContentType.startsWith('image/');
+    const isJson = normalizedContentType.includes('json');
+    const isHtml = normalizedContentType.includes('html');
+    const isXml = normalizedContentType.includes('xml');
+    const isCss = normalizedContentType.includes('css');
+    const isJs = normalizedContentType.includes('javascript') || normalizedContentType.includes('ecmascript');
+    const isText = normalizedContentType.startsWith('text/') || isJson || isHtml || isXml || isCss || isJs;
 
     // Too large to decode — bail out before touching the main thread.
     const tooLargeToDecode = body.length > TEXT_DECODE_LIMIT && !forceRender;
@@ -61,6 +67,7 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
     // Try to decode as text
     let text: string | null = null;
     let parsed: unknown = null;
+    let jsonParsed = false;
 
     if (isText || !contentType) {
       try {
@@ -69,9 +76,12 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
         // Only JSON-parse if under the parse budget — big JSON blobs will
         // be shown as raw text and the Pretty tree view is skipped.
         const jsonBudget = body.length <= JSON_PARSE_LIMIT;
-        if (jsonBudget && (isJson || (!contentType && text.trim().startsWith('{')))) {
+        const trimmed = text.trim();
+        const looksLikeJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+        if (jsonBudget && (isJson || looksLikeJson)) {
           try {
             parsed = JSON.parse(text);
+            jsonParsed = true;
           } catch {
             // Not valid JSON
           }
@@ -85,8 +95,12 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
       return { type: 'image' as const, text: null, parsed: null, mimeType: contentType };
     }
 
-    if (parsed) {
-      return { type: 'json' as const, text, parsed };
+    if (jsonParsed) {
+      return { type: 'json' as const, text, parsed, jsonParsed: true as const };
+    }
+
+    if (isJson) {
+      return { type: 'json' as const, text, parsed: null, jsonParsed: false as const };
     }
 
     if (isHtml) {
@@ -111,6 +125,10 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
 
     return { type: 'binary' as const, text: null, parsed: null };
   }, [body, contentType, forceRender]);
+
+  const activeViewMode = viewMode === 'preview' && contentInfo.type !== 'html'
+    ? 'pretty'
+    : viewMode;
 
   const copyToClipboard = () => {
     if (contentInfo.text) {
@@ -207,7 +225,7 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
       ) : contentInfo.type === 'binary' ? (
         <BinaryPreview body={body} />
       ) : (
-        <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as ViewMode)} className="flex-1 flex flex-col">
+        <Tabs value={activeViewMode} onValueChange={(v) => setViewMode(v as ViewMode)} className="flex-1 flex flex-col">
           <TabsList className="mx-3 mt-2 w-fit">
             <TabsTrigger value="pretty" className="text-xs px-2">
               <Code className="h-3 w-3 mr-1" />
@@ -226,8 +244,10 @@ export function BodyPreview({ body, contentType, loading, className }: BodyPrevi
           </TabsList>
 
           <TabsContent value="pretty" className="flex-1 overflow-auto mt-2 mx-3 mb-3">
-            {contentInfo.parsed ? (
+            {contentInfo.type === 'json' && contentInfo.jsonParsed ? (
               <JsonTreeView data={contentInfo.parsed} />
+            ) : contentInfo.type === 'json' ? (
+              <JsonTextHighlight code={contentInfo.text || ''} wordWrap={wordWrap} />
             ) : contentInfo.type === 'html' ? (
               <HtmlHighlight code={contentInfo.text || ''} wordWrap={wordWrap} />
             ) : contentInfo.type === 'xml' ? (
@@ -500,101 +520,131 @@ function escapeString(str: string): string {
     .replace(/\t/g, '\\t');
 }
 
-// HTML syntax highlighting
-function HtmlHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
-  const { slice, truncated } = truncateForHighlight(code);
-  const highlighted = useMemo(() => {
-    return slice
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      // Tags
-      .replace(/(&lt;\/?)([\w-]+)/g, '$1<span class="text-rose-500">$2</span>')
-      // Attributes
-      .replace(/\s([\w-]+)=/g, ' <span class="text-amber-500">$1</span>=')
-      // Strings
-      .replace(/"([^"]*)"/g, '<span class="text-emerald-500">"$1"</span>')
-      // Comments
-      .replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span class="text-zinc-500">$1</span>');
-  }, [slice]);
+interface SyntaxToken {
+  text: string;
+  className?: string;
+}
 
+function tokenizeSyntax(
+  source: string,
+  pattern: RegExp,
+  classify: (token: string, index: number, source: string) => string | undefined,
+): SyntaxToken[] {
+  const tokens: SyntaxToken[] = [];
+  let cursor = 0;
+  pattern.lastIndex = 0;
+  for (const match of source.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) tokens.push({ text: source.slice(cursor, index) });
+    tokens.push({ text: match[0], className: classify(match[0], index, source) });
+    cursor = index + match[0].length;
+  }
+  if (cursor < source.length) tokens.push({ text: source.slice(cursor) });
+  return tokens;
+}
+
+function HighlightedCode({
+  code,
+  wordWrap,
+  tokens,
+  truncated,
+}: {
+  code: string;
+  wordWrap: boolean;
+  tokens: SyntaxToken[];
+  truncated: boolean;
+}) {
   return (
     <pre className={cn(
       'text-xs font-mono p-3 bg-muted/30 rounded overflow-auto',
       wordWrap && 'whitespace-pre-wrap break-all'
     )}>
-      <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+      <code>
+        {tokens.map((token, index) => token.className ? (
+          <span key={index} className={token.className}>{token.text}</span>
+        ) : token.text)}
+      </code>
       {truncated && <TruncationMarker originalSize={code.length} />}
     </pre>
   );
 }
 
-// XML syntax highlighting (same as HTML)
+// HTML/XML tokenization emits React text nodes instead of rewriting generated
+// markup with regexes. This keeps captured source inert and avoids corrupting
+// the highlighter's own span attributes.
+function HtmlHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
+  const { slice, truncated } = truncateForHighlight(code);
+  const tokens = useMemo(() => tokenizeSyntax(
+    slice,
+    /<!--[\s\S]*?-->|<!DOCTYPE[^>]*>|<\/?[\w:-]+|\/?>|[\w:-]+(?=\s*=)|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/gi,
+    (token) => {
+      if (token.startsWith('<!--')) return 'text-zinc-500';
+      if (token.toLowerCase().startsWith('<!doctype')) return 'text-zinc-500';
+      if (/^<\/?/.test(token)) return 'text-rose-500';
+      if (/^["']/.test(token)) return 'text-emerald-500';
+      if (/^[\w:-]+$/.test(token)) return 'text-amber-500';
+      return 'text-muted-foreground';
+    },
+  ), [slice]);
+
+  return <HighlightedCode code={code} wordWrap={wordWrap} tokens={tokens} truncated={truncated} />;
+}
+
 function XmlHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
   return <HtmlHighlight code={code} wordWrap={wordWrap} />;
 }
 
-// CSS syntax highlighting
 function CssHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
   const { slice, truncated } = truncateForHighlight(code);
-  const highlighted = useMemo(() => {
-    return escapeHtml(slice)
-      // Selectors
-      .replace(/([\w\-.#[\]="':,\s]+)\s*\{/g, '<span class="text-amber-500">$1</span>{')
-      // Properties
-      .replace(/([\w-]+)\s*:/g, '<span class="text-sky-500">$1</span>:')
-      // Values with units
-      .replace(/:\s*([^;{}]+)/g, ': <span class="text-emerald-500">$1</span>')
-      // Comments
-      .replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="text-zinc-500">$1</span>');
-  }, [slice]);
+  const tokens = useMemo(() => tokenizeSyntax(
+    slice,
+    /\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|#[0-9a-f]{3,8}\b|@[\w-]+|\b-?\d+(?:\.\d+)?(?:%|[a-z]+)?\b|--?[\w-]+(?=\s*:)|[\w-]+(?=\s*:)/gi,
+    (token) => {
+      if (token.startsWith('/*')) return 'text-zinc-500';
+      if (/^["']/.test(token)) return 'text-emerald-500';
+      if (token.startsWith('@')) return 'text-purple-500';
+      if (token.startsWith('#')) return 'text-rose-500';
+      if (/^-?\d/.test(token)) return 'text-amber-500';
+      return 'text-sky-500';
+    },
+  ), [slice]);
 
-  return (
-    <pre className={cn(
-      'text-xs font-mono p-3 bg-muted/30 rounded overflow-auto',
-      wordWrap && 'whitespace-pre-wrap break-all'
-    )}>
-      <code dangerouslySetInnerHTML={{ __html: highlighted }} />
-      {truncated && <TruncationMarker originalSize={code.length} />}
-    </pre>
-  );
+  return <HighlightedCode code={code} wordWrap={wordWrap} tokens={tokens} truncated={truncated} />;
 }
 
-// JavaScript syntax highlighting
 function JsHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
   const { slice, truncated } = truncateForHighlight(code);
-  const highlighted = useMemo(() => {
-    const keywords = ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'class', 'extends', 'import', 'export', 'from', 'async', 'await', 'try', 'catch', 'throw', 'new', 'this', 'true', 'false', 'null', 'undefined'];
+  const tokens = useMemo(() => tokenizeSyntax(
+    slice,
+    /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:const|let|var|function|return|if|else|for|while|class|extends|import|export|from|async|await|try|catch|throw|new|this|true|false|null|undefined)\b|\b\d+(?:\.\d+)?\b/g,
+    (token) => {
+      if (token.startsWith('//') || token.startsWith('/*')) return 'text-zinc-500';
+      if (/^["'`]/.test(token)) return 'text-emerald-500';
+      if (/^\d/.test(token)) return 'text-amber-500';
+      return 'text-purple-500';
+    },
+  ), [slice]);
 
-    let result = escapeHtml(slice);
+  return <HighlightedCode code={code} wordWrap={wordWrap} tokens={tokens} truncated={truncated} />;
+}
 
-    // Keywords
-    keywords.forEach(kw => {
-      result = result.replace(new RegExp(`\\b(${kw})\\b`, 'g'), '<span class="text-purple-500">$1</span>');
-    });
+function JsonTextHighlight({ code, wordWrap }: { code: string; wordWrap: boolean }) {
+  const { slice, truncated } = truncateForHighlight(code);
+  const tokens = useMemo(() => tokenizeSyntax(
+    slice,
+    /"(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|-?\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b|\b(?:true|false|null)\b/gi,
+    (token, index, source) => {
+      if (token.startsWith('"')) {
+        return /^\s*:/.test(source.slice(index + token.length))
+          ? 'text-purple-600 dark:text-purple-400'
+          : 'text-amber-600 dark:text-amber-400';
+      }
+      if (token === 'true' || token === 'false' || token === 'null') return 'text-orange-500';
+      return 'text-emerald-600 dark:text-emerald-400';
+    },
+  ), [slice]);
 
-    // Strings
-    result = result.replace(/(["'`])(?:(?!\1)[^\\]|\\.)*\1/g, '<span class="text-emerald-500">$&</span>');
-
-    // Numbers
-    result = result.replace(/\b(\d+\.?\d*)\b/g, '<span class="text-amber-500">$1</span>');
-
-    // Comments
-    result = result.replace(/(\/\/[^\n]*)/g, '<span class="text-zinc-500">$1</span>');
-    result = result.replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="text-zinc-500">$1</span>');
-
-    return result;
-  }, [slice]);
-
-  return (
-    <pre className={cn(
-      'text-xs font-mono p-3 bg-muted/30 rounded overflow-auto',
-      wordWrap && 'whitespace-pre-wrap break-all'
-    )}>
-      <code dangerouslySetInnerHTML={{ __html: highlighted }} />
-      {truncated && <TruncationMarker originalSize={code.length} />}
-    </pre>
-  );
+  return <HighlightedCode code={code} wordWrap={wordWrap} tokens={tokens} truncated={truncated} />;
 }
 
 // Plain text display
@@ -716,16 +766,6 @@ function BinaryPreview({
   );
 }
 
-// Helper functions
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
 /**
  * Trim text before syntax highlighting to avoid running regex replacers
  * across megabytes of input on the main thread.
@@ -786,15 +826,16 @@ function TooLargeNotice({
 
 function getExtension(contentType: string | null): string {
   if (!contentType) return 'bin';
-  if (contentType.includes('json')) return 'json';
-  if (contentType.includes('html')) return 'html';
-  if (contentType.includes('xml')) return 'xml';
-  if (contentType.includes('css')) return 'css';
-  if (contentType.includes('javascript')) return 'js';
-  if (contentType.includes('png')) return 'png';
-  if (contentType.includes('jpeg') || contentType.includes('jpg')) return 'jpg';
-  if (contentType.includes('gif')) return 'gif';
-  if (contentType.includes('svg')) return 'svg';
-  if (contentType.includes('text')) return 'txt';
+  const normalized = contentType.toLowerCase();
+  if (normalized.includes('json')) return 'json';
+  if (normalized.includes('html')) return 'html';
+  if (normalized.includes('xml')) return 'xml';
+  if (normalized.includes('css')) return 'css';
+  if (normalized.includes('javascript')) return 'js';
+  if (normalized.includes('png')) return 'png';
+  if (normalized.includes('jpeg') || normalized.includes('jpg')) return 'jpg';
+  if (normalized.includes('gif')) return 'gif';
+  if (normalized.includes('svg')) return 'svg';
+  if (normalized.includes('text')) return 'txt';
   return 'bin';
 }

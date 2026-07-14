@@ -2,14 +2,14 @@ import { useEffect, useState } from "react";
 import { RequestList } from "./RequestList";
 import { RequestDetail } from "./RequestDetail";
 import { Toolbar } from "./Toolbar";
-import { useCaptureStore, useFilteredRequests } from "@/stores/capture";
+import { useCaptureStore, useFilteredRequestIds } from "@/stores/capture";
 import { useProxy } from "@/hooks/useProxy";
 
 export function CapturePage() {
   const [splitRatio] = useState(0.5);
   const selectedId = useCaptureStore((state) => state.selectedId);
   const loadHistory = useCaptureStore((state) => state.loadHistory);
-  const filteredRequests = useFilteredRequests();
+  const filteredRequestIds = useFilteredRequestIds();
   const selectedRequest = useCaptureStore((state) =>
     state.selectedId ? state.requestMap.get(state.selectedId) : undefined
   );
@@ -31,7 +31,7 @@ export function CapturePage() {
           className="flex flex-col border-r"
           style={{ width: selectedId ? `${splitRatio * 100}%` : "100%" }}
         >
-          <RequestList requests={filteredRequests} />
+          <RequestList requestIds={filteredRequestIds} />
         </div>
 
         {/* Request Detail */}

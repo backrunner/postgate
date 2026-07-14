@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/layout/PageHeader";
 import {
   AlertDialog,
@@ -30,12 +31,13 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { usePluginsStore, PluginInfo } from "@/stores/plugins";
+import { usePluginsStore, PluginInfo, type PluginPanel } from "@/stores/plugins";
 import { cn } from "@/lib/utils";
 
 export function PluginsPage() {
   const {
     plugins,
+    panels,
     pluginsDir,
     isLoading,
     error,
@@ -46,15 +48,25 @@ export function PluginsPage() {
     installPluginFromNpm,
     installPluginFromPath,
     fetchPluginsDir,
+    fetchPanels,
   } = usePluginsStore();
 
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [npmPackage, setNpmPackage] = useState("");
+  const [selectedPanelKey, setSelectedPanelKey] = useState("");
+  const activePanelKey = panels.some(
+    (panel) => pluginPanelKey(panel) === selectedPanelKey,
+  )
+    ? selectedPanelKey
+    : panels[0]
+      ? pluginPanelKey(panels[0])
+      : "";
 
   useEffect(() => {
     fetchPlugins();
     fetchPluginsDir();
-  }, [fetchPlugins, fetchPluginsDir]);
+    fetchPanels();
+  }, [fetchPanels, fetchPlugins, fetchPluginsDir]);
 
   const handleDiscover = async () => {
     await discoverPlugins();
@@ -208,6 +220,14 @@ export function PluginsPage() {
         </div>
       )}
 
+      {panels.length > 0 && (
+        <PluginPanels
+          panels={panels}
+          selectedPanelKey={activePanelKey}
+          onSelectPanel={setSelectedPanelKey}
+        />
+      )}
+
       {/* Content */}
       {plugins.length === 0 ? (
         <div className="flex flex-1 items-center justify-center">
@@ -270,7 +290,7 @@ export function PluginsPage() {
           <ExternalLink className="h-3 w-3" />
           Learn how to create plugins in the{" "}
           <a
-            href="https://github.com/postgate/postgate/docs/plugins"
+            href="https://github.com/nicepkg/postgate/blob/main/docs/plugins.md"
             target="_blank"
             rel="noopener noreferrer"
             className="text-primary hover:underline"
@@ -280,6 +300,68 @@ export function PluginsPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+function pluginPanelKey(panel: PluginPanel): string {
+  return `${panel.plugin_id}:${panel.id}`;
+}
+
+function PluginPanels({
+  panels,
+  selectedPanelKey,
+  onSelectPanel,
+}: {
+  panels: PluginPanel[];
+  selectedPanelKey: string;
+  onSelectPanel: (key: string) => void;
+}) {
+  return (
+    <section className="h-[340px] shrink-0 border-b bg-background/55">
+      <Tabs
+        value={selectedPanelKey}
+        onValueChange={onSelectPanel}
+        className="flex h-full min-h-0 flex-col"
+      >
+        <div className="flex h-10 shrink-0 items-center border-b px-3">
+          <TabsList className="h-7 max-w-full justify-start overflow-x-auto">
+            {panels.map((panel) => (
+              <TabsTrigger
+                key={pluginPanelKey(panel)}
+                value={pluginPanelKey(panel)}
+                className="h-6 max-w-52 truncate px-2 text-xs"
+              >
+                {panel.title}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </div>
+        {panels.map((panel) => (
+          <TabsContent
+            key={pluginPanelKey(panel)}
+            value={pluginPanelKey(panel)}
+            className="m-0 min-h-0 flex-1 data-[state=inactive]:hidden"
+          >
+            <PluginPanelFrame panel={panel} />
+          </TabsContent>
+        ))}
+      </Tabs>
+    </section>
+  );
+}
+
+function PluginPanelFrame({ panel }: { panel: PluginPanel }) {
+  const commonProps = {
+    title: panel.title,
+    sandbox: "allow-forms allow-modals allow-popups allow-scripts",
+    referrerPolicy: "no-referrer" as const,
+    className: "h-full w-full border-0 bg-background",
+  };
+
+  return panel.content.type === "html" ? (
+    <iframe {...commonProps} srcDoc={panel.content.html} />
+  ) : (
+    <iframe {...commonProps} src={panel.content.url} />
   );
 }
 

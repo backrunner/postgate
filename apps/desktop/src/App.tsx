@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { Suspense, lazy, useEffect } from "react";
 import { AppLayout } from "@/components/layout/AppLayout";
+import { PluginToastViewport } from "@/components/plugins/PluginToastViewport";
 import { useThemeStore } from "@/stores/theme";
 import { usePluginsStore } from "@/stores/plugins";
 import { useRulesStore } from "@/stores/rules";
@@ -26,6 +27,7 @@ function PageLoading() {
 function App() {
   const theme = useThemeStore((state) => state.theme);
   const setupPluginEventListeners = usePluginsStore((state) => state.setupEventListeners);
+  const fetchPluginPanels = usePluginsStore((state) => state.fetchPanels);
   const setupRuleEventListeners = useRulesStore((state) => state.setupEventListeners);
 
   useEffect(() => {
@@ -51,13 +53,14 @@ function App() {
     let unlisteners: (() => void)[] = [];
 
     setupPluginEventListeners()
-      .then((listeners) => {
+      .then(async (listeners) => {
         if (cancelled) {
           // Already unmounted — immediately release what we just installed.
           listeners.forEach((unlisten) => unlisten());
           return;
         }
         unlisteners = listeners;
+        await fetchPluginPanels();
       })
       .catch((error) => {
         console.error('Failed to setup plugin event listeners:', error);
@@ -67,7 +70,7 @@ function App() {
       cancelled = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [setupPluginEventListeners]);
+  }, [fetchPluginPanels, setupPluginEventListeners]);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,18 +95,21 @@ function App() {
   }, [setupRuleEventListeners]);
 
   return (
-    <Routes>
-      <Route path="/" element={<AppLayout />}>
-        <Route index element={<Navigate to="/capture" replace />} />
-        <Route path="capture" element={<Suspense fallback={<PageLoading />}><CapturePage /></Suspense>} />
-        <Route path="rules" element={<Suspense fallback={<PageLoading />}><RulesPage /></Suspense>} />
-        <Route path="values" element={<Suspense fallback={<PageLoading />}><ValuesPage /></Suspense>} />
-        <Route path="replay" element={<Suspense fallback={<PageLoading />}><ReplayPage /></Suspense>} />
-        <Route path="debug" element={<Suspense fallback={<PageLoading />}><DebugPage /></Suspense>} />
-        <Route path="plugins" element={<Suspense fallback={<PageLoading />}><PluginsPage /></Suspense>} />
-        <Route path="settings" element={<Suspense fallback={<PageLoading />}><SettingsPage /></Suspense>} />
-      </Route>
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/" element={<AppLayout />}>
+          <Route index element={<Navigate to="/capture" replace />} />
+          <Route path="capture" element={<Suspense fallback={<PageLoading />}><CapturePage /></Suspense>} />
+          <Route path="rules" element={<Suspense fallback={<PageLoading />}><RulesPage /></Suspense>} />
+          <Route path="values" element={<Suspense fallback={<PageLoading />}><ValuesPage /></Suspense>} />
+          <Route path="replay" element={<Suspense fallback={<PageLoading />}><ReplayPage /></Suspense>} />
+          <Route path="debug" element={<Suspense fallback={<PageLoading />}><DebugPage /></Suspense>} />
+          <Route path="plugins" element={<Suspense fallback={<PageLoading />}><PluginsPage /></Suspense>} />
+          <Route path="settings" element={<Suspense fallback={<PageLoading />}><SettingsPage /></Suspense>} />
+        </Route>
+      </Routes>
+      <PluginToastViewport />
+    </>
   );
 }
 

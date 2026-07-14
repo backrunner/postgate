@@ -27,7 +27,6 @@
  *     ctx.logger.info('Plugin loaded');
  *     ctx.ui.registerPanel({
  *       id: 'my-panel',
- *       plugin_id: 'my-plugin',
  *       title: 'My Panel',
  *       content: { type: 'html', html: '<h1>Hello</h1>' }
  *     });
@@ -266,8 +265,8 @@ export interface UIPanel {
   /** Unique panel ID */
   id: string;
 
-  /** Plugin ID that owns this panel */
-  plugin_id: string;
+  /** Plugin ID is assigned by PostGate; plugins may omit it. */
+  plugin_id?: string;
 
   /** Panel title */
   title: string;

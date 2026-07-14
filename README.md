@@ -92,6 +92,10 @@ postgate/
 └── examples/                  # Example plugins
 ```
 
+## Plugins
+
+Plugins run in an embedded V8 runtime and can short-circuit requests, modify upstream responses, persist local state, register sandboxed UI panels, and show notifications. See [docs/plugins.md](docs/plugins.md) for the package contract and [examples/postgate-plugin-mock-api](examples/postgate-plugin-mock-api) for an installable example.
+
 ## Profile Backup And Sync
 
 PostGate profiles are portable JSON snapshots. A profile can include:

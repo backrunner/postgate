@@ -23,9 +23,18 @@ export interface PluginPanel {
   content: { type: 'html'; html: string } | { type: 'iframe'; url: string };
 }
 
+export interface PluginPanelRef {
+  plugin_id: string;
+  panel_id: string;
+}
+
 export interface PluginToast {
   message: string;
   toast_type: 'info' | 'success' | 'warning' | 'error' | null;
+}
+
+export interface PluginToastItem extends PluginToast {
+  id: string;
 }
 
 interface PluginsState {
@@ -34,7 +43,7 @@ interface PluginsState {
   pluginsDir: string | null;
   isLoading: boolean;
   error: string | null;
-  toasts: PluginToast[];
+  toasts: PluginToastItem[];
   
   // Actions
   fetchPlugins: () => Promise<void>;
@@ -50,9 +59,9 @@ interface PluginsState {
   
   // Event handling
   addPanel: (panel: PluginPanel) => void;
-  removePanel: (panelId: string) => void;
+  removePanel: (panel: PluginPanelRef) => void;
   addToast: (toast: PluginToast) => void;
-  clearToast: (index: number) => void;
+  clearToast: (toastId: string) => void;
   setupEventListeners: () => Promise<UnlistenFn[]>;
 }
 
@@ -137,7 +146,7 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
   fetchPanels: async () => {
     try {
       const panels = await invoke<PluginPanel[]>('get_plugin_panels');
-      set({ panels });
+      set({ panels: panels.sort((left, right) => left.title.localeCompare(right.title)) });
     } catch (error) {
       console.error('Failed to fetch plugin panels:', error);
     }
@@ -182,35 +191,50 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
   addPanel: (panel: PluginPanel) => {
     set((state) => {
       // Avoid duplicates
-      const exists = state.panels.some((p) => p.id === panel.id);
+      const exists = state.panels.some(
+        (candidate) => candidate.id === panel.id && candidate.plugin_id === panel.plugin_id,
+      );
       if (exists) {
-        return { panels: state.panels.map((p) => (p.id === panel.id ? panel : p)) };
+        return {
+          panels: state.panels.map((candidate) =>
+            candidate.id === panel.id && candidate.plugin_id === panel.plugin_id
+              ? panel
+              : candidate,
+          ),
+        };
       }
       return { panels: [...state.panels, panel] };
     });
   },
 
-  removePanel: (panelId: string) => {
+  removePanel: (panel: PluginPanelRef) => {
     set((state) => ({
-      panels: state.panels.filter((p) => p.id !== panelId),
+      panels: state.panels.filter(
+        (candidate) =>
+          candidate.id !== panel.panel_id || candidate.plugin_id !== panel.plugin_id,
+      ),
     }));
   },
 
   addToast: (toast: PluginToast) => {
+    const toastItem: PluginToastItem = {
+      ...toast,
+      id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+    };
     set((state) => ({
-      toasts: [...state.toasts, toast],
+      toasts: [...state.toasts, toastItem],
     }));
     // Auto-clear toast after 5 seconds
     setTimeout(() => {
       set((state) => ({
-        toasts: state.toasts.slice(1),
+        toasts: state.toasts.filter((candidate) => candidate.id !== toastItem.id),
       }));
     }, 5000);
   },
 
-  clearToast: (index: number) => {
+  clearToast: (toastId: string) => {
     set((state) => ({
-      toasts: state.toasts.filter((_, i) => i !== index),
+      toasts: state.toasts.filter((toast) => toast.id !== toastId),
     }));
   },
 
@@ -225,7 +249,7 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
     unlisteners.push(unlistenPanelRegistered);
 
     // Listen for panel unregistration events
-    const unlistenPanelUnregistered = await listen<string>('plugin:panel-unregistered', (event) => {
+    const unlistenPanelUnregistered = await listen<PluginPanelRef>('plugin:panel-unregistered', (event) => {
       console.log('Panel unregistered:', event.payload);
       get().removePanel(event.payload);
     });
@@ -237,6 +261,12 @@ export const usePluginsStore = create<PluginsState>((set, get) => ({
       get().addToast(event.payload);
     });
     unlisteners.push(unlistenToast);
+
+    const unlistenSystemReady = await listen('plugin:system-ready', () => {
+      void get().fetchPlugins();
+      void get().fetchPanels();
+    });
+    unlisteners.push(unlistenSystemReady);
 
     return unlisteners;
   },

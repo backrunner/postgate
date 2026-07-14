@@ -151,7 +151,7 @@ export const useDebugStore = create<DebugState>((set, get) => ({
   syncWithRules: async () => {
     try {
       const hasDebugRules = await invoke<boolean>("has_active_debug_rules");
-      const currentStatus = get().status;
+      const currentStatus = await get().fetchStatus();
       const debugPort = useProxyStore.getState().config.debugPort;
 
       if (hasDebugRules && !currentStatus.is_running) {

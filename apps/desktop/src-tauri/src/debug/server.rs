@@ -15,6 +15,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 const CDP_CHANNEL_CAPACITY: usize = 1024;
+const CHOBITSU_JS: &str = include_str!("../../assets/chobitsu.js");
 
 /// WebSocket server for debug connections from injected scripts
 pub struct DebugServer {
@@ -141,8 +142,10 @@ impl DebugServer {
 
         let request_path = parse_request_path(&request_line);
 
-        // Check if it's an HTTP GET request for /json endpoints
-        if request_path.is_some_and(|path| path.starts_with("/json")) {
+        // Discovery and bundled debug assets share the same localhost server.
+        if request_path
+            .is_some_and(|path| path.starts_with("/json") || path.starts_with("/__postgate/"))
+        {
             return self.handle_http_request(stream).await;
         }
 
@@ -169,7 +172,7 @@ impl DebugServer {
         let port = config.port;
         drop(config);
 
-        let (status, body) = match path {
+        let (status, content_type, cache_control, body) = match path {
             "/json" | "/json/list" => {
                 let sessions = self.session_manager.get_sessions();
                 let targets: Vec<serde_json::Value> = sessions.iter()
@@ -186,7 +189,12 @@ impl DebugServer {
                         })
                     })
                     .collect();
-                ("200 OK", serde_json::to_string_pretty(&targets).unwrap())
+                (
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    "no-store",
+                    serde_json::to_string_pretty(&targets).unwrap(),
+                )
             }
             "/json/version" => {
                 let version = serde_json::json!({
@@ -194,18 +202,35 @@ impl DebugServer {
                     "Protocol-Version": "1.3",
                     "User-Agent": "PostGate",
                     "V8-Version": "N/A",
-                    "WebKit-Version": "N/A",
-                    "webSocketDebuggerUrl": format!("ws://127.0.0.1:{}", port)
+                    "WebKit-Version": "N/A"
                 });
-                ("200 OK", serde_json::to_string_pretty(&version).unwrap())
+                (
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    "no-store",
+                    serde_json::to_string_pretty(&version).unwrap(),
+                )
             }
-            _ => ("404 Not Found", "Not Found".to_string()),
+            "/__postgate/chobitsu.js" => (
+                "200 OK",
+                "text/javascript; charset=utf-8",
+                "public, max-age=31536000, immutable",
+                CHOBITSU_JS.to_string(),
+            ),
+            _ => (
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                "no-store",
+                "Not Found".to_string(),
+            ),
         };
 
         let response = format!(
-            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
             status,
+            content_type,
             body.len(),
+            cache_control,
             body
         );
 
@@ -469,6 +494,9 @@ impl DebugServer {
         drop(config);
 
         match msg {
+            ClientMessage::GetChobitsu => Some(ServerMessage::Chobitsu {
+                source: CHOBITSU_JS.to_string(),
+            }),
             ClientMessage::Hello {
                 url,
                 title,
@@ -711,8 +739,11 @@ fn parse_error_type(s: &str) -> ErrorType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use std::collections::HashMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio_tungstenite::connect_async;
 
     async fn free_local_port() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -769,6 +800,167 @@ mod tests {
 
         server.start(port).await.unwrap();
         assert!(server.is_running());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_debug_server_serves_bundled_chobitsu() {
+        let port = free_local_port().await;
+        let manager = SessionManager::new();
+        let server = DebugServer::new(manager);
+        server.start(port).await.unwrap();
+
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(
+                b"GET /__postgate/chobitsu.js HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8(response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Type: text/javascript; charset=utf-8"));
+        assert!(response.contains("setOnMessage"));
+        assert!(response.contains("sendRawMessage"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_cdp_round_trip_between_page_and_devtools() {
+        let port = free_local_port().await;
+        let manager = SessionManager::new();
+        let server = DebugServer::new(Arc::clone(&manager));
+        server.start(port).await.unwrap();
+
+        let (mut page, _) = connect_async(format!("ws://127.0.0.1:{port}/"))
+            .await
+            .unwrap();
+        page.send(Message::Text(
+            serde_json::to_string(&ClientMessage::GetChobitsu)
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+        let bootstrap = tokio::time::timeout(std::time::Duration::from_secs(1), page.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(bootstrap) = bootstrap else {
+            panic!("expected Chobitsu bootstrap text message");
+        };
+        match serde_json::from_str::<ServerMessage>(&bootstrap).unwrap() {
+            ServerMessage::Chobitsu { source } => {
+                assert!(source.len() > 400_000);
+                assert!(source.contains("setOnMessage"));
+            }
+            other => panic!("expected Chobitsu bootstrap, got {other:?}"),
+        }
+
+        page.send(Message::Text(
+            serde_json::to_string(&ClientMessage::Hello {
+                url: "https://example.com/app".into(),
+                title: Some("Example".into()),
+                user_agent: Some("PostGate test".into()),
+                cdp_enabled: Some(true),
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let welcome = tokio::time::timeout(std::time::Duration::from_secs(1), page.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(welcome) = welcome else {
+            panic!("expected welcome text message");
+        };
+        let session_id = match serde_json::from_str::<ServerMessage>(&welcome).unwrap() {
+            ServerMessage::Welcome { session_id } => session_id,
+            other => panic!("expected welcome, got {other:?}"),
+        };
+
+        let mut discovery = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        discovery
+            .write_all(b"GET /json/list HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut discovery_response = Vec::new();
+        discovery
+            .read_to_end(&mut discovery_response)
+            .await
+            .unwrap();
+        let discovery_response = String::from_utf8(discovery_response).unwrap();
+        assert!(discovery_response.contains(&session_id));
+        assert!(discovery_response
+            .contains(&format!("ws://127.0.0.1:{port}/devtools/page/{session_id}")));
+
+        let (mut devtools, _) =
+            connect_async(format!("ws://127.0.0.1:{port}/devtools/page/{session_id}"))
+                .await
+                .unwrap();
+
+        let command = serde_json::json!({
+            "id": 41,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "6 * 7" }
+        });
+        devtools
+            .send(Message::Text(command.to_string().into()))
+            .await
+            .unwrap();
+
+        let forwarded = tokio::time::timeout(std::time::Duration::from_secs(1), page.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(forwarded) = forwarded else {
+            panic!("expected forwarded CDP text message");
+        };
+        match serde_json::from_str::<ServerMessage>(&forwarded).unwrap() {
+            ServerMessage::Cdp { message } => assert_eq!(message, command),
+            other => panic!("expected CDP command, got {other:?}"),
+        }
+
+        let result = serde_json::json!({
+            "id": 41,
+            "result": { "result": { "type": "number", "value": 42 } }
+        });
+        page.send(Message::Text(
+            serde_json::to_string(&ClientMessage::Cdp {
+                message: result.clone(),
+            })
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let returned = tokio::time::timeout(std::time::Duration::from_secs(1), devtools.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(returned) = returned else {
+            panic!("expected returned CDP text message");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&returned).unwrap(),
+            result
+        );
+
+        devtools.close(None).await.unwrap();
+        page.close(None).await.unwrap();
         server.stop().await;
     }
 

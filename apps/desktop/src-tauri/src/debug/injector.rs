@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 
 static HEAD_REGEX: OnceLock<Regex> = OnceLock::new();
 static BODY_REGEX: OnceLock<Regex> = OnceLock::new();
+static META_REGEX: OnceLock<Regex> = OnceLock::new();
+static CSP_HTTP_EQUIV_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Script injector for inserting debug scripts into HTML responses
 pub struct ScriptInjector {
@@ -35,6 +37,9 @@ impl ScriptInjector {
   let chobitsu = null;
   let messageQueue = [];
   let reconnectAttempts = 0;
+  let bootstrapTimer = null;
+  let bootstrapStarted = false;
+  let helloSent = false;
   const MAX_RECONNECT = 5;
 
   function flushMessageQueue() {{
@@ -45,26 +50,40 @@ impl ScriptInjector {
     }}
   }}
 
-  // Load Chobitsu dynamically from CDN
-  function loadChobitsu() {{
+  function loadScript(src) {{
     return new Promise((resolve, reject) => {{
-      if (window.chobitsu) {{
-        resolve(window.chobitsu);
-        return;
-      }}
-
       const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/chobitsu@1.8.6/dist/chobitsu.min.js';
+      const timeout = setTimeout(() => {{
+        script.remove();
+        reject(new Error('Timed out loading ' + src));
+      }}, 5000);
+
+      script.src = src;
+      script.async = true;
       script.onload = () => {{
+        clearTimeout(timeout);
         if (window.chobitsu) {{
           resolve(window.chobitsu);
         }} else {{
-          reject(new Error('Chobitsu failed to load'));
+          reject(new Error('Chobitsu failed to initialize from ' + src));
         }}
       }};
-      script.onerror = () => reject(new Error('Failed to load Chobitsu script'));
-      document.head.appendChild(script);
+      script.onerror = () => {{
+        clearTimeout(timeout);
+        script.remove();
+        reject(new Error('Failed to load ' + src));
+      }};
+      (document.head || document.documentElement).appendChild(script);
     }});
+  }}
+
+  // Prefer the copy bundled with PostGate so local debugging does not depend
+  // on a third-party CDN. The HTTPS CDN remains a fallback for browsers that
+  // reject an HTTP loopback script from a secure page.
+  function loadChobitsu() {{
+    if (window.chobitsu) return Promise.resolve(window.chobitsu);
+    return loadScript('http://127.0.0.1:{port}/__postgate/chobitsu.js')
+      .catch(() => loadScript('https://cdn.jsdelivr.net/npm/chobitsu@1.8.6/dist/chobitsu.min.js'));
   }}
 
   // Initialize Chobitsu and set up CDP message handling
@@ -88,31 +107,60 @@ impl ScriptInjector {
     }}
   }}
 
+  async function bootstrapChobitsu(source) {{
+    if (bootstrapStarted) return;
+    bootstrapStarted = true;
+    if (bootstrapTimer) {{
+      clearTimeout(bootstrapTimer);
+      bootstrapTimer = null;
+    }}
+
+    if (source && !window.chobitsu) {{
+      try {{
+        (0, eval)(source + '\n//# sourceURL=postgate://chobitsu.js');
+      }} catch (err) {{
+        console.warn('[PostGate] Failed to evaluate bundled Chobitsu:', err);
+      }}
+    }}
+
+    const cdpReady = await initChobitsu();
+    if (!helloSent && ws && ws.readyState === WebSocket.OPEN) {{
+      helloSent = true;
+      send({{
+        type: 'hello',
+        url: window.location.href,
+        title: document.title,
+        user_agent: navigator.userAgent,
+        cdp_enabled: cdpReady
+      }});
+    }}
+  }}
+
   // Connect to PostGate debug server
   function connect() {{
     try {{
       ws = new WebSocket(WS_URL);
 
-      ws.onopen = async function() {{
+      ws.onopen = function() {{
         reconnectAttempts = 0;
+        bootstrapStarted = false;
+        helloSent = false;
         console.log('[PostGate] Connected to debug server');
 
-        // Initialize Chobitsu
-        const cdpReady = await initChobitsu();
-
-        // Send hello message with page info
-        send({{
-          type: 'hello',
-          url: window.location.href,
-          title: document.title,
-          user_agent: navigator.userAgent,
-          cdp_enabled: cdpReady
-        }});
+        if (window.chobitsu) {{
+          void bootstrapChobitsu();
+        }} else {{
+          ws.send(JSON.stringify({{ type: 'get_chobitsu' }}));
+          // Compatibility fallback for an older PostGate server.
+          bootstrapTimer = setTimeout(() => void bootstrapChobitsu(), 1000);
+        }}
       }};
 
       ws.onclose = function() {{
         ws = null;
         sessionId = null;
+        if (bootstrapTimer) clearTimeout(bootstrapTimer);
+        bootstrapTimer = null;
         console.log('[PostGate] Disconnected from debug server');
         
         if (reconnectAttempts < MAX_RECONNECT) {{
@@ -153,6 +201,10 @@ impl ScriptInjector {
   // Handle messages from PostGate server
   function handleServerMessage(msg) {{
     switch (msg.type) {{
+      case 'chobitsu':
+        void bootstrapChobitsu(msg.source);
+        break;
+
       case 'welcome':
         sessionId = msg.session_id;
         console.log('[PostGate] Session established:', sessionId);
@@ -478,11 +530,12 @@ impl ScriptInjector {
     /// Inject the debug script into an HTML response body
     pub fn inject_into_html(&self, html: &str) -> String {
         let script = self.get_inject_script();
+        let html = Self::remove_csp_meta_tags(html);
 
         // Try to inject after <head>
         let head_regex = HEAD_REGEX.get_or_init(|| Regex::new(r"(?i)(<head[^>]*>)").unwrap());
 
-        if let Some(caps) = head_regex.captures(html) {
+        if let Some(caps) = head_regex.captures(&html) {
             if let Some(m) = caps.get(1) {
                 let pos = m.end();
                 let mut result = String::with_capacity(html.len() + script.len());
@@ -496,7 +549,7 @@ impl ScriptInjector {
         // Fallback: inject after <body>
         let body_regex = BODY_REGEX.get_or_init(|| Regex::new(r"(?i)(<body[^>]*>)").unwrap());
 
-        if let Some(caps) = body_regex.captures(html) {
+        if let Some(caps) = body_regex.captures(&html) {
             if let Some(m) = caps.get(1) {
                 let pos = m.end();
                 let mut result = String::with_capacity(html.len() + script.len());
@@ -509,6 +562,34 @@ impl ScriptInjector {
 
         // Last resort: prepend to document
         format!("{}{}", script, html)
+    }
+
+    fn remove_csp_meta_tags(html: &str) -> std::borrow::Cow<'_, str> {
+        let meta_regex = META_REGEX
+            .get_or_init(|| Regex::new(r#"(?is)<meta\b(?:[^>"']|"[^"]*"|'[^']*')*>"#).unwrap());
+        let csp_http_equiv_regex = CSP_HTTP_EQUIV_REGEX.get_or_init(|| {
+            Regex::new(
+                r#"(?i)\bhttp-equiv\s*=\s*(?:"\s*content-security-policy(?:-report-only)?\s*"|'\s*content-security-policy(?:-report-only)?\s*'|content-security-policy(?:-report-only)?\b)"#,
+            )
+            .unwrap()
+        });
+
+        let mut matches = meta_regex
+            .find_iter(html)
+            .filter(|matched| csp_http_equiv_regex.is_match(matched.as_str()))
+            .peekable();
+        if matches.peek().is_none() {
+            return std::borrow::Cow::Borrowed(html);
+        }
+
+        let mut sanitized = String::with_capacity(html.len());
+        let mut cursor = 0;
+        for matched in matches {
+            sanitized.push_str(&html[cursor..matched.start()]);
+            cursor = matched.end();
+        }
+        sanitized.push_str(&html[cursor..]);
+        std::borrow::Cow::Owned(sanitized)
     }
 
     /// Check if a content type is HTML
@@ -536,6 +617,8 @@ mod tests {
         assert!(result.contains("data-postgate-inject"));
         assert!(result.contains("<head><script"));
         assert!(result.contains("chobitsu"));
+        assert!(result.contains("get_chobitsu"));
+        assert!(result.contains("postgate://chobitsu.js"));
     }
 
     #[test]
@@ -546,6 +629,39 @@ mod tests {
 
         assert!(result.contains("data-postgate-inject"));
         assert!(result.contains("<body><script"));
+    }
+
+    #[test]
+    fn test_inject_removes_csp_meta_tags() {
+        let injector = ScriptInjector::new(9229);
+        let html = r#"<html><head>
+            <meta content="default-src 'none'" HTTP-EQUIV="Content-Security-Policy">
+            <meta http-equiv=content-security-policy-report-only content="script-src 'none'">
+            <title>Test</title>
+        </head><body>Hello</body></html>"#;
+        let result = injector.inject_into_html(html);
+
+        assert!(!result.to_lowercase().contains("http-equiv"));
+        assert!(!result.contains("default-src 'none'"));
+        assert!(!result.contains("script-src 'none'"));
+        assert!(result.contains("<head><script"));
+    }
+
+    #[test]
+    fn test_inject_preserves_non_csp_meta_tags() {
+        let injector = ScriptInjector::new(9229);
+        let html = r#"<html><head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <meta http-equiv="refresh" content="30">
+        </head><body>Hello</body></html>"#;
+        let result = injector.inject_into_html(html);
+
+        assert!(result.contains(r#"<meta charset="utf-8">"#));
+        assert!(result
+            .contains(r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#));
+        assert!(result.contains(r#"<meta http-equiv="refresh" content="30">"#));
+        assert!(result.contains("<head><script"));
     }
 
     #[test]

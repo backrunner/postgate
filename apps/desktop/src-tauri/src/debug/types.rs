@@ -149,6 +149,8 @@ pub enum ErrorType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
+    #[serde(rename = "get_chobitsu")]
+    GetChobitsu,
     #[serde(rename = "hello")]
     Hello {
         url: String,
@@ -197,6 +199,8 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
+    #[serde(rename = "chobitsu")]
+    Chobitsu { source: String },
     #[serde(rename = "welcome")]
     Welcome { session_id: String },
     #[serde(rename = "eval")]

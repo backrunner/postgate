@@ -17,6 +17,9 @@
   let chobitsu = null;
   let messageQueue = [];
   let reconnectAttempts = 0;
+  let bootstrapTimer = null;
+  let bootstrapStarted = false;
+  let helloSent = false;
   const MAX_RECONNECT = 5;
 
   function flushMessageQueue() {
@@ -27,26 +30,39 @@
     }
   }
 
-  // Load Chobitsu dynamically from CDN
-  function loadChobitsu() {
+  function loadScript(src) {
     return new Promise((resolve, reject) => {
-      if (window.chobitsu) {
-        resolve(window.chobitsu);
-        return;
-      }
-
       const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/chobitsu@1.8.6/dist/chobitsu.min.js';
+      const timeout = setTimeout(() => {
+        script.remove();
+        reject(new Error('Timed out loading ' + src));
+      }, 5000);
+
+      script.src = src;
+      script.async = true;
       script.onload = () => {
+        clearTimeout(timeout);
         if (window.chobitsu) {
           resolve(window.chobitsu);
         } else {
-          reject(new Error('Chobitsu failed to load'));
+          reject(new Error('Chobitsu failed to initialize from ' + src));
         }
       };
-      script.onerror = () => reject(new Error('Failed to load Chobitsu script'));
-      document.head.appendChild(script);
+      script.onerror = () => {
+        clearTimeout(timeout);
+        script.remove();
+        reject(new Error('Failed to load ' + src));
+      };
+      (document.head || document.documentElement).appendChild(script);
     });
+  }
+
+  // Prefer the copy bundled with PostGate so local debugging does not depend
+  // on a third-party CDN. Keep the CDN as a secure-page fallback.
+  function loadChobitsu() {
+    if (window.chobitsu) return Promise.resolve(window.chobitsu);
+    return loadScript('http://127.0.0.1:' + POSTGATE_DEBUG_PORT + '/__postgate/chobitsu.js')
+      .catch(() => loadScript('https://cdn.jsdelivr.net/npm/chobitsu@1.8.6/dist/chobitsu.min.js'));
   }
 
   // Initialize Chobitsu and set up CDP message handling
@@ -70,31 +86,59 @@
     }
   }
 
+  async function bootstrapChobitsu(source) {
+    if (bootstrapStarted) return;
+    bootstrapStarted = true;
+    if (bootstrapTimer) {
+      clearTimeout(bootstrapTimer);
+      bootstrapTimer = null;
+    }
+
+    if (source && !window.chobitsu) {
+      try {
+        (0, eval)(source + '\n//# sourceURL=postgate://chobitsu.js');
+      } catch (err) {
+        console.warn('[PostGate] Failed to evaluate bundled Chobitsu:', err);
+      }
+    }
+
+    const cdpReady = await initChobitsu();
+    if (!helloSent && ws && ws.readyState === WebSocket.OPEN) {
+      helloSent = true;
+      send({
+        type: 'hello',
+        url: window.location.href,
+        title: document.title,
+        user_agent: navigator.userAgent,
+        cdp_enabled: cdpReady
+      });
+    }
+  }
+
   // Connect to PostGate debug server
   function connect() {
     try {
       ws = new WebSocket(WS_URL);
 
-      ws.onopen = async function() {
+      ws.onopen = function() {
         reconnectAttempts = 0;
+        bootstrapStarted = false;
+        helloSent = false;
         console.log('[PostGate] Connected to debug server');
 
-        // Initialize Chobitsu
-        const cdpReady = await initChobitsu();
-
-        // Send hello message with page info
-        send({
-          type: 'hello',
-          url: window.location.href,
-          title: document.title,
-          user_agent: navigator.userAgent,
-          cdp_enabled: cdpReady
-        });
+        if (window.chobitsu) {
+          void bootstrapChobitsu();
+        } else {
+          ws.send(JSON.stringify({ type: 'get_chobitsu' }));
+          bootstrapTimer = setTimeout(() => void bootstrapChobitsu(), 1000);
+        }
       };
 
       ws.onclose = function() {
         ws = null;
         sessionId = null;
+        if (bootstrapTimer) clearTimeout(bootstrapTimer);
+        bootstrapTimer = null;
         console.log('[PostGate] Disconnected from debug server');
         
         if (reconnectAttempts < MAX_RECONNECT) {
@@ -135,6 +179,10 @@
   // Handle messages from PostGate server
   function handleServerMessage(msg) {
     switch (msg.type) {
+      case 'chobitsu':
+        void bootstrapChobitsu(msg.source);
+        break;
+
       case 'welcome':
         sessionId = msg.session_id;
         console.log('[PostGate] Session established:', sessionId);

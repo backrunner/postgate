@@ -9,6 +9,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { PanelEmptyState } from "@/components/layout/PanelEmptyState";
+import { WorkspaceSidebar } from "@/components/layout/WorkspaceSidebar";
 import {
   useDebugStore,
   DebugSession,
@@ -23,6 +25,7 @@ export function DebugPage() {
     sessions,
     selectedSessionId,
     selectSession,
+    error,
   } = useDebugStore();
 
   // Initialize and sync with rules
@@ -85,26 +88,17 @@ export function DebugPage() {
         )}
       </PageHeader>
 
+      {error && (
+        <div className="border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {error}
+        </div>
+      )}
+
       {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sessions sidebar */}
-        <div className="w-60 border-r flex flex-col bg-muted/10">
-          <div className="flex h-9 items-center px-3 border-b">
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Connected Pages</h3>
-          </div>
-          <ScrollArea className="flex-1">
-            {sessions.length === 0 ? (
-              <div className="p-8 text-center">
-                <div className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-muted mb-3">
-                  <WifiOff className="h-4 w-4 text-muted-foreground" />
-                </div>
-                {status.is_running ? (
-                  <p className="text-xs text-muted-foreground">Waiting for connections...</p>
-                ) : (
-                  <p className="text-xs text-muted-foreground">Add debug:// rules to start</p>
-                )}
-              </div>
-            ) : (
+        <WorkspaceSidebar title="Connected Pages">
+          <ScrollArea className="h-full">
+            {sessions.length > 0 && (
               <div className="p-2 space-y-0.5">
                 <button
                   className={cn(
@@ -128,10 +122,20 @@ export function DebugPage() {
               </div>
             )}
           </ScrollArea>
-        </div>
+
+          {sessions.length === 0 && (
+            <PanelEmptyState
+              icon={WifiOff}
+              title={status.is_running ? "Waiting for connections" : "No debug sessions"}
+              description={status.is_running ? undefined : "Add a debug:// rule to start"}
+              compact
+              className="pointer-events-none absolute inset-0"
+            />
+          )}
+        </WorkspaceSidebar>
 
         {/* DevTools panel */}
-        <div className="flex-1 flex flex-col bg-background">
+        <div className="flex-1 flex flex-col bg-background/65">
           <DevToolsPanel 
             sessions={sessions} 
             selectedSessionId={selectedSessionId}
@@ -153,7 +157,7 @@ function SessionItem({
   isSelected: boolean;
   onClick: () => void;
 }) {
-  const hostname = new URL(session.url).hostname;
+  const hostname = getHostname(session.url);
 
   return (
     <button
@@ -209,36 +213,39 @@ function DevToolsPanel({
 
   if (!status.is_running) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-        <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-muted/50 mb-4">
-          <Bug className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <h3 className="font-medium mb-1">Debug Server Not Running</h3>
-        <p className="text-sm text-muted-foreground max-w-sm">
-          Add a <code className="px-1 py-0.5 bg-muted rounded font-mono text-xs">debug://</code> rule 
-          to any rule group to automatically start the debug server.
-        </p>
+      <PanelEmptyState
+        icon={Bug}
+        title="Debug Server Not Running"
+        description={(
+          <>
+            Add a <code className="px-1 py-0.5 bg-muted rounded font-mono text-xs">debug://</code>{' '}
+            rule{' '}
+            to any rule group to automatically start the debug server.
+          </>
+        )}
+      >
         <div className="w-full max-w-sm bg-muted/50 border rounded-lg p-3 text-left mt-6">
           <p className="text-[10px] font-medium text-muted-foreground mb-1.5 uppercase tracking-wider">Example Rule</p>
           <code className="text-xs font-mono">example.com debug://mypage</code>
         </div>
-      </div>
+      </PanelEmptyState>
     );
   }
 
   if (cdpSessions.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-8 text-center">
-        <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-muted/50 mb-4">
-          <Bug className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <h3 className="font-medium mb-1">Waiting for Connections</h3>
-        <p className="text-sm text-muted-foreground max-w-sm mb-6">
-          The debug server is running. Visit a page that matches your 
-          <code className="px-1 py-0.5 bg-muted rounded font-mono text-xs mx-1">debug://</code> 
-          rule to connect.
-        </p>
-        <div className="w-full max-w-sm bg-muted/50 border rounded-lg p-3 text-left">
+      <PanelEmptyState
+        icon={Bug}
+        title="Waiting for Connections"
+        description={(
+          <>
+            The debug server is running. Visit a page that matches your{' '}
+            <code className="px-1 py-0.5 bg-muted rounded font-mono text-xs mx-1">debug://</code>{' '}
+            rule to connect.
+          </>
+        )}
+      >
+        <div className="w-full max-w-sm bg-muted/50 border rounded-lg p-3 text-left mt-6">
           <p className="text-[10px] font-medium text-muted-foreground mb-1.5 uppercase tracking-wider">Server Status</p>
           <div className="flex items-center gap-2">
             <span className="relative flex h-2 w-2">
@@ -248,7 +255,7 @@ function DevToolsPanel({
             <code className="text-xs font-mono">localhost:{status.port}</code>
           </div>
         </div>
-      </div>
+      </PanelEmptyState>
     );
   }
 
@@ -265,7 +272,7 @@ function DevToolsPanel({
         <div className="grid gap-4">
           {cdpSessions.map((session) => {
             const devToolsUrl = getDevToolsUrl(session);
-            const hostname = new URL(session.url).hostname;
+            const hostname = getHostname(session.url);
             
             return (
               <div 
@@ -363,4 +370,12 @@ function DevToolsPanel({
       </div>
     </div>
   );
+}
+
+function getHostname(url: string): string {
+  try {
+    return new URL(url).hostname || url;
+  } catch {
+    return url;
+  }
 }

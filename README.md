@@ -1,145 +1,148 @@
 <p align="center">
-  <img src="apps/desktop/public/postgate.svg" width="92" height="92" alt="PostGate favicon" />
+  <img src="apps/desktop/public/postgate.svg" width="112" height="112" alt="PostGate" />
 </p>
 
 <h1 align="center">PostGate</h1>
 
 <p align="center">
-  A desktop MITM proxy for local frontend development, request rewriting, replay, and browser debugging.
+  <strong>Inspect, reshape, replay, and debug local web traffic.</strong>
 </p>
 
 <p align="center">
-  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2.0-24c8db?style=flat-square" />
-  <img alt="React 19" src="https://img.shields.io/badge/React-19-61dafb?style=flat-square" />
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-async-orange?style=flat-square" />
-  <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-18181b?style=flat-square" />
+  A local-first desktop proxy built for frontend development, with Whistle-compatible rules,
+  HTTPS interception, request replay, browser debugging, and an extensible plugin runtime.
 </p>
 
-## Overview
+<p align="center">
+  <a href="https://github.com/backrunner/postgate/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/backrunner/postgate/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="https://github.com/backrunner/postgate/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/backrunner/postgate?display_name=tag&sort=semver" /></a>
+  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2.0-24c8db" />
+  <img alt="React 19" src="https://img.shields.io/badge/React-19-149eca" />
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-async-ce422b" />
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-18181b" /></a>
+</p>
 
-PostGate is a Tauri-based desktop proxy for frontend engineers who need to inspect, reshape, replay, and debug traffic without leaving their local workflow. It captures HTTP and HTTPS requests, applies Whistle-compatible rules, injects browser debugging hooks, and keeps rules, certificates, replay collections, and app preferences portable across machines.
+<p align="center">
+  <a href="https://github.com/backrunner/postgate/releases/latest"><strong>Download latest</strong></a>
+  &nbsp;&middot;&nbsp;
+  <a href="docs/whistle-compatibility.md">Rule reference</a>
+  &nbsp;&middot;&nbsp;
+  <a href="docs/plugins.md">Plugin guide</a>
+  &nbsp;&middot;&nbsp;
+  <a href="docs/releases.md">Release guide</a>
+</p>
 
-It is built for daily development work: compact UI, fast capture views, local-first storage, and a Rust async proxy pipeline that stays responsive under real traffic.
+---
 
-## Highlights
+## What PostGate Does
 
-- HTTP and HTTPS traffic capture with method, status, timing, headers, body metadata, TLS details, and matched rules.
-- Whistle-compatible rule groups for host mapping, redirects, status overrides, headers, body replacement, injection, delay, throttle, CORS, auth, cookies, debug, and plugin actions.
-- Optional HTTP/3 ingress on localhost behind the Rust `quic` feature, bridged into the same rule and capture pipeline as HTTP/1.1 and HTTP/2.
-- External local rule files via Whistle-style `@/path/to/rules.txt` or PostGate's `includeFile:///path/to/rules.txt`; files are watched and merged into the active rule set.
-- Local CA generation, certificate export, and system trust installation for HTTPS inspection.
-- Replay collections for saving, organizing, editing, and re-running requests.
-- Browser debug mode with CDP-style target discovery, console capture, errors, fetch, and XHR instrumentation.
-- Plugin SDK and runtime hooks for extending proxy behavior.
-- Profile export/import for rules, values, replay data, certificates, UI settings, proxy settings, update settings, and sync settings.
-- Settings sync using the same profile snapshot format over iCloud Drive or WebDAV.
+PostGate puts a programmable checkpoint between your browser and the network. It captures HTTP and HTTPS traffic, applies rules before and after upstream requests, and exposes the result in a compact desktop workspace.
 
-## Architecture
+| Workflow | What you can do |
+| --- | --- |
+| **Capture** | Inspect methods, status codes, timing, headers, bodies, TLS details, and matched rules. |
+| **Rules** | Map hosts, redirect URLs, replace files or bodies, inject code, edit headers, delay, throttle, mock, and debug. |
+| **Replay** | Save requests into collections, edit every part of a request, and execute it again without leaving the app. |
+| **Debug** | Discover pages as CDP-style targets and capture console output, runtime errors, Fetch, and XHR activity. |
+| **Plugins** | Extend request and response handling with an embedded JavaScript runtime, persistent state, panels, and notifications. |
+| **Profiles** | Move rules, values, replay data, certificates, UI preferences, and sync settings between machines. |
 
-```mermaid
-flowchart LR
-  Client["Browser or app"] --> Proxy["PostGate proxy server"]
-  Proxy --> Rules["Rule engine"]
-  Rules --> RequestRules["Apply request rules"]
-  RequestRules --> Upstream["Upstream server"]
-  Upstream --> ResponseRules["Apply response rules"]
-  ResponseRules --> Client
-  ResponseRules --> Capture["Capture store and UI events"]
-  Rules --> Debug["Debug injector"]
-  Rules --> Plugins["Plugin runtime"]
-```
+Everything stays local by default: the proxy binds to localhost, data is stored in SQLite, and cloud sync is opt-in through iCloud Drive or WebDAV.
 
-PostGate is split into a React/Tauri desktop shell and a Rust backend. The frontend manages capture views, rule editing, replay, plugins, debugging, updates, and settings. The backend owns proxy networking, TLS certificate generation, rule parsing and application, persistence, replay execution, plugin execution, and profile backup/sync.
+## Start In Two Commands
 
-## Quick Start
-
-Requirements:
-
-- Node.js 22.13 or newer
-- pnpm 11.10 or newer
-- Rust 1.77 or newer
-- Platform prerequisites for Tauri 2
+Requirements: Node.js 22.13+, pnpm 11.10+, Rust 1.77+, and the [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 pnpm install
 pnpm dev:desktop
 ```
 
-The desktop app starts a Vite dev server on port `1420` and launches Tauri in development mode.
+PostGate starts the desktop app, creates a local certificate authority when needed, and listens on port `8899` by default. Configure your browser or device to use `127.0.0.1:8899` as its HTTP and HTTPS proxy.
 
-## Scripts
+## Rules That Read Like Intent
 
-```bash
-pnpm dev              # Run package watch tasks
-pnpm dev:desktop      # Start the desktop app in Tauri dev mode
-pnpm build            # Build all workspace packages
-pnpm tauri:build      # Build packages and produce desktop bundles
-pnpm typecheck        # Run workspace type checks
-pnpm test             # Run workspace tests
-pnpm lint             # Run workspace lint tasks
+PostGate follows Whistle's rule model, so common local-development changes stay short and reviewable:
+
+```text
+# Send an API host to a local service
+api.example.com host://127.0.0.1:3000
+
+# Replace a production bundle with a local file
+https://cdn.example.com/app.js file:///Users/me/project/dist/app.js
+
+# Add CORS headers and slow one endpoint down
+api.example.com/path resCors://* delay://500
+
+# Inject the browser debug bridge into matching HTML pages
+example.com debug://
+
+# Run a PostGate plugin with JSON configuration
+api.example.com plugin://mock-api?fixture=checkout
 ```
+
+Patterns can be exact URLs, domains, path prefixes, wildcards, or regular expressions. Filters narrow a rule by method, protocol, port, content type, client IP, or status. See the [compatibility reference](docs/whistle-compatibility.md) for the supported protocol matrix.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  Client["Browser or app"] --> Proxy["PostGate proxy"]
+  Proxy --> Match["Match active rules"]
+  Match --> Request["Apply request actions"]
+  Request --> Upstream["Upstream server"]
+  Upstream --> Response["Apply response actions"]
+  Response --> Client
+  Response --> Capture["Capture store and UI"]
+  Match --> Debug["Debug injector"]
+  Match --> Plugins["Plugin runtime"]
+```
+
+The React and Tauri shell owns the desktop experience. The Rust backend owns networking, TLS, rule parsing and application, persistence, replay execution, plugin execution, and profile transfer. Tokio, Hyper, rustls, DashMap, and SQLite keep the hot path asynchronous and local.
+
+## Feature Notes
+
+- HTTP/1.1 and HTTP/2 are available in the default local build.
+- GitHub release builds include the optional QUIC/HTTP/3 ingress.
+- HTTPS inspection uses a PostGate root CA that must be explicitly trusted by the operating system.
+- External rules can be included with `@/path/to/rules.txt` or `includeFile:///path/to/rules.txt`; PostGate watches included files for changes.
+- Profile exports can contain the CA private key and WebDAV credentials. Treat them as secrets.
+- Automatic updates are signed and delivered from [GitHub Releases](https://github.com/backrunner/postgate/releases).
 
 ## Workspace
 
 ```text
 postgate/
-├── apps/desktop/              # Tauri desktop app and React UI
-│   ├── src/                   # Pages, stores, components, editor integrations
-│   └── src-tauri/src/         # Rust proxy, rules, storage, certs, commands
-├── packages/inject-client/    # Browser-side debug injection client
-├── packages/plugin-sdk/       # SDK for PostGate plugins
-├── packages/shared/           # Shared TypeScript types and utilities
-└── examples/                  # Example plugins
+|-- apps/desktop/              Tauri desktop app and React UI
+|   |-- src/                   Pages, stores, components, and editors
+|   `-- src-tauri/src/         Proxy, rules, storage, certs, and commands
+|-- packages/inject-client/    Browser debug injection client
+|-- packages/plugin-sdk/       Public plugin development SDK
+|-- packages/shared/           Shared TypeScript types
+|-- examples/                  Installable example plugins
+`-- docs/                      Rules, plugins, and release documentation
 ```
+
+## Development
+
+| Command | Purpose |
+| --- | --- |
+| `pnpm dev:desktop` | Start package watchers and the Tauri desktop app. |
+| `pnpm build` | Build every workspace package and the frontend. |
+| `pnpm tauri:build` | Produce local desktop bundles. |
+| `pnpm typecheck` | Run workspace TypeScript checks. |
+| `pnpm lint` | Run workspace lint tasks. |
+| `pnpm test` | Run workspace tests. |
+| `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --features quic` | Run the Rust suite with HTTP/3 enabled. |
 
 ## Plugins
 
-Plugins run in an embedded V8 runtime and can short-circuit requests, modify upstream responses, persist local state, register sandboxed UI panels, and show notifications. See [docs/plugins.md](docs/plugins.md) for the package contract and [examples/postgate-plugin-mock-api](examples/postgate-plugin-mock-api) for an installable example.
+Plugins are npm packages named `postgate-plugin-*`. They can intercept requests and responses, persist local state, register sandboxed panels, and show notifications from an embedded V8 runtime. Start with the [plugin guide](docs/plugins.md) and the [mock API example](examples/postgate-plugin-mock-api).
 
-## Releases And Updates
+## Security
 
-Desktop releases are built for macOS, Linux, and Windows through GitHub Actions. The workflow signs Tauri updater artifacts, validates the cross-platform `latest.json` manifest, and publishes the draft only after every platform is present. See [docs/releases.md](docs/releases.md) for required secrets and the release procedure.
-
-## Profile Backup And Sync
-
-PostGate profiles are portable JSON snapshots. A profile can include:
-
-- Rule groups and reusable values
-- Replay collections and saved requests
-- Root CA certificate and private key
-- Proxy, theme, columns, update, and sync settings
-
-Manual transfer is available from `Settings -> Profile Transfer`. Sync uses the same snapshot format from `Settings -> Settings Sync` and currently supports:
-
-- iCloud Drive: writes `postgate-profile.json` under `Cloud Drive/Documents/PostGate` by default on macOS.
-- WebDAV: uploads and downloads the same JSON profile using `HEAD`, `GET`, `PUT`, and `MKCOL`.
-
-Profile files are sensitive because they can contain the PostGate root CA private key and WebDAV credentials. Store them only in locations you trust.
-
-## Security Notes
-
-PostGate is intended for local development. By default, proxy services should stay bound to localhost unless you deliberately expose them. Installing the root CA allows HTTPS inspection for traffic routed through PostGate, so remove or rotate the CA if the profile or key is shared accidentally.
-
-Sensitive headers such as `Authorization` and `Cookie` should be treated carefully when exporting captures, replay collections, or profile data.
-
-## Protocol Compatibility
-
-Rule compatibility is tracked against Whistle v2.10.6 in [docs/whistle-compatibility.md](docs/whistle-compatibility.md). PostGate rejects or reports protocols it cannot faithfully apply instead of silently treating them as successful rules.
-
-The default local desktop build does not include QUIC dependencies. Automated GitHub releases include the feature; build or test it locally with:
-
-```bash
-cd apps/desktop/src-tauri
-cargo test --features quic
-```
-
-## Roadmap
-
-- MASQUE `CONNECT-UDP` support for standards-based UDP tunneling through the HTTP/3 ingress.
-- Team-oriented sharing for rules and replay collections.
-- Deeper plugin sandboxing and permission controls.
-- Mobile companion workflows for remote debugging.
+PostGate is intended for local development. Keep proxy and debug services bound to localhost unless remote access is deliberate. Installing the root CA allows PostGate to decrypt traffic routed through it; rotate the CA if its private key is exposed, and review captures before sharing them because headers and bodies may contain credentials.
 
 ## License
 
-MIT
+[MIT](LICENSE)

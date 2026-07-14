@@ -57,6 +57,7 @@ pub async fn start_runtime(
     port: u16,
     allowed_origins: Vec<String>,
 ) -> Result<McpRuntime> {
+    validate_port(port)?;
     let addr: SocketAddr = format!("127.0.0.1:{port}")
         .parse()
         .map_err(|e| PostGateError::InvalidState(format!("Invalid MCP address: {}", e)))?;
@@ -142,6 +143,7 @@ pub async fn start_server(
     let db = state.get_database().await?;
     let mut settings = db.get_mcp_settings().await?;
     if let Some(port) = port {
+        validate_port(port)?;
         settings.port = port;
     }
     if let Some(origins) = allowed_origins {
@@ -176,6 +178,15 @@ pub async fn start_server(
     *state.mcp_runtime.write().await = Some(runtime);
     db.save_mcp_settings(&settings).await?;
     status(&state, None).await
+}
+
+fn validate_port(port: u16) -> Result<()> {
+    if port == 0 {
+        return Err(PostGateError::InvalidState(
+            "MCP port must be between 1 and 65535".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn stop_server(state: Arc<AppState>, update_settings: bool) -> Result<McpStatus> {
@@ -417,4 +428,15 @@ fn loopback_origins(port: u16, configured: &[String]) -> Vec<String> {
         }
     }
     origins
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_port;
+
+    #[test]
+    fn mcp_listener_rejects_port_zero() {
+        assert!(validate_port(0).is_err());
+        assert!(validate_port(18999).is_ok());
+    }
 }

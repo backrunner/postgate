@@ -21,6 +21,7 @@ pub async fn start_proxy(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ProxyStatusResponse> {
     tracing::info!("Starting proxy with config: {:?}", config);
+    config.validate()?;
 
     // Ensure rules are loaded from database before starting proxy
     // (Rules page may not have been visited yet)

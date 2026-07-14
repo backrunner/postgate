@@ -33,9 +33,8 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useProxyStore } from "@/stores/proxy";
 import { useThemeStore } from "@/stores/theme";
-import { useUpdaterStore, initUpdaterSettings } from "@/stores/updater";
+import { useUpdaterStore } from "@/stores/updater";
 import { invoke } from "@tauri-apps/api/core";
-import { downloadDir } from "@tauri-apps/api/path";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   DropdownMenu,
@@ -54,6 +53,7 @@ import {
   formatTimestamp,
   InfoItem,
   ProfileChip,
+  PortInput,
   Section,
   SettingRow,
   StatusLine,
@@ -133,6 +133,11 @@ interface CertificateInfo {
   pem: string;
 }
 
+interface RuntimeCapabilities {
+  quic: boolean;
+  icloudSync: boolean;
+}
+
 const profileOptions: ProfileOptions = {
   includeRules: true,
   includeValues: true,
@@ -155,7 +160,7 @@ const defaultSyncSettings: SyncSettings = {
 };
 
 export function SettingsPage() {
-  const { config, setConfig } = useProxyStore();
+  const { config, status: proxyStatus, setConfig } = useProxyStore();
   const { theme, setTheme } = useThemeStore();
   const columns = useColumnsStore((state) => state.columns);
   const loadRuleGroups = useRulesStore((state) => state.loadGroups);
@@ -165,6 +170,7 @@ export function SettingsPage() {
     currentVersion,
     isChecking,
     isDownloading,
+    isDownloaded,
     isInstalling,
     downloadProgress,
     updateAvailable,
@@ -175,6 +181,7 @@ export function SettingsPage() {
     autoDownload,
     checkForUpdates,
     downloadAndInstall,
+    installUpdate,
     setAutoCheck,
     setAutoDownload,
   } = useUpdaterStore();
@@ -195,24 +202,28 @@ export function SettingsPage() {
   const [syncStatusText, setSyncStatusText] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncBusy, setSyncBusy] = useState<"save" | "push" | "pull" | null>(null);
-
-  useEffect(() => {
-    initUpdaterSettings();
-  }, []);
+  const [runtimeCapabilities, setRuntimeCapabilities] = useState<RuntimeCapabilities | null>(null);
 
   useEffect(() => {
     let isCurrent = true;
 
     void (async () => {
-      try {
-        const info = await invoke<CertificateInfo>("get_ca_certificate");
-        if (isCurrent) {
-          setCertInstalled(info.installed);
-        }
-      } catch (e) {
-        if (isCurrent) {
-          setCertError(String(e));
-        }
+      const [certificateResult, capabilitiesResult] = await Promise.allSettled([
+        invoke<CertificateInfo>("get_ca_certificate"),
+        invoke<RuntimeCapabilities>("get_runtime_capabilities"),
+      ]);
+      if (!isCurrent) return;
+
+      if (certificateResult.status === "fulfilled") {
+        setCertInstalled(certificateResult.value.installed);
+      } else {
+        setCertError(String(certificateResult.reason));
+      }
+
+      if (capabilitiesResult.status === "fulfilled") {
+        setRuntimeCapabilities(capabilitiesResult.value);
+      } else {
+        setRuntimeCapabilities({ quic: false, icloudSync: false });
       }
     })();
 
@@ -236,21 +247,28 @@ export function SettingsPage() {
     },
   });
 
-  const normalizeSyncSettings = useCallback((settings: SyncSettings): SyncSettings => ({
-    ...defaultSyncSettings,
-    ...settings,
-    webdav: {
-      ...defaultSyncSettings.webdav!,
-      ...(settings.webdav ?? {}),
-    },
-  }), []);
+  const normalizeSyncSettings = useCallback((settings: SyncSettings): SyncSettings => {
+    const normalized = {
+      ...defaultSyncSettings,
+      ...settings,
+      webdav: {
+        ...defaultSyncSettings.webdav!,
+        ...(settings.webdav ?? {}),
+      },
+    };
+    if (runtimeCapabilities?.icloudSync === false && normalized.provider === "icloud") {
+      normalized.provider = "webdav";
+    }
+    return normalized;
+  }, [runtimeCapabilities?.icloudSync]);
 
   const loadSyncStatus = useCallback(async (isCurrent: () => boolean = () => true) => {
     try {
       const status = await invoke<SyncStatus>("get_sync_status");
       if (!isCurrent()) return;
-      setSyncSettings(normalizeSyncSettings(status.config));
-      setSyncPath(status.localPath);
+      const normalized = normalizeSyncSettings(status.config);
+      setSyncSettings(normalized);
+      setSyncPath(normalized.provider === status.config.provider ? status.localPath : null);
       setSyncRemoteAvailable(status.remoteAvailable);
     } catch (e) {
       if (!isCurrent()) return;
@@ -476,8 +494,12 @@ export function SettingsPage() {
     setCertError(null);
     setCertExported(null);
     try {
-      const downloadsPath = await downloadDir();
-      const exportPath = `${downloadsPath}/postgate-ca.pem`;
+      const exportPath = await save({
+        title: "Export PostGate root certificate",
+        defaultPath: "postgate-ca.pem",
+        filters: [{ name: "PEM Certificate", extensions: ["pem", "crt"] }],
+      });
+      if (!exportPath) return;
       await invoke("export_ca_certificate", { path: exportPath });
       setCertExported(exportPath);
     } catch (e) {
@@ -495,6 +517,8 @@ export function SettingsPage() {
     if (diff < 86400000) return `${Math.floor(diff / 3600000)} hours ago`;
     return new Date(lastChecked).toLocaleDateString();
   };
+
+  const proxyConfigLocked = ["starting", "running", "stopping"].includes(proxyStatus);
 
   return (
     <div className="flex h-full flex-col">
@@ -557,8 +581,11 @@ export function SettingsPage() {
                       )}
                     </div>
                     {!isDownloading && !isInstalling && (
-                      <Button size="sm" onClick={() => downloadAndInstall()}>
-                        Download & Install
+                      <Button
+                        size="sm"
+                        onClick={() => isDownloaded ? installUpdate() : downloadAndInstall()}
+                      >
+                        {isDownloaded ? "Install & Restart" : "Download & Install"}
                       </Button>
                     )}
                   </div>
@@ -570,6 +597,13 @@ export function SettingsPage() {
                         <span>{downloadProgress}%</span>
                       </div>
                       <Progress value={downloadProgress} className="h-1.5" />
+                    </div>
+                  )}
+
+                  {isDownloaded && !isInstalling && (
+                    <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                      <Check className="h-3.5 w-3.5" />
+                      Update downloaded and ready to install
                     </div>
                   )}
 
@@ -620,13 +654,10 @@ export function SettingsPage() {
                 label="Port"
                 description="The local port the proxy server listens on"
               >
-                <Input
-                  type="number"
+                <PortInput
                   value={config.port}
-                  onChange={(e) => setConfig({ port: parseInt(e.target.value) || 8899 })}
-                  className="w-24 text-right font-mono h-8 text-sm"
-                  min={1}
-                  max={65535}
+                  onChange={(port) => setConfig({ port })}
+                  disabled={proxyConfigLocked}
                 />
               </SettingRow>
 
@@ -638,17 +669,21 @@ export function SettingsPage() {
                 <Switch
                   checked={config.enableHttp2}
                   onCheckedChange={(checked) => setConfig({ enableHttp2: checked })}
+                  disabled={proxyConfigLocked}
                 />
               </SettingRow>
 
               <SettingRow
                 icon={<Network className="h-4 w-4" />}
                 label="QUIC / HTTP/3"
-                description="Experimental support for QUIC protocol"
+                description={runtimeCapabilities?.quic === false
+                  ? "Not included in this build"
+                  : "Experimental support for QUIC protocol"}
               >
                 <Switch
                   checked={config.enableQuic}
                   onCheckedChange={(checked) => setConfig({ enableQuic: checked })}
+                  disabled={proxyConfigLocked || runtimeCapabilities?.quic !== true}
                 />
               </SettingRow>
 
@@ -657,13 +692,10 @@ export function SettingsPage() {
                 label="Debug Server Port"
                 description="Port for Chrome DevTools Protocol debugging"
               >
-                <Input
-                  type="number"
+                <PortInput
                   value={config.debugPort}
-                  onChange={(e) => setConfig({ debugPort: parseInt(e.target.value) || 9229 })}
-                  className="w-24 text-right font-mono h-8 text-sm"
-                  min={1}
-                  max={65535}
+                  onChange={(debugPort) => setConfig({ debugPort })}
+                  disabled={proxyConfigLocked}
                 />
               </SettingRow>
             </div>
@@ -850,6 +882,7 @@ export function SettingsPage() {
                     <DropdownMenuItem
                       className="text-xs"
                       onClick={() => setSyncSettings((prev) => ({ ...prev, provider: "icloud" }))}
+                      disabled={runtimeCapabilities?.icloudSync === false}
                     >
                       iCloud
                     </DropdownMenuItem>

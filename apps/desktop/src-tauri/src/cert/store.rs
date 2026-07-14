@@ -130,51 +130,62 @@ impl CertStore {
 
     #[cfg(target_os = "linux")]
     pub fn install_to_system(&self, pem: &str) -> Result<()> {
+        use std::io::Write;
         use std::process::Command;
 
-        // Try different methods based on distro
+        let (cert_path, install_script) =
+            if PathBuf::from("/usr/local/share/ca-certificates").exists() {
+                (
+                    PathBuf::from("/usr/local/share/ca-certificates/postgate-ca.crt"),
+                    "install -m 0644 \"$1\" \"$2\" && update-ca-certificates",
+                )
+            } else if PathBuf::from("/etc/pki/ca-trust/source/anchors").exists() {
+                (
+                    PathBuf::from("/etc/pki/ca-trust/source/anchors/postgate-ca.crt"),
+                    "install -m 0644 \"$1\" \"$2\" && update-ca-trust extract",
+                )
+            } else {
+                return Err(PostGateError::Certificate(
+                    "Could not find a supported system certificate directory".into(),
+                ));
+            };
 
-        // Method 1: Debian/Ubuntu
-        let cert_dir = PathBuf::from("/usr/local/share/ca-certificates");
-        if cert_dir.exists() {
-            let cert_path = cert_dir.join("postgate-ca.crt");
-            std::fs::write(&cert_path, pem)?;
+        let mut temp_file = tempfile::NamedTempFile::new()?;
+        temp_file.write_all(pem.as_bytes())?;
+        temp_file.flush()?;
 
-            let output = Command::new("update-ca-certificates").output()?;
+        let output = Command::new("pkexec")
+            .args(["sh", "-c", install_script, "postgate-ca-install"])
+            .arg(temp_file.path())
+            .arg(&cert_path)
+            .output()
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    PostGateError::Certificate(
+                        "pkexec is required to install the certificate. Export it and install it manually instead."
+                            .into(),
+                    )
+                } else {
+                    PostGateError::Io(error)
+                }
+            })?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(PostGateError::Certificate(format!(
-                    "Failed to update certificates: {}",
-                    stderr
-                )));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.to_ascii_lowercase().contains("cancel")
+                || stderr.to_ascii_lowercase().contains("dismiss")
+            {
+                return Err(PostGateError::Certificate(
+                    "Installation cancelled by user".into(),
+                ));
             }
-
-            return Ok(());
+            return Err(PostGateError::Certificate(format!(
+                "Failed to install certificate: {}",
+                stderr.trim()
+            )));
         }
 
-        // Method 2: Fedora/RHEL
-        let cert_dir = PathBuf::from("/etc/pki/ca-trust/source/anchors");
-        if cert_dir.exists() {
-            let cert_path = cert_dir.join("postgate-ca.crt");
-            std::fs::write(&cert_path, pem)?;
-
-            let output = Command::new("update-ca-trust").arg("extract").output()?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(PostGateError::Certificate(format!(
-                    "Failed to update certificates: {}",
-                    stderr
-                )));
-            }
-
-            return Ok(());
-        }
-
-        Err(PostGateError::Certificate(
-            "Could not find system certificate directory".into(),
-        ))
+        Ok(())
     }
 }
 

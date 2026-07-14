@@ -1,4 +1,20 @@
+use serde::Serialize;
 use tauri::Manager;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCapabilities {
+    pub quic: bool,
+    pub icloud_sync: bool,
+}
+
+#[tauri::command]
+pub fn get_runtime_capabilities() -> RuntimeCapabilities {
+    RuntimeCapabilities {
+        quic: cfg!(feature = "quic"),
+        icloud_sync: cfg!(target_os = "macos"),
+    }
+}
 
 /// Show the main window - called by frontend when ready
 #[tauri::command]

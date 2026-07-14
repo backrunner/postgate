@@ -5,6 +5,7 @@ import { PluginToastViewport } from "@/components/plugins/PluginToastViewport";
 import { useThemeStore } from "@/stores/theme";
 import { usePluginsStore } from "@/stores/plugins";
 import { useRulesStore } from "@/stores/rules";
+import { initUpdaterSettings } from "@/stores/updater";
 
 // 路由懒加载
 const CapturePage = lazy(() => import("@/pages/Capture").then(m => ({ default: m.CapturePage })));
@@ -32,17 +33,29 @@ function App() {
 
   useEffect(() => {
     const root = window.document.documentElement;
-    root.classList.remove("light", "dark");
-
-    if (theme === "system") {
-      const systemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches
+    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      root.classList.remove("light", "dark");
+      if (theme !== "system") {
+        root.classList.add(theme);
+        return;
+      }
+      const resolvedTheme = systemTheme.matches
         ? "dark"
         : "light";
-      root.classList.add(systemTheme);
-    } else {
-      root.classList.add(theme);
+      root.classList.add(resolvedTheme);
+    };
+
+    applyTheme();
+    if (theme === "system") {
+      systemTheme.addEventListener("change", applyTheme);
+      return () => systemTheme.removeEventListener("change", applyTheme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    initUpdaterSettings();
+  }, []);
 
   // Initialize plugin event listeners on mount
   useEffect(() => {

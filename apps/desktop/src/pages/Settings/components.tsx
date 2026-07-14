@@ -1,6 +1,70 @@
-import type { ReactNode } from "react";
+import { useState, type KeyboardEvent, type ReactNode } from "react";
 import { AlertCircle, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Input } from "@/components/ui/input";
+
+const MIN_PORT = 1;
+const MAX_PORT = 65535;
+
+function parsePort(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= MIN_PORT && parsed <= MAX_PORT
+    ? parsed
+    : null;
+}
+
+export function PortInput({
+  value,
+  onChange,
+  disabled,
+  className,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const displayedValue = draft ?? String(value);
+  const valid = parsePort(displayedValue) !== null;
+
+  const commit = () => {
+    const next = parsePort(displayedValue);
+    if (next === null) {
+      setDraft(null);
+      return;
+    }
+    onChange(next);
+    setDraft(null);
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.currentTarget.blur();
+    } else if (event.key === "Escape") {
+      setDraft(null);
+      event.currentTarget.blur();
+    }
+  };
+
+  return (
+    <Input
+      type="number"
+      inputMode="numeric"
+      value={displayedValue}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={handleKeyDown}
+      onWheel={(event) => event.currentTarget.blur()}
+      min={MIN_PORT}
+      max={MAX_PORT}
+      disabled={disabled}
+      aria-invalid={!valid}
+      className={cn("w-24 text-right font-mono h-8 text-sm", className)}
+    />
+  );
+}
 
 export function Section({
   title,

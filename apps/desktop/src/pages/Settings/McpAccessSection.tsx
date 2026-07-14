@@ -23,7 +23,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { formatTimestamp, Section, SettingRow, StatusLine } from "./components";
+import { formatTimestamp, PortInput, Section, SettingRow, StatusLine } from "./components";
 
 interface McpStatus {
   enabled: boolean;
@@ -253,13 +253,9 @@ export function McpAccessSection() {
           label="MCP Port"
           description="Streamable HTTP endpoint bound to 127.0.0.1"
         >
-          <Input
-            type="number"
+          <PortInput
             value={mcpPort}
-            onChange={(e) => setMcpPort(parseInt(e.target.value) || 18999)}
-            className="w-24 text-right font-mono h-8 text-sm"
-            min={1}
-            max={65535}
+            onChange={setMcpPort}
             disabled={mcpStatus?.running}
           />
         </SettingRow>

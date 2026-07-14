@@ -57,6 +57,27 @@ impl Default for ProxyConfig {
     }
 }
 
+impl ProxyConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.port == 0 {
+            return Err(PostGateError::InvalidState(
+                "Proxy port must be between 1 and 65535".into(),
+            ));
+        }
+        if self.debug_port == 0 {
+            return Err(PostGateError::InvalidState(
+                "Debug server port must be between 1 and 65535".into(),
+            ));
+        }
+        if self.quic_port == Some(0) {
+            return Err(PostGateError::InvalidState(
+                "QUIC port must be between 1 and 65535".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Proxy server status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -117,6 +138,8 @@ impl ProxyServer {
 
     /// Start the proxy server
     pub async fn start(&mut self) -> Result<()> {
+        self.config.validate()?;
+
         if self.running.load(Ordering::SeqCst) {
             return Err(PostGateError::InvalidState("Proxy already running".into()));
         }
@@ -246,5 +269,27 @@ impl ProxyServer {
     /// Get the configuration
     pub fn config(&self) -> &ProxyConfig {
         &self.config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxyConfig;
+
+    #[test]
+    fn validates_listener_ports() {
+        assert!(ProxyConfig::default().validate().is_ok());
+
+        let mut config = ProxyConfig::default();
+        config.port = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = ProxyConfig::default();
+        config.debug_port = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = ProxyConfig::default();
+        config.quic_port = Some(0);
+        assert!(config.validate().is_err());
     }
 }

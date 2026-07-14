@@ -18,6 +18,7 @@ interface UpdaterState {
   // Update status
   isChecking: boolean;
   isDownloading: boolean;
+  isDownloaded: boolean;
   isInstalling: boolean;
   downloadProgress: number;
   
@@ -34,6 +35,8 @@ interface UpdaterState {
   // Actions
   fetchCurrentVersion: () => Promise<void>;
   checkForUpdates: (options?: CheckForUpdatesOptions) => Promise<boolean>;
+  downloadUpdate: () => Promise<void>;
+  installUpdate: () => Promise<void>;
   downloadAndInstall: () => Promise<void>;
   setAutoCheck: (enabled: boolean) => void;
   setAutoDownload: (enabled: boolean) => void;
@@ -45,12 +48,20 @@ interface CheckForUpdatesOptions {
 
 // Store the update object for later use
 let pendingUpdate: Update | null = null;
+let updaterInitialized = false;
+
+const LAST_CHECKED_KEY = "postgate:lastUpdateCheck";
+
+function persistLastChecked(timestamp: number) {
+  localStorage.setItem(LAST_CHECKED_KEY, String(timestamp));
+}
 
 export const useUpdaterStore = create<UpdaterState>((set, get) => ({
   // Initial state
   currentVersion: "0.0.0",
   isChecking: false,
   isDownloading: false,
+  isDownloaded: false,
   isInstalling: false,
   downloadProgress: 0,
   updateAvailable: false,
@@ -72,6 +83,9 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
 
   checkForUpdates: async (options = {}) => {
     const { silent = false } = options;
+    if (get().isChecking) {
+      return get().updateAvailable;
+    }
     set((state) => ({
       isChecking: true,
       error: silent ? state.error : null,
@@ -79,32 +93,45 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     
     try {
       const update = await check();
+      const checkedAt = Date.now();
+      persistLastChecked(checkedAt);
       
       if (update) {
+        if (pendingUpdate) {
+          await pendingUpdate.close().catch(() => undefined);
+        }
         pendingUpdate = update;
         set({
           updateAvailable: true,
+          isDownloaded: false,
           updateInfo: {
             version: update.version,
             date: update.date || null,
             body: update.body || null,
           },
-          lastChecked: Date.now(),
+          lastChecked: checkedAt,
           isChecking: false,
+          error: null,
         });
         
         // Auto-download if enabled
         if (get().autoDownload) {
-          get().downloadAndInstall();
+          void get().downloadUpdate();
         }
         
         return true;
       } else {
+        if (pendingUpdate) {
+          await pendingUpdate.close().catch(() => undefined);
+          pendingUpdate = null;
+        }
         set({
           updateAvailable: false,
+          isDownloaded: false,
           updateInfo: null,
-          lastChecked: Date.now(),
+          lastChecked: checkedAt,
           isChecking: false,
+          error: null,
         });
         return false;
       }
@@ -117,19 +144,20 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
     }
   },
 
-  downloadAndInstall: async () => {
+  downloadUpdate: async () => {
     if (!pendingUpdate) {
       set({ error: "No update available" });
       return;
     }
+    if (get().isDownloading || get().isDownloaded) return;
 
-    set({ isDownloading: true, downloadProgress: 0, error: null });
+    set({ isDownloading: true, isDownloaded: false, downloadProgress: 0, error: null });
 
     try {
       let downloaded = 0;
       let contentLength = 0;
 
-      await pendingUpdate.downloadAndInstall((event) => {
+      await pendingUpdate.download((event) => {
         switch (event.event) {
           case "Started":
             contentLength = event.data.contentLength || 0;
@@ -145,20 +173,44 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
           }
           case "Finished":
             console.log("Download finished");
-            set({ isDownloading: false, isInstalling: true });
+            set({ isDownloading: false, isDownloaded: true, downloadProgress: 100 });
             break;
         }
       });
-
-      // After installation, relaunch the app
-      console.log("Update installed, relaunching...");
-      await relaunch();
+      set({ isDownloading: false, isDownloaded: true, downloadProgress: 100 });
     } catch (e) {
       set({
         error: String(e),
         isDownloading: false,
-        isInstalling: false,
+        isDownloaded: false,
       });
+    }
+  },
+
+  installUpdate: async () => {
+    if (!pendingUpdate || !get().isDownloaded) {
+      set({ error: "Download the update before installing it" });
+      return;
+    }
+    if (get().isInstalling) return;
+
+    set({ isInstalling: true, error: null });
+    try {
+      await pendingUpdate.install();
+      await pendingUpdate.close().catch(() => undefined);
+      pendingUpdate = null;
+      await relaunch();
+    } catch (e) {
+      set({ error: String(e), isInstalling: false });
+    }
+  },
+
+  downloadAndInstall: async () => {
+    if (!get().isDownloaded) {
+      await get().downloadUpdate();
+    }
+    if (get().isDownloaded) {
+      await get().installUpdate();
     }
   },
 
@@ -177,25 +229,30 @@ export const useUpdaterStore = create<UpdaterState>((set, get) => ({
 
 // Initialize settings from localStorage
 export function initUpdaterSettings() {
-  const store = useUpdaterStore.getState();
+  if (updaterInitialized) return;
+  updaterInitialized = true;
   
   const autoCheck = localStorage.getItem("postgate:autoCheckUpdates");
   const autoDownload = localStorage.getItem("postgate:autoDownloadUpdates");
+  const lastChecked = Number(localStorage.getItem(LAST_CHECKED_KEY));
   
-  if (autoCheck !== null) {
-    store.setAutoCheck(autoCheck === "true");
-  }
-  if (autoDownload !== null) {
-    store.setAutoDownload(autoDownload === "true");
-  }
+  useUpdaterStore.setState((state) => ({
+    autoCheck: autoCheck === null ? state.autoCheck : autoCheck === "true",
+    autoDownload: autoDownload === null ? state.autoDownload : autoDownload === "true",
+    lastChecked: Number.isFinite(lastChecked) && lastChecked > 0 ? lastChecked : null,
+  }));
+
+  const store = useUpdaterStore.getState();
   
   // Fetch current version
-  store.fetchCurrentVersion();
+  void store.fetchCurrentVersion();
   
   // Auto-check for updates on startup if enabled
   if (useUpdaterStore.getState().autoCheck) {
     setTimeout(() => {
-      store.checkForUpdates({ silent: true });
+      if (useUpdaterStore.getState().autoCheck) {
+        void useUpdaterStore.getState().checkForUpdates({ silent: true });
+      }
     }, 3000); // Delay 3 seconds after startup
   }
 }

@@ -292,12 +292,19 @@ pub async fn save_sync_settings(
     settings: SyncSettings,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SyncStatus> {
+    if settings.enabled {
+        validate_sync_provider_available(&settings)?;
+    }
     validate_sync_settings(&settings)?;
     write_sync_config(&state, &settings).await?;
     let local_path = sync_location(&state, &settings)?;
-    let remote_available = sync_snapshot_exists(&settings, &local_path)
-        .await
-        .unwrap_or(false);
+    let remote_available = if settings.enabled {
+        sync_snapshot_exists(&settings, &local_path)
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     Ok(SyncStatus {
         config: settings,
@@ -312,6 +319,8 @@ pub async fn push_sync_profile(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ProfileSummary> {
     let mut sync_settings = read_sync_config(&state).await?.unwrap_or_default();
+    validate_sync_enabled(&sync_settings)?;
+    validate_sync_provider_available(&sync_settings)?;
     validate_sync_settings(&sync_settings)?;
     sync_settings.last_synced_at = Some(chrono::Utc::now().timestamp_millis());
     write_sync_config(&state, &sync_settings).await?;
@@ -331,6 +340,8 @@ pub async fn push_sync_profile(
 #[tauri::command]
 pub async fn pull_sync_profile(state: State<'_, Arc<AppState>>) -> Result<SyncPullResult> {
     let mut sync_settings = read_sync_config(&state).await?.unwrap_or_default();
+    validate_sync_enabled(&sync_settings)?;
+    validate_sync_provider_available(&sync_settings)?;
     validate_sync_settings(&sync_settings)?;
     let path = sync_location(&state, &sync_settings)?;
     let snapshot = read_sync_snapshot(&sync_settings, &path).await?;
@@ -514,6 +525,26 @@ fn validate_snapshot(snapshot: &ProfileSnapshot) -> Result<()> {
         )));
     }
 
+    if let Some(proxy) = snapshot
+        .app_settings
+        .as_ref()
+        .and_then(|settings| settings.proxy.as_ref())
+    {
+        if proxy.port == 0 || proxy.debug_port == 0 || proxy.quic_port == Some(0) {
+            return Err(PostGateError::InvalidState(
+                "Profile contains an invalid proxy port".into(),
+            ));
+        }
+    }
+
+    if let Some(sync_settings) = &snapshot.sync_settings {
+        validate_sync_settings(sync_settings)?;
+    }
+
+    if let Some(certificate) = &snapshot.certificate {
+        CertificateAuthority::load_from_pem(&certificate.cert_pem, &certificate.key_pem)?;
+    }
+
     Ok(())
 }
 
@@ -531,6 +562,7 @@ async fn write_snapshot(path: &Path, snapshot: &ProfileSnapshot) -> Result<()> {
 
     let content = serde_json::to_string_pretty(snapshot)?;
     tokio::fs::write(path, content).await?;
+    restrict_file_permissions(path).await?;
     Ok(())
 }
 
@@ -569,7 +601,8 @@ async fn write_sync_config(state: &Arc<AppState>, settings: &SyncSettings) -> Re
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(path, serde_json::to_string_pretty(settings)?).await?;
+    tokio::fs::write(&path, serde_json::to_string_pretty(settings)?).await?;
+    restrict_file_permissions(&path).await?;
     Ok(())
 }
 
@@ -602,7 +635,7 @@ fn sync_location(state: &Arc<AppState>, settings: &SyncSettings) -> Result<Strin
 }
 
 fn validate_sync_settings(settings: &SyncSettings) -> Result<()> {
-    if settings.provider == SyncProvider::Webdav {
+    if settings.enabled && settings.provider == SyncProvider::Webdav {
         let webdav = settings
             .webdav
             .as_ref()
@@ -621,6 +654,35 @@ fn validate_sync_settings(settings: &SyncSettings) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_sync_enabled(settings: &SyncSettings) -> Result<()> {
+    if !settings.enabled {
+        return Err(PostGateError::InvalidState("Sync is disabled".into()));
+    }
+    Ok(())
+}
+
+fn validate_sync_provider_available(settings: &SyncSettings) -> Result<()> {
+    if settings.provider == SyncProvider::Icloud && !cfg!(target_os = "macos") {
+        return Err(PostGateError::InvalidState(
+            "iCloud sync is only available on macOS".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn restrict_file_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn restrict_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -846,5 +908,83 @@ impl RuleGroupBackup {
             updated_at: self.updated_at,
             inline_values,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn webdav_settings(enabled: bool, endpoint: &str) -> SyncSettings {
+        SyncSettings {
+            enabled,
+            provider: SyncProvider::Webdav,
+            remote_path: None,
+            webdav: Some(WebDavSettings {
+                endpoint: endpoint.to_string(),
+                username: String::new(),
+                password: String::new(),
+            }),
+            last_synced_at: None,
+        }
+    }
+
+    fn empty_snapshot() -> ProfileSnapshot {
+        ProfileSnapshot {
+            format: PROFILE_FORMAT.to_string(),
+            version: PROFILE_VERSION,
+            exported_at: 0,
+            app_settings: None,
+            sync_settings: None,
+            rules: Vec::new(),
+            values: Vec::new(),
+            replay: None,
+            certificate: None,
+        }
+    }
+
+    #[test]
+    fn disabled_webdav_does_not_require_an_endpoint() {
+        assert!(validate_sync_settings(&webdav_settings(false, "")).is_ok());
+    }
+
+    #[test]
+    fn enabled_webdav_requires_an_http_endpoint() {
+        assert!(validate_sync_settings(&webdav_settings(true, "")).is_err());
+        assert!(validate_sync_settings(&webdav_settings(true, "ftp://example.com")).is_err());
+        assert!(validate_sync_settings(&webdav_settings(true, "https://dav.example.com")).is_ok());
+    }
+
+    #[test]
+    fn disabled_sync_cannot_push_or_pull() {
+        assert!(validate_sync_enabled(&SyncSettings::default()).is_err());
+    }
+
+    #[test]
+    fn profile_rejects_zero_proxy_ports() {
+        let mut snapshot = empty_snapshot();
+        snapshot.app_settings = Some(AppSettings {
+            proxy: Some(ProxySettings {
+                port: 0,
+                enable_http2: true,
+                enable_quic: false,
+                quic_port: None,
+                debug_port: 9229,
+            }),
+            ..AppSettings::default()
+        });
+
+        assert!(validate_snapshot(&snapshot).is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn icloud_sync_is_rejected_outside_macos() {
+        let settings = SyncSettings {
+            enabled: true,
+            provider: SyncProvider::Icloud,
+            ..SyncSettings::default()
+        };
+        assert!(validate_sync_provider_available(&settings).is_err());
     }
 }

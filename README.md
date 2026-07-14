@@ -96,6 +96,10 @@ postgate/
 
 Plugins run in an embedded V8 runtime and can short-circuit requests, modify upstream responses, persist local state, register sandboxed UI panels, and show notifications. See [docs/plugins.md](docs/plugins.md) for the package contract and [examples/postgate-plugin-mock-api](examples/postgate-plugin-mock-api) for an installable example.
 
+## Releases And Updates
+
+Desktop releases are built for macOS, Linux, and Windows through GitHub Actions. The workflow signs Tauri updater artifacts, validates the cross-platform `latest.json` manifest, and publishes the draft only after every platform is present. See [docs/releases.md](docs/releases.md) for required secrets and the release procedure.
+
 ## Profile Backup And Sync
 
 PostGate profiles are portable JSON snapshots. A profile can include:
@@ -122,7 +126,7 @@ Sensitive headers such as `Authorization` and `Cookie` should be treated careful
 
 Rule compatibility is tracked against Whistle v2.10.6 in [docs/whistle-compatibility.md](docs/whistle-compatibility.md). PostGate rejects or reports protocols it cannot faithfully apply instead of silently treating them as successful rules.
 
-The default desktop build does not include QUIC dependencies. Build or test the HTTP/3 ingress explicitly with:
+The default local desktop build does not include QUIC dependencies. Automated GitHub releases include the feature; build or test it locally with:
 
 ```bash
 cd apps/desktop/src-tauri

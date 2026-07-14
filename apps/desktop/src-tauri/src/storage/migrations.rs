@@ -140,6 +140,20 @@ impl Database {
 
         sqlx::query(
             r#"
+            CREATE TABLE IF NOT EXISTS plugin_states (
+                plugin_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                config TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(self.pool())
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Migration failed (plugin_states): {}", e)))?;
+
+        sqlx::query(
+            r#"
             CREATE TABLE IF NOT EXISTS values_store (
                 name TEXT PRIMARY KEY,
                 content TEXT NOT NULL,

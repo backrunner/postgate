@@ -5,13 +5,14 @@
 //! the Deno Core runtime and exposed to JavaScript code.
 
 use crate::plugin::storage::PluginStorage;
-use crate::plugin::types::{PluginPanel, PluginResponse};
+use crate::plugin::types::{PluginPanel, PluginPanelRef, PluginResponse};
+use dashmap::DashMap;
 use deno_core::{extension, op2, OpState};
 use deno_error::JsError;
 use serde::Serialize;
 use std::cell::RefCell;
 use std::rc::Rc;
-use tokio::sync::mpsc;
+use std::sync::Arc;
 
 /// Custom error type for plugin operations that implements JsErrorClass
 #[derive(Debug, thiserror::Error, JsError)]
@@ -23,45 +24,16 @@ pub enum PluginOpError {
     Plugin(String),
 }
 
-/// Events that can be sent from ops to the runtime
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum PluginEvent {
-    Log {
-        level: String,
-        message: String,
-        args: Vec<serde_json::Value>,
-    },
-    PanelRegistered {
-        panel: PluginPanel,
-    },
-    PanelUnregistered {
-        panel_id: String,
-    },
-    Toast {
-        message: String,
-        toast_type: Option<String>,
-    },
-    Response {
-        request_id: String,
-        response: Option<PluginResponse>,
-    },
-    ModifiedResponse {
-        request_id: String,
-        response: PluginResponse,
-    },
-    Loaded,
-    Error {
-        message: String,
-    },
-}
-
 /// Op state that is shared with all ops
 pub struct PluginOpState {
     pub plugin_id: String,
     pub storage: PluginStorage,
-    pub event_sender: mpsc::UnboundedSender<PluginEvent>,
+    pub panels: Arc<DashMap<String, PluginPanel>>,
     pub app_handle: Option<tauri::AppHandle>,
+}
+
+fn panel_key(plugin_id: &str, panel_id: &str) -> String {
+    format!("{plugin_id}\0{panel_id}")
 }
 
 // ============================================================================
@@ -81,13 +53,6 @@ fn op_log(state: &mut OpState, #[string] level: String, #[string] message: Strin
         "error" => tracing::error!("[plugin:{}] {}", plugin_id, message),
         _ => tracing::info!("[plugin:{}] {}", plugin_id, message),
     }
-
-    // Send event
-    let _ = op_state.event_sender.send(PluginEvent::Log {
-        level,
-        message,
-        args: vec![],
-    });
 }
 
 // ============================================================================
@@ -199,35 +164,36 @@ async fn op_storage_clear(state: Rc<RefCell<OpState>>) -> Result<(), PluginOpErr
 // ============================================================================
 
 #[op2]
-fn op_ui_register_panel(state: &mut OpState, #[serde] panel: PluginPanel) {
+fn op_ui_register_panel(state: &mut OpState, #[serde] mut panel: PluginPanel) {
     use tauri::Emitter;
     let op_state = state.borrow::<PluginOpState>();
+    panel.plugin_id = op_state.plugin_id.clone();
+    op_state
+        .panels
+        .insert(panel_key(&op_state.plugin_id, &panel.id), panel.clone());
 
     // Emit to frontend via Tauri
     if let Some(ref app_handle) = op_state.app_handle {
         let _ = app_handle.emit("plugin:panel-registered", &panel);
     }
-
-    // Send event to runtime
-    let _ = op_state
-        .event_sender
-        .send(PluginEvent::PanelRegistered { panel });
 }
 
 #[op2(fast)]
 fn op_ui_unregister_panel(state: &mut OpState, #[string] panel_id: String) {
     use tauri::Emitter;
     let op_state = state.borrow::<PluginOpState>();
+    op_state
+        .panels
+        .remove(&panel_key(&op_state.plugin_id, &panel_id));
+    let panel_ref = PluginPanelRef {
+        plugin_id: op_state.plugin_id.clone(),
+        panel_id,
+    };
 
     // Emit to frontend via Tauri
     if let Some(ref app_handle) = op_state.app_handle {
-        let _ = app_handle.emit("plugin:panel-unregistered", &panel_id);
+        let _ = app_handle.emit("plugin:panel-unregistered", &panel_ref);
     }
-
-    // Send event to runtime
-    let _ = op_state
-        .event_sender
-        .send(PluginEvent::PanelUnregistered { panel_id });
 }
 
 #[op2]
@@ -254,12 +220,6 @@ fn op_ui_toast(
             },
         );
     }
-
-    // Send event to runtime
-    let _ = op_state.event_sender.send(PluginEvent::Toast {
-        message,
-        toast_type,
-    });
 }
 
 // ============================================================================
@@ -268,43 +228,27 @@ fn op_ui_toast(
 
 #[op2]
 fn op_resp_send(
-    state: &mut OpState,
+    _state: &mut OpState,
     #[string] request_id: String,
     #[serde] response: Option<PluginResponse>,
 ) {
-    let op_state = state.borrow::<PluginOpState>();
-
-    let _ = op_state.event_sender.send(PluginEvent::Response {
-        request_id,
-        response,
-    });
+    let _ = (request_id, response);
 }
 
 #[op2]
 fn op_resp_send_modified(
-    state: &mut OpState,
+    _state: &mut OpState,
     #[string] request_id: String,
     #[serde] response: PluginResponse,
 ) {
-    let op_state = state.borrow::<PluginOpState>();
-
-    let _ = op_state.event_sender.send(PluginEvent::ModifiedResponse {
-        request_id,
-        response,
-    });
+    let _ = (request_id, response);
 }
 
 #[op2(fast)]
-fn op_lifecycle_loaded(state: &mut OpState) {
-    let op_state = state.borrow::<PluginOpState>();
-    let _ = op_state.event_sender.send(PluginEvent::Loaded);
-}
+fn op_lifecycle_loaded(_state: &mut OpState) {}
 
 #[op2(fast)]
-fn op_lifecycle_error(state: &mut OpState, #[string] message: String) {
-    let op_state = state.borrow::<PluginOpState>();
-    let _ = op_state.event_sender.send(PluginEvent::Error { message });
-}
+fn op_lifecycle_error(_state: &mut OpState, #[string] _message: String) {}
 
 // ============================================================================
 // Extension definition using extension! macro
@@ -371,20 +315,24 @@ globalThis.console = {
 
 // Storage API
 const storage = {
-  get: async (key) => await Deno.core.opAsync('op_storage_get', key),
-  set: async (key, value) => await Deno.core.opAsync('op_storage_set', key, value),
-  delete: async (key) => await Deno.core.opAsync('op_storage_delete', key),
-  has: async (key) => await Deno.core.opAsync('op_storage_has', key),
-  keys: async () => await Deno.core.opAsync('op_storage_keys'),
-  clear: async () => await Deno.core.opAsync('op_storage_clear'),
+  get: async (key) => await Deno.core.ops.op_storage_get(key),
+  set: async (key, value) => await Deno.core.ops.op_storage_set(key, value),
+  delete: async (key) => await Deno.core.ops.op_storage_delete(key),
+  has: async (key) => await Deno.core.ops.op_storage_has(key),
+  keys: async () => await Deno.core.ops.op_storage_keys(),
+  clear: async () => await Deno.core.ops.op_storage_clear(),
 };
+
+const formatLogArgs = (args) => args.map(arg =>
+  typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+).join(' ');
 
 // Logger API
 const createLogger = (pluginId) => ({
-  debug: (message) => Deno.core.ops.op_log('debug', String(message)),
-  info: (message) => Deno.core.ops.op_log('info', String(message)),
-  warn: (message) => Deno.core.ops.op_log('warn', String(message)),
-  error: (message) => Deno.core.ops.op_log('error', String(message)),
+  debug: (...args) => Deno.core.ops.op_log('debug', formatLogArgs(args)),
+  info: (...args) => Deno.core.ops.op_log('info', formatLogArgs(args)),
+  warn: (...args) => Deno.core.ops.op_log('warn', formatLogArgs(args)),
+  error: (...args) => Deno.core.ops.op_log('error', formatLogArgs(args)),
 });
 
 // UI API
@@ -397,18 +345,12 @@ const ui = {
 // TextEncoder/TextDecoder for body handling
 globalThis.TextEncoder = class TextEncoder {
   encode(str) {
-    const arr = [];
-    for (let i = 0; i < str.length; i++) {
-      const code = str.charCodeAt(i);
-      if (code < 128) {
-        arr.push(code);
-      } else if (code < 2048) {
-        arr.push(192 | (code >> 6), 128 | (code & 63));
-      } else {
-        arr.push(224 | (code >> 12), 128 | ((code >> 6) & 63), 128 | (code & 63));
-      }
+    const binary = unescape(encodeURIComponent(String(str)));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
     }
-    return new Uint8Array(arr);
+    return bytes;
   }
 };
 
@@ -416,11 +358,11 @@ globalThis.TextDecoder = class TextDecoder {
   decode(bytes) {
     if (!bytes) return '';
     const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    let str = '';
+    let binary = '';
     for (let i = 0; i < arr.length; i++) {
-      str += String.fromCharCode(arr[i]);
+      binary += String.fromCharCode(arr[i]);
     }
-    return str;
+    return decodeURIComponent(escape(binary));
   }
 };
 

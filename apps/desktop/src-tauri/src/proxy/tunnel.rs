@@ -886,7 +886,7 @@ async fn handle_https_request(
                 &resolve_ctx,
             );
 
-            let (plugin_modified_body, plugin_modified_headers) =
+            let (plugin_modified_body, plugin_modified_headers, plugin_modified_status) =
                 if let Some(ref plugin_info) = request_modification.plugin {
                     let plugin_request = PluginRequest {
                         id: request_id.clone(),
@@ -950,7 +950,7 @@ async fn handle_https_request(
                             } else {
                                 modified.body.as_ref().map(|b| Bytes::from(b.clone()))
                             };
-                            (decoded_body, Some(modified.headers))
+                            (decoded_body, Some(modified.headers), Some(modified.status))
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -958,11 +958,11 @@ async fn handle_https_request(
                                 plugin_info.name,
                                 e
                             );
-                            (None, None)
+                            (None, None, None)
                         }
                     }
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
             // resDelay:// — applies before sending first byte back.
@@ -994,7 +994,9 @@ async fn handle_https_request(
                 final_body = super::throttle::apply_throttle(final_body, Some(speed_kbps)).await;
             }
             let body_was_modified = final_body != response_body.data;
-            let final_status = response_modification.status_code.unwrap_or(status);
+            let final_status = plugin_modified_status
+                .or(response_modification.status_code)
+                .unwrap_or(status);
             // HeaderMap-preserving finalization — upstream multi-value
             // Set-Cookie stays intact, resCookies:// entries are appended as
             // their own header lines.

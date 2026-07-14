@@ -13,6 +13,7 @@ mod runtime;
 mod storage;
 mod types;
 
+pub(crate) use manager::plugin_identity;
 pub use manager::PluginManager;
 pub use storage::PluginStorage;
 pub use types::*;

@@ -4,7 +4,9 @@
 //! Each plugin has isolated storage that persists across restarts.
 
 use crate::error::{PostGateError, Result};
+use crate::plugin::types::PluginState;
 use sqlx::sqlite::SqlitePool;
+use std::collections::HashMap;
 
 /// Plugin storage interface for persistent key-value storage
 #[derive(Clone)]
@@ -47,6 +49,22 @@ impl PluginStorage {
         .execute(pool)
         .await
         .ok(); // Index creation failure is not critical
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS plugin_states (
+                plugin_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                config TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            PostGateError::Storage(format!("Failed to create plugin_states table: {}", e))
+        })?;
 
         Ok(())
     }
@@ -167,6 +185,98 @@ impl PluginStorage {
 
         Ok(result.rows_affected())
     }
+
+    pub async fn load_plugin_states(pool: &SqlitePool) -> Result<HashMap<String, PluginState>> {
+        let rows: Vec<(String, i64, String)> = sqlx::query_as(
+            "SELECT plugin_id, enabled, config FROM plugin_states ORDER BY plugin_id",
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Failed to load plugin states: {}", e)))?;
+
+        rows.into_iter()
+            .map(|(id, enabled, config)| {
+                let config = serde_json::from_str(&config).map_err(|e| {
+                    PostGateError::Storage(format!(
+                        "Failed to parse saved config for plugin {id}: {e}"
+                    ))
+                })?;
+                Ok((
+                    id.clone(),
+                    PluginState {
+                        id,
+                        enabled: enabled != 0,
+                        config,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    pub async fn get_plugin_state(
+        pool: &SqlitePool,
+        plugin_id: &str,
+    ) -> Result<Option<PluginState>> {
+        let row: Option<(i64, String)> =
+            sqlx::query_as("SELECT enabled, config FROM plugin_states WHERE plugin_id = ?")
+                .bind(plugin_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| {
+                    PostGateError::Storage(format!("Failed to load plugin state: {}", e))
+                })?;
+
+        row.map(|(enabled, config)| {
+            let config = serde_json::from_str(&config).map_err(|e| {
+                PostGateError::Storage(format!(
+                    "Failed to parse saved config for plugin {plugin_id}: {e}"
+                ))
+            })?;
+            Ok(PluginState {
+                id: plugin_id.to_string(),
+                enabled: enabled != 0,
+                config,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn save_plugin_state(pool: &SqlitePool, state: &PluginState) -> Result<()> {
+        let config = serde_json::to_string(&state.config).map_err(|e| {
+            PostGateError::Storage(format!("Failed to serialize plugin config: {}", e))
+        })?;
+        let now = chrono::Utc::now().timestamp_millis();
+
+        sqlx::query(
+            r#"
+            INSERT INTO plugin_states (plugin_id, enabled, config, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(plugin_id) DO UPDATE SET
+                enabled = excluded.enabled,
+                config = excluded.config,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(&state.id)
+        .bind(i64::from(state.enabled))
+        .bind(config)
+        .bind(now)
+        .execute(pool)
+        .await
+        .map_err(|e| PostGateError::Storage(format!("Failed to save plugin state: {}", e)))?;
+
+        Ok(())
+    }
+
+    pub async fn delete_plugin_state(pool: &SqlitePool, plugin_id: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM plugin_states WHERE plugin_id = ?")
+            .bind(plugin_id)
+            .execute(pool)
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Failed to delete plugin state: {}", e)))?;
+
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +327,37 @@ mod tests {
         storage.set("key2", &serde_json::json!(2)).await.unwrap();
         let cleared = storage.clear().await.unwrap();
         assert!(cleared >= 2);
+    }
+
+    #[tokio::test]
+    async fn plugin_state_round_trips() {
+        let pool = create_test_pool().await;
+        PluginStorage::init_table(&pool).await.unwrap();
+        let state = PluginState {
+            id: "fixture".to_string(),
+            enabled: true,
+            config: HashMap::from([("mode".to_string(), "mock".to_string())]),
+        };
+
+        PluginStorage::save_plugin_state(&pool, &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            PluginStorage::get_plugin_state(&pool, "fixture")
+                .await
+                .unwrap()
+                .unwrap()
+                .config["mode"],
+            "mock"
+        );
+        assert!(PluginStorage::load_plugin_states(&pool).await.unwrap()["fixture"].enabled);
+
+        PluginStorage::delete_plugin_state(&pool, "fixture")
+            .await
+            .unwrap();
+        assert!(PluginStorage::get_plugin_state(&pool, "fixture")
+            .await
+            .unwrap()
+            .is_none());
     }
 }

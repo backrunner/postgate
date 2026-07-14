@@ -2,12 +2,13 @@
 
 use crate::error::{PostGateError, Result};
 use crate::plugin::runtime::PluginRuntime;
+use crate::plugin::storage::PluginStorage;
 use crate::plugin::types::*;
 use dashmap::DashMap;
 use serde::Deserialize;
 use sqlx::sqlite::SqlitePool;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -20,7 +21,7 @@ pub struct PluginManager {
     /// Running plugin runtimes
     runtimes: Arc<RwLock<HashMap<String, PluginRuntime>>>,
     /// Registered panels from plugins
-    panels: DashMap<String, PluginPanel>,
+    panels: Arc<DashMap<String, PluginPanel>>,
     /// Database connection pool for plugin storage
     db_pool: Option<SqlitePool>,
     /// Tauri app handle for emitting events
@@ -34,7 +35,7 @@ impl PluginManager {
             plugins_dir,
             plugins: DashMap::new(),
             runtimes: Arc::new(RwLock::new(HashMap::new())),
-            panels: DashMap::new(),
+            panels: Arc::new(DashMap::new()),
             db_pool: None,
             app_handle: None,
         }
@@ -61,15 +62,37 @@ impl PluginManager {
                 })?;
         }
 
-        // Discover plugins
-        self.discover_plugins().await?;
+        let plugins = self.discover_plugins().await?;
+        let saved_states = self.load_saved_states().await?;
+
+        for plugin in plugins
+            .into_iter()
+            .filter(|plugin| plugin.enabled && !plugin.loaded)
+        {
+            let config = saved_states
+                .get(&plugin.id)
+                .map(|state| state.config.clone())
+                .unwrap_or_default();
+            if let Err(error) = self.load_plugin(&plugin.id, config).await {
+                tracing::error!("Failed to restore plugin {}: {}", plugin.id, error);
+            }
+        }
 
         Ok(())
     }
 
     /// Discover plugins in the plugins directory
     pub async fn discover_plugins(&self) -> Result<Vec<PluginInfo>> {
+        tokio::fs::create_dir_all(&self.plugins_dir)
+            .await
+            .map_err(|e| {
+                PostGateError::Plugin(format!("Failed to create plugins directory: {}", e))
+            })?;
+
+        let runtime_ids: HashSet<String> = self.runtimes.read().await.keys().cloned().collect();
+        let saved_states = self.load_saved_states().await?;
         self.plugins.clear();
+        let mut discovered_ids = HashSet::new();
 
         let mut entries = tokio::fs::read_dir(&self.plugins_dir).await.map_err(|e| {
             PostGateError::Plugin(format!("Failed to read plugins directory: {}", e))
@@ -81,8 +104,10 @@ impl PluginManager {
             .map_err(|e| PostGateError::Plugin(format!("Failed to read directory entry: {}", e)))?
         {
             let path = entry.path();
-
-            if !path.is_dir() {
+            let file_type = entry.file_type().await.map_err(|e| {
+                PostGateError::Plugin(format!("Failed to inspect plugin directory entry: {}", e))
+            })?;
+            if !file_type.is_dir() || file_type.is_symlink() {
                 continue;
             }
 
@@ -94,8 +119,15 @@ impl PluginManager {
 
             // Parse package.json
             match self.parse_plugin_info(&path).await {
-                Ok(info) => {
+                Ok(mut info) => {
+                    info.loaded = runtime_ids.contains(&info.id);
+                    info.enabled = info.loaded
+                        || saved_states
+                            .get(&info.id)
+                            .map(|state| state.enabled)
+                            .unwrap_or(false);
                     tracing::info!("Discovered plugin: {} v{}", info.name, info.version);
+                    discovered_ids.insert(info.id.clone());
                     self.plugins.insert(info.id.clone(), info);
                 }
                 Err(e) => {
@@ -104,12 +136,29 @@ impl PluginManager {
             }
         }
 
+        for orphaned_id in runtime_ids.difference(&discovered_ids) {
+            if let Err(error) = self.stop_runtime(orphaned_id, None).await {
+                tracing::warn!("Failed to stop removed plugin {}: {}", orphaned_id, error);
+            }
+        }
+
         Ok(self.get_plugins())
     }
 
     /// Parse plugin info from package.json
     async fn parse_plugin_info(&self, plugin_path: &Path) -> Result<PluginInfo> {
+        let plugin_root = tokio::fs::canonicalize(plugin_path).await.map_err(|e| {
+            PostGateError::Plugin(format!("Failed to resolve plugin directory: {}", e))
+        })?;
         let package_json_path = plugin_path.join("package.json");
+        let package_json_path = tokio::fs::canonicalize(&package_json_path)
+            .await
+            .map_err(|e| PostGateError::Plugin(format!("Failed to resolve package.json: {}", e)))?;
+        if !package_json_path.starts_with(&plugin_root) {
+            return Err(PostGateError::Plugin(
+                "package.json must stay inside the plugin directory".into(),
+            ));
+        }
         let content = tokio::fs::read_to_string(&package_json_path)
             .await
             .map_err(|e| PostGateError::Plugin(format!("Failed to read package.json: {}", e)))?;
@@ -117,24 +166,7 @@ impl PluginManager {
         let package: PackageJson = serde_json::from_str(&content)
             .map_err(|e| PostGateError::Plugin(format!("Failed to parse package.json: {}", e)))?;
 
-        // Validate plugin name
-        let id = if package.name.starts_with("postgate-plugin-") {
-            package
-                .name
-                .strip_prefix("postgate-plugin-")
-                .unwrap()
-                .to_string()
-        } else if package.name.starts_with("@postgate/plugin-") {
-            package
-                .name
-                .strip_prefix("@postgate/plugin-")
-                .unwrap()
-                .to_string()
-        } else {
-            return Err(PostGateError::Plugin(
-                "Plugin name must start with 'postgate-plugin-' or '@postgate/plugin-'".into(),
-            ));
-        };
+        let (id, _) = plugin_identity(&package.name)?;
 
         // Determine entry point
         let entry = package
@@ -142,10 +174,19 @@ impl PluginManager {
             .or(package.module)
             .unwrap_or_else(|| "index.js".to_string());
 
-        let entry_path = plugin_path.join(&entry);
-        if !entry_path.exists() {
+        if !is_safe_relative_path(Path::new(&entry)) {
             return Err(PostGateError::Plugin(format!(
-                "Entry point not found: {}",
+                "Plugin entry point must stay inside the plugin directory: {}",
+                entry
+            )));
+        }
+
+        let entry_path = tokio::fs::canonicalize(plugin_path.join(&entry))
+            .await
+            .map_err(|e| PostGateError::Plugin(format!("Entry point not found ({entry}): {e}")))?;
+        if !entry_path.starts_with(&plugin_root) || !entry_path.is_file() {
+            return Err(PostGateError::Plugin(format!(
+                "Plugin entry point must be a file inside the plugin directory: {}",
                 entry
             )));
         }
@@ -165,7 +206,13 @@ impl PluginManager {
 
     /// Get all discovered plugins
     pub fn get_plugins(&self) -> Vec<PluginInfo> {
-        self.plugins.iter().map(|r| r.value().clone()).collect()
+        let mut plugins: Vec<_> = self
+            .plugins
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        plugins.sort_by(|left, right| left.name.cmp(&right.name));
+        plugins
     }
 
     /// Get a specific plugin
@@ -181,32 +228,43 @@ impl PluginManager {
             .ok_or_else(|| PostGateError::Plugin(format!("Plugin not found: {}", id)))?
             .clone();
 
-        if info.loaded {
-            return Ok(());
-        }
-
         // Ensure we have a database pool
         let db_pool = self
             .db_pool
             .clone()
             .ok_or_else(|| PostGateError::Plugin("Database pool not initialized".into()))?;
 
-        let plugin_path = PathBuf::from(&info.path).join(&info.entry);
+        let config = if config.is_empty() {
+            PluginStorage::get_plugin_state(&db_pool, id)
+                .await?
+                .map(|state| state.config)
+                .unwrap_or_default()
+        } else {
+            config
+        };
 
-        let mut runtime = PluginRuntime::new(id.to_string(), plugin_path);
-        runtime
-            .start(config, db_pool, self.app_handle.clone())
-            .await?;
-
-        // Update plugin state
-        if let Some(mut entry) = self.plugins.get_mut(id) {
-            entry.loaded = true;
-            entry.enabled = true;
+        let mut runtimes = self.runtimes.write().await;
+        if runtimes.contains_key(id) {
+            drop(runtimes);
+            self.update_plugin_flags(id, true, true);
+            self.save_state(id, true, config).await?;
+            return Ok(());
         }
 
-        // Store runtime
-        let mut runtimes = self.runtimes.write().await;
+        let plugin_path = PathBuf::from(&info.path).join(&info.entry);
+        let mut runtime = PluginRuntime::new(id.to_string(), plugin_path, self.panels.clone());
+        if let Err(error) = runtime
+            .start(config.clone(), db_pool, self.app_handle.clone())
+            .await
+        {
+            self.panels.retain(|_, panel| panel.plugin_id != id);
+            return Err(error);
+        }
         runtimes.insert(id.to_string(), runtime);
+        drop(runtimes);
+
+        self.update_plugin_flags(id, true, true);
+        self.save_state(id, true, config).await?;
 
         tracing::info!("Loaded plugin: {}", id);
 
@@ -215,23 +273,7 @@ impl PluginManager {
 
     /// Unload a plugin
     pub async fn unload_plugin(&self, id: &str) -> Result<()> {
-        let mut runtimes = self.runtimes.write().await;
-
-        if let Some(mut runtime) = runtimes.remove(id) {
-            runtime.stop().await?;
-        }
-
-        // Update plugin state
-        if let Some(mut entry) = self.plugins.get_mut(id) {
-            entry.loaded = false;
-        }
-
-        // Remove panels registered by this plugin
-        self.panels.retain(|_, panel| panel.plugin_id != id);
-
-        tracing::info!("Unloaded plugin: {}", id);
-
-        Ok(())
+        self.stop_runtime(id, Some(false)).await
     }
 
     /// Enable/disable a plugin
@@ -240,10 +282,6 @@ impl PluginManager {
             self.load_plugin(id, HashMap::new()).await?;
         } else {
             self.unload_plugin(id).await?;
-        }
-
-        if let Some(mut entry) = self.plugins.get_mut(id) {
-            entry.enabled = enabled;
         }
 
         Ok(())
@@ -284,24 +322,63 @@ impl PluginManager {
 
     /// Get all registered panels
     pub fn get_panels(&self) -> Vec<PluginPanel> {
-        self.panels.iter().map(|r| r.value().clone()).collect()
+        let mut panels: Vec<_> = self
+            .panels
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        panels.sort_by(|left, right| {
+            left.title
+                .cmp(&right.title)
+                .then_with(|| left.plugin_id.cmp(&right.plugin_id))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        panels
     }
 
-    /// Register a panel (called from plugin runtime)
-    pub fn register_panel(&self, panel: PluginPanel) {
-        self.panels.insert(panel.id.clone(), panel);
+    pub async fn get_saved_state(&self, id: &str) -> Result<Option<PluginState>> {
+        let pool = self
+            .db_pool
+            .as_ref()
+            .ok_or_else(|| PostGateError::Plugin("Database pool not initialized".into()))?;
+        PluginStorage::get_plugin_state(pool, id).await
     }
 
-    /// Unregister a panel
-    pub fn unregister_panel(&self, panel_id: &str) {
-        self.panels.remove(panel_id);
+    pub async fn restore_saved_state(&self, state: PluginState) -> Result<()> {
+        self.save_state(&state.id, state.enabled, state.config.clone())
+            .await?;
+        if !state.enabled {
+            self.update_plugin_flags(&state.id, false, false);
+            return Ok(());
+        }
+
+        match self.load_plugin(&state.id, state.config).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.update_plugin_flags(&state.id, false, true);
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn remove_plugin_data(&self, id: &str) -> Result<()> {
+        let pool = self
+            .db_pool
+            .as_ref()
+            .ok_or_else(|| PostGateError::Plugin("Database pool not initialized".into()))?;
+        PluginStorage::clear_plugin_storage(pool, id).await?;
+        PluginStorage::delete_plugin_state(pool, id).await?;
+        Ok(())
     }
 
     /// Shutdown all plugins
     pub async fn shutdown(&self) -> Result<()> {
-        let mut runtimes = self.runtimes.write().await;
+        let runtimes = {
+            let mut runtimes = self.runtimes.write().await;
+            runtimes.drain().collect::<Vec<_>>()
+        };
 
-        for (id, mut runtime) in runtimes.drain() {
+        for (id, mut runtime) in runtimes {
             if let Err(e) = runtime.stop().await {
                 tracing::warn!("Error stopping plugin {}: {}", id, e);
             }
@@ -309,6 +386,102 @@ impl PluginManager {
 
         Ok(())
     }
+
+    fn update_plugin_flags(&self, id: &str, loaded: bool, enabled: bool) {
+        if let Some(mut entry) = self.plugins.get_mut(id) {
+            entry.loaded = loaded;
+            entry.enabled = enabled;
+        }
+    }
+
+    async fn stop_runtime(&self, id: &str, enabled: Option<bool>) -> Result<()> {
+        let runtime = self.runtimes.write().await.remove(id);
+        let stop_result = if let Some(mut runtime) = runtime {
+            runtime.stop().await
+        } else {
+            Ok(())
+        };
+
+        let enabled_after = enabled.unwrap_or_else(|| {
+            self.plugins
+                .get(id)
+                .map(|entry| entry.enabled)
+                .unwrap_or(false)
+        });
+        self.update_plugin_flags(id, false, enabled_after);
+        self.panels.retain(|_, panel| panel.plugin_id != id);
+
+        if let Some(enabled) = enabled {
+            let config = self
+                .get_saved_state(id)
+                .await?
+                .map(|state| state.config)
+                .unwrap_or_default();
+            self.save_state(id, enabled, config).await?;
+        }
+
+        tracing::info!("Unloaded plugin: {}", id);
+        stop_result
+    }
+
+    async fn load_saved_states(&self) -> Result<HashMap<String, PluginState>> {
+        match &self.db_pool {
+            Some(pool) => PluginStorage::load_plugin_states(pool).await,
+            None => Ok(HashMap::new()),
+        }
+    }
+
+    async fn save_state(
+        &self,
+        id: &str,
+        enabled: bool,
+        config: HashMap<String, String>,
+    ) -> Result<()> {
+        let pool = self
+            .db_pool
+            .as_ref()
+            .ok_or_else(|| PostGateError::Plugin("Database pool not initialized".into()))?;
+        PluginStorage::save_plugin_state(
+            pool,
+            &PluginState {
+                id: id.to_string(),
+                enabled,
+                config,
+            },
+        )
+        .await
+    }
+}
+
+pub(crate) fn plugin_identity(package_name: &str) -> Result<(String, String)> {
+    let (id, directory_name) = if let Some(id) = package_name.strip_prefix("postgate-plugin-") {
+        (id, package_name.to_string())
+    } else if let Some(id) = package_name.strip_prefix("@postgate/plugin-") {
+        (id, format!("@postgate-plugin-{id}"))
+    } else {
+        return Err(PostGateError::Plugin(
+            "Plugin name must start with 'postgate-plugin-' or '@postgate/plugin-'".into(),
+        ));
+    };
+
+    if id.is_empty()
+        || !id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err(PostGateError::Plugin(format!(
+            "Plugin name contains an unsafe identifier: {package_name}"
+        )));
+    }
+
+    Ok((id.to_string(), directory_name))
+}
+
+fn is_safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
 /// package.json structure for plugins
@@ -325,25 +498,46 @@ struct PackageJson {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use tempfile::tempdir;
+
+    async fn create_test_pool(directory: &Path) -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(directory.join("plugins.db"))
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        PluginStorage::init_table(&pool).await.unwrap();
+        pool
+    }
+
+    fn write_plugin(plugins_dir: &Path, source: &str) {
+        let plugin_dir = plugins_dir.join("postgate-plugin-test");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("package.json"),
+            r#"{
+                "name": "postgate-plugin-test",
+                "version": "1.0.0",
+                "description": "Test plugin",
+                "main": "index.js"
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join("index.js"), source).unwrap();
+    }
 
     #[tokio::test]
     async fn test_plugin_discovery() {
         let temp = tempdir().unwrap();
         let plugins_dir = temp.path().to_path_buf();
 
-        // Create a mock plugin
-        let plugin_dir = plugins_dir.join("postgate-plugin-test");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-
-        let package_json = r#"{
-            "name": "postgate-plugin-test",
-            "version": "1.0.0",
-            "description": "Test plugin",
-            "main": "index.js"
-        }"#;
-        std::fs::write(plugin_dir.join("package.json"), package_json).unwrap();
-        std::fs::write(plugin_dir.join("index.js"), "module.exports = {}").unwrap();
+        write_plugin(&plugins_dir, "module.exports = {}");
 
         let manager = PluginManager::new(plugins_dir);
         let plugins = manager.discover_plugins().await.unwrap();
@@ -352,5 +546,207 @@ mod tests {
         assert_eq!(plugins[0].id, "test");
         assert_eq!(plugins[0].name, "postgate-plugin-test");
         assert_eq!(plugins[0].version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn plugin_runtime_preserves_state_panels_and_lifecycle() {
+        let temp = tempdir().unwrap();
+        let plugins_dir = temp.path().to_path_buf();
+        write_plugin(
+            &plugins_dir,
+            r#"
+            module.exports = {
+              async onLoad(ctx) {
+                const loads = (await ctx.storage.get('loads')) || 0;
+                await ctx.storage.set('loads', loads + 1);
+                await ctx.storage.set('startupConfig', ctx.config.startup || null);
+                ctx.ui.registerPanel({
+                  id: 'status',
+                  title: 'Fixture Status',
+                  content: { type: 'html', html: '<strong>ready</strong>' }
+                });
+              },
+              async onUnload(ctx) {
+                await ctx.storage.set('unloaded', true);
+              },
+              async handleRequest(request, ctx) {
+                return {
+                  status: 201,
+                  headers: { 'content-type': 'application/json' },
+                  body: btoa(JSON.stringify({
+                    mode: ctx.ruleConfig.mode,
+                    matched: ctx.matchedPattern,
+                    logger: Boolean(ctx.logger)
+                  })),
+                  body_base64: true
+                };
+              },
+              async handleResponse(request, response) {
+                return { ...response, status: 202 };
+              }
+            };
+            "#,
+        );
+        let pool = create_test_pool(temp.path()).await;
+
+        let mut manager = PluginManager::new(plugins_dir.clone());
+        manager.set_db_pool(pool.clone());
+        manager.init().await.unwrap();
+        manager
+            .load_plugin(
+                "test",
+                HashMap::from([("startup".to_string(), "restored".to_string())]),
+            )
+            .await
+            .unwrap();
+
+        let panels = manager.get_panels();
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].plugin_id, "test");
+        assert!(manager.get_plugin("test").unwrap().loaded);
+        assert!(manager.discover_plugins().await.unwrap()[0].loaded);
+
+        let request = PluginRequest {
+            id: "request-1".to_string(),
+            method: "GET".to_string(),
+            url: "https://example.test/api".to_string(),
+            host: "example.test".to_string(),
+            path: "/api".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            body_base64: false,
+            timestamp: 1,
+        };
+        let context = PluginRequestContext {
+            rule_config: HashMap::from([(
+                "mode".to_string(),
+                serde_json::Value::String("fixture".to_string()),
+            )]),
+            matched_pattern: "https://example.test/api".to_string(),
+        };
+        let response = manager
+            .handle_request("test", request.clone(), context.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(response.body.unwrap())
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["mode"], "fixture");
+        assert_eq!(body["matched"], "https://example.test/api");
+        assert_eq!(body["logger"], true);
+
+        let modified = manager
+            .handle_response(
+                "test",
+                request,
+                PluginResponse {
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: None,
+                    body_base64: false,
+                },
+                context,
+            )
+            .await
+            .unwrap();
+        assert_eq!(modified.status, 202);
+
+        manager.shutdown().await.unwrap();
+        let storage = PluginStorage::new(pool.clone(), "test".to_string());
+        assert_eq!(
+            storage.get("unloaded").await.unwrap(),
+            Some(serde_json::json!(true))
+        );
+        assert_eq!(
+            storage.get("startupConfig").await.unwrap(),
+            Some(serde_json::json!("restored"))
+        );
+
+        let mut restored = PluginManager::new(plugins_dir);
+        restored.set_db_pool(pool.clone());
+        restored.init().await.unwrap();
+        let info = restored.get_plugin("test").unwrap();
+        assert!(info.enabled);
+        assert!(info.loaded);
+        assert_eq!(
+            storage.get("loads").await.unwrap(),
+            Some(serde_json::json!(2))
+        );
+        restored.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn example_plugin_executes_end_to_end() {
+        let temp = tempdir().unwrap();
+        let examples_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../examples");
+        let pool = create_test_pool(temp.path()).await;
+        let mut manager = PluginManager::new(examples_dir);
+        manager.set_db_pool(pool);
+        manager.init().await.unwrap();
+        manager
+            .load_plugin("mock-api", HashMap::new())
+            .await
+            .unwrap();
+
+        let request = PluginRequest {
+            id: "example-request".to_string(),
+            method: "GET".to_string(),
+            url: "https://example.test/__postgate/mock".to_string(),
+            host: "example.test".to_string(),
+            path: "/__postgate/mock".to_string(),
+            query: HashMap::new(),
+            headers: HashMap::new(),
+            body: None,
+            body_base64: false,
+            timestamp: 1,
+        };
+        let context = PluginRequestContext {
+            rule_config: HashMap::from([(
+                "mode".to_string(),
+                serde_json::Value::String("fixture".to_string()),
+            )]),
+            matched_pattern: "https://example.test/__postgate/mock".to_string(),
+        };
+        let response = manager
+            .handle_request("mock-api", request.clone(), context.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status, 200);
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(response.body.unwrap())
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["source"], "postgate-plugin-mock-api");
+        assert_eq!(body["mode"], "fixture");
+
+        let response = manager
+            .handle_response(
+                "mock-api",
+                request,
+                PluginResponse {
+                    status: 204,
+                    headers: HashMap::new(),
+                    body: None,
+                    body_base64: false,
+                },
+                context,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 204);
+        assert_eq!(response.headers["x-postgate-plugin"], "mock-api");
+        manager.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn rejects_unsafe_plugin_names_and_entries() {
+        assert!(plugin_identity("postgate-plugin-../../escape").is_err());
+        assert!(plugin_identity("unrelated-package").is_err());
+        assert!(!is_safe_relative_path(Path::new("../outside.js")));
+        assert!(is_safe_relative_path(Path::new("dist/index.js")));
     }
 }

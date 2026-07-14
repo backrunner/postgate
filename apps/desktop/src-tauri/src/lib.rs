@@ -42,7 +42,7 @@ pub fn run() {
 
     tracing::info!("Starting PostGate...");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -168,8 +168,20 @@ pub fn run() {
             commands::mcp::get_mcp_client_config,
             commands::mcp::list_mcp_audit_events,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let state = app_handle.state::<Arc<AppState>>().inner().clone();
+            tauri::async_runtime::block_on(async move {
+                let manager = state.plugin_manager.read().await;
+                if let Err(error) = manager.shutdown().await {
+                    tracing::warn!("Failed to shut down plugins cleanly: {}", error);
+                }
+            });
+        }
+    });
 }
 
 /// Restore the MCP server if the persisted settings have it enabled.
@@ -192,6 +204,8 @@ async fn initialize_plugin_system(
     state: Arc<AppState>,
     app_handle: tauri::AppHandle,
 ) -> error::Result<()> {
+    use tauri::Emitter;
+
     // Get database pool
     let db = state.get_database().await?;
     let pool = db.pool().clone();
@@ -203,7 +217,7 @@ async fn initialize_plugin_system(
     {
         let mut manager = state.plugin_manager.write().await;
         manager.set_db_pool(pool);
-        manager.set_app_handle(app_handle);
+        manager.set_app_handle(app_handle.clone());
     }
 
     // Initialize and discover plugins
@@ -212,6 +226,7 @@ async fn initialize_plugin_system(
         manager.init().await?;
     }
 
+    let _ = app_handle.emit("plugin:system-ready", ());
     tracing::info!("Plugin system initialized");
     Ok(())
 }

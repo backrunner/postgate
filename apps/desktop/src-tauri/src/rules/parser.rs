@@ -1374,10 +1374,7 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 name: value.to_string(),
             },
 
-            "plugin" => RuleAction::Plugin {
-                name: value.to_string(),
-                config: serde_json::Value::Null,
-            },
+            "plugin" => parse_plugin_action(value)?,
 
             "log" => RuleAction::Log {
                 message: if value.is_empty() {
@@ -1580,6 +1577,35 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
     }
 
     Ok(None)
+}
+
+fn parse_plugin_action(value: &str) -> Result<RuleAction> {
+    let (name, query) = value.split_once('?').unwrap_or((value, ""));
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(PostGateError::RuleParse(
+            "Plugin rule requires a plugin name".to_string(),
+        ));
+    }
+
+    let config = if query.is_empty() {
+        serde_json::Value::Null
+    } else {
+        let values = url::form_urlencoded::parse(query.as_bytes())
+            .map(|(key, value)| {
+                (
+                    key.into_owned(),
+                    serde_json::Value::String(value.into_owned()),
+                )
+            })
+            .collect();
+        serde_json::Value::Object(values)
+    };
+
+    Ok(RuleAction::Plugin {
+        name: name.to_string(),
+        config,
+    })
 }
 
 // =============================================================================
@@ -2066,6 +2092,22 @@ example.com host://127.0.0.1
             assert_eq!(*port, 8888);
         } else {
             panic!("Expected HttpProxy action");
+        }
+    }
+
+    #[test]
+    fn test_parse_plugin_rule_config() {
+        let rules =
+            parse_rules("api.example.com plugin://mock-api?mode=fixture&message=hello%20world")
+                .unwrap();
+
+        match &rules[0].actions[0] {
+            RuleAction::Plugin { name, config } => {
+                assert_eq!(name, "mock-api");
+                assert_eq!(config["mode"], "fixture");
+                assert_eq!(config["message"], "hello world");
+            }
+            action => panic!("Expected plugin action, got {action:?}"),
         }
     }
 

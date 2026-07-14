@@ -1,5 +1,7 @@
 //! Plugin types and data structures
 
+use crate::error::{PostGateError, Result};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -31,7 +33,7 @@ pub struct PluginInfo {
 pub struct PluginState {
     pub id: String,
     pub enabled: bool,
-    pub config: HashMap<String, serde_json::Value>,
+    pub config: HashMap<String, String>,
 }
 
 /// Request data passed to plugin
@@ -72,8 +74,45 @@ pub struct PluginResponse {
     pub body_base64: bool,
 }
 
+impl PluginResponse {
+    pub fn validate(&self) -> Result<()> {
+        hyper::StatusCode::from_u16(self.status).map_err(|error| {
+            PostGateError::Plugin(format!(
+                "Invalid plugin response status {}: {error}",
+                self.status
+            ))
+        })?;
+
+        for (name, value) in &self.headers {
+            hyper::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                PostGateError::Plugin(format!(
+                    "Invalid plugin response header name '{name}': {error}"
+                ))
+            })?;
+            hyper::header::HeaderValue::from_str(value).map_err(|error| {
+                PostGateError::Plugin(format!("Invalid plugin response header '{name}': {error}"))
+            })?;
+        }
+
+        if self.body_base64 {
+            if let Some(body) = &self.body {
+                base64::engine::general_purpose::STANDARD
+                    .decode(body)
+                    .map_err(|error| {
+                        PostGateError::Plugin(format!(
+                            "Plugin response body is not valid base64: {error}"
+                        ))
+                    })?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Context for plugin request handling
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PluginRequestContext {
     /// Configuration from the matched rule
     pub rule_config: HashMap<String, serde_json::Value>,
@@ -106,6 +145,7 @@ pub struct PluginPanel {
     /// Unique panel ID
     pub id: String,
     /// Plugin that registered this panel
+    #[serde(default)]
     pub plugin_id: String,
     /// Panel title
     pub title: String,
@@ -113,6 +153,12 @@ pub struct PluginPanel {
     pub icon: Option<String>,
     /// HTML content or iframe URL
     pub content: PanelContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginPanelRef {
+    pub plugin_id: String,
+    pub panel_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

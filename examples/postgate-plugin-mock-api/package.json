@@ -1,0 +1,7 @@
+{
+  "name": "postgate-plugin-mock-api",
+  "version": "0.1.0",
+  "description": "Example PostGate plugin that serves a local JSON fixture",
+  "main": "index.js",
+  "license": "MIT"
+}

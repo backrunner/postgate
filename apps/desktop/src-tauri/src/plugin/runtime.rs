@@ -4,14 +4,27 @@
 //! using deno_core (V8). This eliminates the need for external Node.js installation.
 
 use crate::error::{PostGateError, Result};
-use crate::plugin::ops::{self, PluginEvent, PluginOpState};
+use crate::plugin::ops::{self, PluginOpState};
 use crate::plugin::storage::PluginStorage;
 use crate::plugin::types::*;
-use deno_core::{JsRuntime, RuntimeOptions};
+use dashmap::DashMap;
+use deno_core::{JsRuntime, PollEventLoopOptions, RuntimeOptions};
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+
+const PLUGIN_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const PLUGIN_CALL_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(not(test))]
+const PLUGIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const PLUGIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Message sent to the plugin thread to execute JS calls
 #[derive(Debug)]
@@ -27,7 +40,9 @@ enum JsCall {
         context: PluginRequestContext,
         respond_to: oneshot::Sender<Result<PluginResponse>>,
     },
-    Shutdown,
+    Shutdown {
+        respond_to: oneshot::Sender<Result<()>>,
+    },
 }
 
 /// JavaScript plugin runtime using embedded Deno Core (V8)
@@ -35,20 +50,22 @@ pub struct PluginRuntime {
     plugin_id: String,
     plugin_path: PathBuf,
     loaded: bool,
-    event_rx: Option<mpsc::UnboundedReceiver<PluginEvent>>,
-    panels: Vec<PluginPanel>,
+    panels: Arc<DashMap<String, PluginPanel>>,
     call_tx: Option<mpsc::UnboundedSender<JsCall>>,
 }
 
 impl PluginRuntime {
     /// Create a new plugin runtime
-    pub fn new(plugin_id: String, plugin_path: PathBuf) -> Self {
+    pub fn new(
+        plugin_id: String,
+        plugin_path: PathBuf,
+        panels: Arc<DashMap<String, PluginPanel>>,
+    ) -> Self {
         Self {
             plugin_id,
             plugin_path,
             loaded: false,
-            event_rx: None,
-            panels: Vec::new(),
+            panels,
             call_tx: None,
         }
     }
@@ -63,15 +80,11 @@ impl PluginRuntime {
         // Initialize storage for this plugin
         let storage = PluginStorage::new(db_pool.clone(), self.plugin_id.clone());
 
-        // Create event channel
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        self.event_rx = Some(event_rx);
-
         // Create op state
         let op_state = PluginOpState {
             plugin_id: self.plugin_id.clone(),
             storage,
-            event_sender: event_tx,
+            panels: self.panels.clone(),
             app_handle,
         };
 
@@ -100,8 +113,14 @@ impl PluginRuntime {
         });
 
         // Wait for the thread to finish initialization
-        init_rx
+        tokio::time::timeout(PLUGIN_INIT_TIMEOUT, init_rx)
             .await
+            .map_err(|_| {
+                PostGateError::Plugin(format!(
+                    "Plugin initialization timed out after {} seconds",
+                    PLUGIN_INIT_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| PostGateError::Plugin(format!("Plugin init channel closed: {}", e)))??;
 
         self.call_tx = Some(call_tx);
@@ -121,9 +140,21 @@ impl PluginRuntime {
         mut call_rx: mpsc::UnboundedReceiver<JsCall>,
         init_tx: oneshot::Sender<Result<()>>,
     ) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = init_tx.send(Err(PostGateError::Plugin(format!(
+                    "Failed to create plugin runtime: {error}"
+                ))));
+                return;
+            }
+        };
+        let mut init_tx = Some(init_tx);
 
-        let _ = rt.block_on(async {
+        let result = rt.block_on(async {
             let mut runtime = JsRuntime::new(RuntimeOptions {
                 extensions: vec![ops::postgate_plugin::init()],
                 ..Default::default()
@@ -179,7 +210,7 @@ impl PluginRuntime {
             };
 
             // Wait for the async onLoad (if any) to complete
-            if let Err(e) = runtime.resolve(result).await {
+            if let Err(e) = resolve_with_event_loop(&mut runtime, result).await {
                 return Err(PostGateError::Plugin(format!("Plugin onLoad failed: {}", e)));
             }
 
@@ -187,7 +218,7 @@ impl PluginRuntime {
             // Plugin initialised successfully — enter the request/response loop.
             // The runtime stays alive inside this async block.
             // -----------------------------------------------------------------
-            if init_tx.send(Ok(())).is_err() {
+            if init_tx.take().is_some_and(|tx| tx.send(Ok(())).is_err()) {
                 return Ok(()); // caller dropped the receiver
             }
 
@@ -201,34 +232,52 @@ impl PluginRuntime {
                         let result = execute_handle_response(&mut runtime, request, response, context).await;
                         let _ = respond_to.send(result);
                     }
-                    JsCall::Shutdown => break,
+                    JsCall::Shutdown { respond_to } => {
+                        let result = execute_on_unload(&mut runtime).await;
+                        let _ = respond_to.send(result);
+                        break;
+                    }
                 }
             }
 
             Ok::<(), PostGateError>(())
         });
+
+        if let Err(error) = result {
+            if let Some(init_tx) = init_tx.take() {
+                let _ = init_tx.send(Err(error));
+            } else {
+                tracing::error!("Plugin runtime {plugin_id} stopped unexpectedly: {error}");
+            }
+        }
     }
 
     /// Stop the plugin runtime
     pub async fn stop(&mut self) -> Result<()> {
         if let Some(ref tx) = self.call_tx {
-            let _ = tx.send(JsCall::Shutdown);
+            let (respond_to, respond_rx) = oneshot::channel();
+            tx.send(JsCall::Shutdown { respond_to })
+                .map_err(|e| PostGateError::Plugin(format!("Shutdown send failed: {}", e)))?;
+            tokio::time::timeout(PLUGIN_SHUTDOWN_TIMEOUT, respond_rx)
+                .await
+                .map_err(|_| {
+                    PostGateError::Plugin(format!(
+                        "Plugin shutdown timed out after {} seconds",
+                        PLUGIN_SHUTDOWN_TIMEOUT.as_secs()
+                    ))
+                })?
+                .map_err(|e| {
+                    PostGateError::Plugin(format!("Plugin shutdown channel closed: {}", e))
+                })??;
         }
         self.call_tx = None;
         self.loaded = false;
-        self.event_rx = None;
-        self.panels.clear();
         Ok(())
     }
 
     /// Check if runtime is loaded
     pub fn is_loaded(&self) -> bool {
         self.loaded
-    }
-
-    /// Get registered panels
-    pub fn panels(&self) -> &[PluginPanel] {
-        &self.panels
     }
 
     /// Handle a request through the plugin
@@ -254,8 +303,14 @@ impl PluginRuntime {
         })
         .map_err(|e| PostGateError::Plugin(format!("Send failed: {}", e)))?;
 
-        respond_rx
+        tokio::time::timeout(PLUGIN_CALL_TIMEOUT, respond_rx)
             .await
+            .map_err(|_| {
+                PostGateError::Plugin(format!(
+                    "Plugin handleRequest timed out after {} seconds",
+                    PLUGIN_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| PostGateError::Plugin(format!("Receive failed: {}", e)))?
     }
 
@@ -284,32 +339,15 @@ impl PluginRuntime {
         })
         .map_err(|e| PostGateError::Plugin(format!("Send failed: {}", e)))?;
 
-        respond_rx
+        tokio::time::timeout(PLUGIN_CALL_TIMEOUT, respond_rx)
             .await
+            .map_err(|_| {
+                PostGateError::Plugin(format!(
+                    "Plugin handleResponse timed out after {} seconds",
+                    PLUGIN_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| PostGateError::Plugin(format!("Receive failed: {}", e)))?
-    }
-
-    /// Process events from the plugin
-    pub async fn process_events(&mut self) -> Vec<PluginEvent> {
-        let mut events = Vec::new();
-
-        if let Some(ref mut rx) = self.event_rx {
-            while let Ok(event) = rx.try_recv() {
-                // Handle panel registration internally
-                match &event {
-                    PluginEvent::PanelRegistered { panel } => {
-                        self.panels.push(panel.clone());
-                    }
-                    PluginEvent::PanelUnregistered { panel_id } => {
-                        self.panels.retain(|p| p.id != *panel_id);
-                    }
-                    _ => {}
-                }
-                events.push(event);
-            }
-        }
-
-        events
     }
 }
 
@@ -329,7 +367,8 @@ async fn execute_handle_request(
             const plugin = globalThis.__plugin;
             if (!plugin || typeof plugin.handleRequest !== 'function') return null;
             const req = {};
-            const ctx = {};
+            const rawCtx = {};
+            const ctx = {{ ...rawCtx, logger: PostGate.createLogger('request') }};
             const result = await plugin.handleRequest(req, ctx);
             return result ? JSON.stringify(result) : null;
         }})()"#,
@@ -340,8 +379,7 @@ async fn execute_handle_request(
         .execute_script("<handleRequest>", script)
         .map_err(|e| PostGateError::Plugin(format!("handleRequest script error: {}", e)))?;
 
-    let resolved = runtime
-        .resolve(result)
+    let resolved = resolve_with_event_loop(runtime, result)
         .await
         .map_err(|e| PostGateError::Plugin(format!("handleRequest promise error: {}", e)))?;
 
@@ -361,6 +399,10 @@ async fn execute_handle_request(
     let rust_str = str_local.to_rust_string_lossy(pin_scope);
     let response: Option<PluginResponse> = serde_json::from_str(&rust_str)
         .map_err(|e| PostGateError::Plugin(format!("handleRequest JSON parse error: {}", e)))?;
+
+    if let Some(response) = &response {
+        response.validate()?;
+    }
 
     Ok(response)
 }
@@ -385,7 +427,8 @@ async fn execute_handle_response(
             if (!plugin || typeof plugin.handleResponse !== 'function') return null;
             const req = {};
             const res = {};
-            const ctx = {};
+            const rawCtx = {};
+            const ctx = {{ ...rawCtx, logger: PostGate.createLogger('request') }};
             const result = await plugin.handleResponse(req, res, ctx);
             return result ? JSON.stringify(result) : null;
         }})()"#,
@@ -396,8 +439,7 @@ async fn execute_handle_response(
         .execute_script("<handleResponse>", script)
         .map_err(|e| PostGateError::Plugin(format!("handleResponse script error: {}", e)))?;
 
-    let resolved = runtime
-        .resolve(result)
+    let resolved = resolve_with_event_loop(runtime, result)
         .await
         .map_err(|e| PostGateError::Plugin(format!("handleResponse promise error: {}", e)))?;
 
@@ -418,7 +460,37 @@ async fn execute_handle_response(
     let modified: Option<PluginResponse> = serde_json::from_str(&rust_str)
         .map_err(|e| PostGateError::Plugin(format!("handleResponse JSON parse error: {}", e)))?;
 
+    if let Some(response) = &modified {
+        response.validate()?;
+    }
+
     Ok(modified.unwrap_or(response))
+}
+
+async fn execute_on_unload(runtime: &mut JsRuntime) -> Result<()> {
+    let script = r#"(async () => {
+        const plugin = globalThis.__plugin;
+        if (plugin && typeof plugin.onUnload === 'function') {
+            await plugin.onUnload(globalThis.__pluginContext);
+        }
+    })()"#;
+    let result = runtime
+        .execute_script("<onUnload>", script)
+        .map_err(|e| PostGateError::Plugin(format!("onUnload script error: {}", e)))?;
+    resolve_with_event_loop(runtime, result)
+        .await
+        .map_err(|e| PostGateError::Plugin(format!("Plugin onUnload failed: {}", e)))?;
+    Ok(())
+}
+
+async fn resolve_with_event_loop(
+    runtime: &mut JsRuntime,
+    value: deno_core::v8::Global<deno_core::v8::Value>,
+) -> std::result::Result<deno_core::v8::Global<deno_core::v8::Value>, deno_core::error::CoreError> {
+    let promise = runtime.resolve(value);
+    runtime
+        .with_event_loop_promise(promise, PollEventLoopOptions::default())
+        .await
 }
 
 /// Preprocess ESM source code to make it compatible with our wrapper

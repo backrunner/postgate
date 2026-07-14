@@ -915,7 +915,7 @@ async fn handle_request(
             );
 
             // Apply plugin handleResponse if a plugin was matched
-            let (plugin_modified_body, plugin_modified_headers) =
+            let (plugin_modified_body, plugin_modified_headers, plugin_modified_status) =
                 if let Some(ref plugin_info) = request_modification.plugin {
                     // Build PluginRequest from request data
                     let plugin_request = PluginRequest {
@@ -984,7 +984,7 @@ async fn handle_request(
                             } else {
                                 modified.body.as_ref().map(|b| Bytes::from(b.clone()))
                             };
-                            (decoded_body, Some(modified.headers))
+                            (decoded_body, Some(modified.headers), Some(modified.status))
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -992,11 +992,11 @@ async fn handle_request(
                                 plugin_info.name,
                                 e
                             );
-                            (None, None)
+                            (None, None, None)
                         }
                     }
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
             // Apply response delay if specified
@@ -1095,7 +1095,9 @@ async fn handle_request(
             }
 
             let final_duration = start_time.elapsed().as_millis() as u64;
-            let final_status = response_modification.status_code.unwrap_or(status);
+            let final_status = plugin_modified_status
+                .or(response_modification.status_code)
+                .unwrap_or(status);
 
             if capture {
                 ctx.app_state.emit_request_event(&CapturedRequestEvent {

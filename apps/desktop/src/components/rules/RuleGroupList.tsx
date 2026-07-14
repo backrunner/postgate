@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { MoreVertical, Trash2, Edit, Power, PowerOff, Pencil } from 'lucide-react';
+import { MoreVertical, Trash2, Edit, Power, PowerOff, Pencil, FileCode } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -36,6 +36,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { PanelEmptyState } from '@/components/layout/PanelEmptyState';
 import { useRulesStore, RuleGroup } from '@/stores/rules';
 import { cn } from '@/lib/utils';
 
@@ -94,18 +95,19 @@ export function RuleGroupList({ className, filter }: RuleGroupListProps) {
 
   if (filteredGroups.length === 0) {
     return (
-      <div className={cn('flex flex-col items-center justify-center p-3 text-center', className)}>
-        <p className="text-xs text-muted-foreground">
-          {filter ? 'No matching groups' : 'No rule groups'}
-        </p>
-      </div>
+      <PanelEmptyState
+        icon={FileCode}
+        title={filter ? 'No matching groups' : 'No rule groups'}
+        compact
+        className={cn('pointer-events-none absolute inset-0', className)}
+      />
     );
   }
 
   const renderGroupItem = (group: RuleGroup) => (
     <div
       className={cn(
-        'flex items-center gap-1.5 rounded px-1.5 py-1 cursor-pointer transition-colors group',
+        'group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors',
         selectedGroupId === group.id
           ? 'bg-accent text-accent-foreground'
           : 'hover:bg-muted/50'
@@ -182,7 +184,7 @@ export function RuleGroupList({ className, filter }: RuleGroupListProps) {
   return (
     <>
       <ScrollArea className={className}>
-        <div className="space-y-0.5 p-1">
+        <div className="space-y-0.5 p-2">
           {filteredGroups.map((group) => (
             <ContextMenu key={group.id}>
               <ContextMenuTrigger asChild>

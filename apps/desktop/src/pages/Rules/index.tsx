@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { FileCode, Plus, Save, Undo2, ChevronLeft, ChevronRight, Search, CheckCircle, XCircle } from 'lucide-react';
+import { AlertTriangle, FileCode, Plus, Save, Undo2, ChevronLeft, Search, CheckCircle, XCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { PageHeader } from '@/components/layout/PageHeader';
+import { PanelEmptyState } from '@/components/layout/PanelEmptyState';
+import { WorkspaceSidebar } from '@/components/layout/WorkspaceSidebar';
 import {
   Dialog,
   DialogContent,
@@ -22,6 +24,7 @@ export function RulesPage() {
   const {
     groups,
     selectedGroupId,
+    editorContent,
     isDirty,
     parseResult,
     loadGroups,
@@ -37,9 +40,9 @@ export function RulesPage() {
   const [statusPanelCollapsed, setStatusPanelCollapsed] = useState(true); // Default collapsed
   
   // Resizable sidebar state
-  const [sidebarWidth, setSidebarWidth] = useState(200);
+  const [sidebarWidth, setSidebarWidth] = useState(240);
   const [isResizing, setIsResizing] = useState(false);
-  const sidebarRef = useRef<HTMLDivElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
 
   // Load groups on mount
   useEffect(() => {
@@ -67,8 +70,9 @@ export function RulesPage() {
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return;
-      const newWidth = e.clientX;
-      setSidebarWidth(Math.min(400, Math.max(140, newWidth)));
+      const sidebarLeft = sidebarRef.current?.getBoundingClientRect().left ?? 0;
+      const newWidth = e.clientX - sidebarLeft;
+      setSidebarWidth(Math.min(400, Math.max(200, newWidth)));
     };
 
     const handleMouseUp = () => {
@@ -131,11 +135,22 @@ export function RulesPage() {
     }
   };
 
-  // Check if current rules are valid
-  const isValid = parseResult ? parseResult.errors.length === 0 : true;
+  const hasNonCommentRuleLine = editorContent.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    return trimmed.length > 0 && !trimmed.startsWith('#');
+  });
+  const statusPanelVisible = !!selectedGroupId && (
+    parseResult
+      ? parseResult.rules.length > 0 ||
+        parseResult.errors.length > 0 ||
+        (parseResult.warnings?.length ?? 0) > 0
+      : hasNonCommentRuleLine
+  );
+  const hasStatusErrors = (parseResult?.errors.length ?? 0) > 0;
+  const hasStatusWarnings = (parseResult?.warnings?.length ?? 0) > 0;
 
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div className="flex h-full flex-col">
       {/* Unified page header */}
       <PageHeader
         icon={FileCode}
@@ -190,123 +205,105 @@ export function RulesPage() {
       {/* Content */}
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar - Rule Groups */}
-        <div
+        <WorkspaceSidebar
           ref={sidebarRef}
-          className="border-r flex flex-col relative"
+          title="Rule Groups"
           style={{ width: sidebarWidth }}
-        >
-          {/* Search and Add */}
-          <div className="px-1.5 py-1.5 border-b flex items-center gap-1">
-            <div className="relative flex-1">
-              <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
-              <Input
-                placeholder="Search..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="h-7 text-xs pl-7 bg-background"
-              />
-            </div>
+          onResizeStart={startResizing}
+          actions={(
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
                   size="icon"
                   variant="ghost"
-                  className="h-7 w-7 shrink-0"
+                  className="h-7 w-7"
                   onClick={() => setCreateDialogOpen(true)}
                 >
-                  <Plus className="h-4 w-4" />
+                  <Plus className="h-3.5 w-3.5" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>New group</TooltipContent>
             </Tooltip>
-          </div>
-
-          {/* Groups list */}
-          <RuleGroupList className="flex-1" filter={searchQuery} />
-
-          {/* Resize handle */}
-          <div
-            className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors"
-            onMouseDown={startResizing}
-          />
-        </div>
+          )}
+          toolbar={(
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="h-7 bg-background/80 pl-7 text-xs"
+              />
+            </div>
+          )}
+        >
+          <RuleGroupList className="h-full" filter={searchQuery} />
+        </WorkspaceSidebar>
 
         {/* Main editor area */}
-        <div className="flex-1 flex flex-col min-w-0 bg-background">
+        <div className="flex-1 flex flex-col min-w-0 bg-background/65">
           {selectedGroupId ? (
             <RuleEditor className="flex-1" />
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-muted-foreground">
-              <div className="h-16 w-16 bg-muted/30 rounded-2xl flex items-center justify-center mb-6">
-                <FileCode className="h-8 w-8 opacity-20" />
-              </div>
-              <h3 className="text-lg font-semibold mb-2 text-foreground">No Rule Group Selected</h3>
-              <p className="text-sm max-w-sm mb-8 leading-relaxed">
-                {groups.length === 0
+            <PanelEmptyState
+              icon={FileCode}
+              title="No Rule Group Selected"
+              description={
+                groups.length === 0
                   ? 'Create a rule group to start intercepting and modifying requests.'
-                  : 'Select a group from the sidebar to edit its rules.'}
-              </p>
-              
-              {groups.length === 0 && (
+                  : 'Select a group from the sidebar to edit its rules.'
+              }
+              action={groups.length === 0 ? (
                 <Button onClick={() => setCreateDialogOpen(true)}>
                   <Plus className="h-4 w-4 mr-2" />
                   Create Group
                 </Button>
-              )}
-            </div>
+              ) : undefined}
+              className="flex-1"
+            />
           )}
         </div>
 
         {/* Status panel */}
-        <div
-          className={cn(
-            'border-l flex flex-col',
-            statusPanelCollapsed ? 'w-10' : 'w-64'
-          )}
-        >
-          {/* Header - different layout when collapsed vs expanded */}
-          {statusPanelCollapsed ? (
-            // Collapsed: centered button + status indicator
-            <div className="flex flex-col items-center py-2 border-b">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 w-7 p-0"
-                onClick={() => setStatusPanelCollapsed(false)}
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              
-              {/* Show status indicator when collapsed */}
-              {selectedGroupId && (
-                <div className="mt-2">
-                  {isValid ? (
-                    <CheckCircle className="h-4 w-4 text-emerald-500" />
+        {statusPanelVisible && (
+          <div
+            className={cn(
+              'flex min-h-0 shrink-0 flex-col border-l bg-background/75 transition-[width] duration-150',
+              statusPanelCollapsed ? 'w-9' : 'w-64'
+            )}
+          >
+            {statusPanelCollapsed ? (
+              <>
+                <div className="flex h-9 shrink-0 items-center justify-center border-b">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground"
+                    onClick={() => setStatusPanelCollapsed(false)}
+                    aria-label="Expand status"
+                    title="Expand status"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <div className="flex justify-center pt-2">
+                  {hasStatusErrors ? (
+                    <XCircle className="h-3.5 w-3.5 text-red-500" aria-label="Rule errors" />
+                  ) : hasStatusWarnings ? (
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-500" aria-label="Rule warnings" />
                   ) : (
-                    <XCircle className="h-4 w-4 text-red-500" />
+                    <CheckCircle className="h-3.5 w-3.5 text-emerald-500" aria-label="Rules valid" />
                   )}
                 </div>
-              )}
-            </div>
-          ) : (
-            // Expanded: button on left + title
-            <div className="flex items-center h-9 border-b px-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 w-full justify-start gap-2 text-muted-foreground hover:text-foreground px-2 text-xs"
-                onClick={() => setStatusPanelCollapsed(true)}
-              >
-                <ChevronRight className="h-3.5 w-3.5" />
-                <span className="font-medium">Status</span>
-              </Button>
-            </div>
-          )}
-
-          {!statusPanelCollapsed && (
-            <ParseStatus className="flex-1" />
-          )}
-        </div>
+              </>
+            ) : (
+              <ParseStatus
+                className="min-h-0 flex-1"
+                onCollapse={() => setStatusPanelCollapsed(true)}
+              />
+            )}
+          </div>
+        )}
       </div>
 
       {/* Create Group Dialog */}

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Database,
   Plus,
@@ -35,6 +35,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { PageHeader } from '@/components/layout/PageHeader';
+import { PanelEmptyState } from '@/components/layout/PanelEmptyState';
+import { WorkspaceSidebar } from '@/components/layout/WorkspaceSidebar';
 import { useValuesStore, ValueEntry } from '@/stores/values';
 import { useThemeStore } from '@/stores/theme';
 import { cn } from '@/lib/utils';
@@ -140,8 +142,9 @@ export function ValuesPage() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   // Resizable sidebar — same pattern as Rules page.
-  const [sidebarWidth, setSidebarWidth] = useState(220);
+  const [sidebarWidth, setSidebarWidth] = useState(240);
   const [isResizing, setIsResizing] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     loadValues();
@@ -150,8 +153,9 @@ export function ValuesPage() {
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return;
-      const newWidth = e.clientX;
-      setSidebarWidth(Math.min(480, Math.max(160, newWidth)));
+      const sidebarLeft = sidebarRef.current?.getBoundingClientRect().left ?? 0;
+      const newWidth = e.clientX - sidebarLeft;
+      setSidebarWidth(Math.min(400, Math.max(200, newWidth)));
     };
     const handleMouseUp = () => setIsResizing(false);
     if (isResizing) {
@@ -258,7 +262,7 @@ export function ValuesPage() {
   const editorLanguage = selectedName ? languageForName(selectedName) : 'plaintext';
 
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div className="flex h-full flex-col">
       {/* Unified page header */}
       <PageHeader
         icon={Database}
@@ -317,45 +321,48 @@ export function ValuesPage() {
 
       {/* Content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <div className="border-r flex flex-col relative" style={{ width: sidebarWidth }}>
-          {/* Search + add */}
-          <div className="px-1.5 py-1.5 border-b flex items-center gap-1">
+        <WorkspaceSidebar
+          ref={sidebarRef}
+          title="Values"
+          style={{ width: sidebarWidth }}
+          onResizeStart={startResizing}
+          actions={(
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7"
+                  onClick={() => setCreateOpen(true)}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>New value</TooltipContent>
+            </Tooltip>
+          )}
+          toolbar={(
             <div className="relative flex-1">
               <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground" />
               <Input
                 placeholder="Search..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="h-7 text-xs pl-7 bg-background"
+                className="h-7 bg-background/80 pl-7 text-xs"
               />
             </div>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-7 w-7 shrink-0"
-                  onClick={() => setCreateOpen(true)}
-                >
-                  <Plus className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>New value</TooltipContent>
-            </Tooltip>
-          </div>
-
-          {/* Tree */}
-          <div className="flex-1 overflow-auto py-1">
+          )}
+        >
+          <div className="h-full overflow-auto p-2">
             {tree.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-10 px-4 text-center text-muted-foreground">
-                <Database className="h-6 w-6 mb-2 opacity-30" />
-                <p className="text-xs">
-                  {searchQuery ? 'No matches' : 'No values yet'}
-                </p>
-              </div>
+              <PanelEmptyState
+                icon={Database}
+                title={searchQuery ? 'No matches' : 'No values yet'}
+                compact
+                className="pointer-events-none absolute inset-0"
+              />
             ) : (
-              <ul className="text-xs">
+              <ul className="space-y-0.5 text-xs">
                 {tree.map((node) => (
                   <TreeItem
                     key={node.fullName ?? node.name}
@@ -376,16 +383,10 @@ export function ValuesPage() {
               </ul>
             )}
           </div>
-
-          {/* Resize handle */}
-          <div
-            className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-primary/20 active:bg-primary/40 transition-colors"
-            onMouseDown={startResizing}
-          />
-        </div>
+        </WorkspaceSidebar>
 
         {/* Editor */}
-        <div className="flex-1 flex flex-col min-w-0 bg-background">
+        <div className="flex-1 flex flex-col min-w-0 bg-background/65">
           {selectedName ? (
             <Editor
               height="100%"
@@ -409,23 +410,22 @@ export function ValuesPage() {
               }}
             />
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-muted-foreground">
-              <div className="h-16 w-16 bg-muted/30 rounded-2xl flex items-center justify-center mb-6">
-                <Database className="h-8 w-8 opacity-20" />
-              </div>
-              <h3 className="text-lg font-semibold mb-2 text-foreground">No Value Selected</h3>
-              <p className="text-sm max-w-sm mb-6 leading-relaxed">
-                {values.length === 0
+            <PanelEmptyState
+              icon={Database}
+              title="No Value Selected"
+              description={
+                values.length === 0
                   ? 'Create a value to reference it from your rules using {name} or `{name}` templates.'
-                  : 'Select a value from the sidebar to edit its content.'}
-              </p>
-              {values.length === 0 && (
+                  : 'Select a value from the sidebar to edit its content.'
+              }
+              action={values.length === 0 ? (
                 <Button onClick={() => setCreateOpen(true)}>
                   <Plus className="h-4 w-4 mr-2" />
                   Create Value
                 </Button>
-              )}
-            </div>
+              ) : undefined}
+              className="flex-1"
+            />
           )}
         </div>
       </div>
@@ -545,7 +545,7 @@ function TreeItem({
       <li>
         <button
           className={cn(
-            'w-full flex items-center gap-1 px-2 py-1 hover:bg-muted/50 text-left',
+            'w-full flex items-center gap-1 rounded-md px-2 py-1.5 hover:bg-muted/50 text-left',
           )}
           style={{ paddingLeft: 8 + depth * 12 }}
           onClick={() => toggleFolder(path)}
@@ -589,7 +589,7 @@ function TreeItem({
     >
       <button
         className={cn(
-          'w-full flex items-center gap-1 pr-14 px-2 py-1 text-left truncate',
+          'w-full flex items-center gap-1 rounded-md pr-14 px-2 py-1.5 text-left truncate',
           isSelected ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-muted/50',
         )}
         style={{ paddingLeft: 8 + depth * 12 + 12 /* chevron gap */ }}

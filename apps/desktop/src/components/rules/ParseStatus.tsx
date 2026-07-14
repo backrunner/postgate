@@ -1,176 +1,151 @@
-import { AlertTriangle, CheckCircle, XCircle } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { AlertTriangle, ArrowRight, CheckCircle, ChevronRight, ListFilter, Loader2, XCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useRulesStore, Rule, RuleAction } from '@/stores/rules';
+import { useRulesStore, Rule, RuleAction, ParseError } from '@/stores/rules';
 import { cn } from '@/lib/utils';
 
 interface ParseStatusProps {
   className?: string;
+  onCollapse: () => void;
 }
 
-export function ParseStatus({ className }: ParseStatusProps) {
+export function ParseStatus({ className, onCollapse }: ParseStatusProps) {
   const { parseResult, selectedGroupId } = useRulesStore();
 
   if (!selectedGroupId) {
-    return (
-      <div className={cn('flex items-center justify-center px-3 py-2 text-muted-foreground', className)}>
-        <span className="text-[11px]">Select a rule group</span>
-      </div>
-    );
+    return null;
   }
 
-  if (!parseResult) {
-    return (
-      <div className={cn('flex items-center justify-center px-3 py-2', className)}>
-        <span className="text-[11px] text-muted-foreground">Parsing...</span>
-      </div>
-    );
-  }
-
-  const { rules, errors, warnings = [] } = parseResult;
+  const rules = parseResult?.rules ?? [];
+  const errors = parseResult?.errors ?? [];
+  const warnings = parseResult?.warnings ?? [];
+  const isParsing = !parseResult;
   const hasErrors = errors.length > 0;
   const hasWarnings = warnings.length > 0;
+  const summary = isParsing
+    ? 'Parsing'
+    : hasErrors
+      ? `${errors.length} ${errors.length === 1 ? 'error' : 'errors'}`
+      : hasWarnings
+        ? `${warnings.length} ${warnings.length === 1 ? 'warning' : 'warnings'}`
+        : `${rules.length} ${rules.length === 1 ? 'rule' : 'rules'}`;
 
   return (
-    <div className={cn('flex flex-col overflow-hidden', className)}>
-      {/* Status header - match parent header: h-9 with px-3 inner content */}
-      <div className="flex items-center justify-between h-9 px-3 border-b bg-muted/30">
-        <div className="flex items-center gap-1.5">
-          {hasErrors ? (
-            <XCircle className="h-3 w-3 text-red-500 shrink-0" />
-          ) : hasWarnings ? (
-            <AlertTriangle className="h-3 w-3 text-amber-500 shrink-0" />
-          ) : (
-            <CheckCircle className="h-3 w-3 text-emerald-500 shrink-0" />
-          )}
-          <span className="text-xs font-medium">
-            {hasErrors ? 'Errors' : hasWarnings ? 'Valid with warnings' : 'Valid'}
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Badge variant="secondary" className="text-[10px] px-1 py-0 h-4">
-            {rules.length}
-          </Badge>
-          {hasErrors && (
-            <Badge variant="destructive" className="text-[10px] px-1 py-0 h-4">
-              {errors.length}
-            </Badge>
-          )}
-          {hasWarnings && (
-            <Badge variant="outline" className="text-[10px] px-1 py-0 h-4 text-amber-600 border-amber-500/40">
-              {warnings.length}
-            </Badge>
-          )}
-        </div>
+    <section className={cn('flex min-h-0 flex-col overflow-hidden bg-background', className)}>
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b px-2">
+        {isParsing ? (
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+        ) : hasErrors ? (
+          <XCircle className="h-3.5 w-3.5 shrink-0 text-red-500" />
+        ) : hasWarnings ? (
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+        ) : (
+          <CheckCircle className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+        )}
+        <span className="text-xs font-medium text-foreground">Status</span>
+        <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+          {summary}
+        </span>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 shrink-0 text-muted-foreground"
+          onClick={onCollapse}
+          aria-label="Collapse status"
+          title="Collapse status"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </Button>
       </div>
 
-      {/* Content - same px-3 as header for alignment */}
-      <ScrollArea className="flex-1">
-        {hasErrors ? (
-          <div className="px-3 py-2 space-y-1.5">
-            {errors.map((error, index) => (
-              <div
-                key={index}
-                className="p-1.5 rounded bg-red-500/10 border border-red-500/20 overflow-hidden"
-              >
-                <div className="flex items-center gap-1">
-                  <span className="text-[10px] font-medium text-red-600 dark:text-red-400 shrink-0">
-                    L{error.line}
-                  </span>
-                  <span className="text-[10px] text-muted-foreground truncate flex-1 w-0" title={error.message}>
-                    {error.message}
-                  </span>
-                </div>
-                {error.content && (
-                  <code className="text-[10px] bg-muted px-1 py-0.5 rounded mt-1 block truncate" title={error.content}>
-                    {error.content}
-                  </code>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : hasWarnings ? (
-          <div className="px-3 py-2 space-y-1.5">
-            {warnings.map((warning, index) => (
-              <div
-                key={index}
-                className="p-1.5 rounded bg-amber-500/10 border border-amber-500/20 overflow-hidden"
-              >
-                <div className="flex items-center gap-1">
-                  <span className="text-[10px] font-medium text-amber-600 dark:text-amber-400 shrink-0">
-                    L{warning.line}
-                  </span>
-                  <span className="text-[10px] text-muted-foreground truncate flex-1 w-0" title={warning.message}>
-                    {warning.message}
-                  </span>
-                </div>
-                {warning.content && (
-                  <code className="text-[10px] bg-muted px-1 py-0.5 rounded mt-1 block truncate" title={warning.content}>
-                    {warning.content}
-                  </code>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : rules.length > 0 ? (
-          <div className="px-3 py-2 space-y-1.5">
+      {!isParsing && (
+        <ScrollArea className="min-h-0 flex-1">
+          {(hasErrors || hasWarnings) ? (
+            <div className="divide-y divide-border/60">
+              {errors.map((error, index) => (
+                <DiagnosticItem key={`error-${index}`} diagnostic={error} tone="error" />
+              ))}
+              {warnings.map((warning, index) => (
+                <DiagnosticItem key={`warning-${index}`} diagnostic={warning} tone="warning" />
+              ))}
+            </div>
+          ) : (
+            <div className="divide-y divide-border/60">
             {rules.map((rule, index) => (
               <RuleItem key={rule.id || index} rule={rule} />
             ))}
-          </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center px-3 py-4 text-center">
-            <p className="text-[11px] text-muted-foreground">No rules</p>
-          </div>
-        )}
-      </ScrollArea>
+            </div>
+          )}
+        </ScrollArea>
+      )}
+    </section>
+  );
+}
+
+function DiagnosticItem({
+  diagnostic,
+  tone,
+}: {
+  diagnostic: ParseError;
+  tone: 'error' | 'warning';
+}) {
+  const lineClass = tone === 'error'
+    ? 'text-red-600 dark:text-red-400'
+    : 'text-amber-600 dark:text-amber-400';
+
+  return (
+    <div className="px-2.5 py-2">
+      <div className="flex min-w-0 items-start gap-2">
+        <span className={cn('shrink-0 text-[10px] font-semibold leading-4', lineClass)}>
+          L{diagnostic.line}
+        </span>
+        <p className="min-w-0 flex-1 break-words text-[10px] leading-4 text-foreground/80">
+          {diagnostic.message}
+        </p>
+      </div>
+      {diagnostic.content && (
+        <code
+          className="mt-1 block max-h-9 overflow-hidden break-all rounded-sm bg-muted/60 px-1.5 py-1 text-[9px] leading-3.5 text-muted-foreground"
+          title={diagnostic.content}
+        >
+          {diagnostic.content}
+        </code>
+      )}
     </div>
   );
 }
 
-// Separate component for each rule item with detailed breakdown
 function RuleItem({ rule }: { rule: Rule }) {
   const source = formatSource(rule);
   const target = formatTarget(rule.actions);
   const actionType = getMainActionType(rule.actions);
+  const isFiltered = !!rule.filters && Object.keys(rule.filters).some((key) => {
+    const value = rule.filters?.[key as keyof typeof rule.filters];
+    return Array.isArray(value) ? value.length > 0 : !!value;
+  });
 
   return (
-    <div className="p-1.5 rounded bg-muted/50 space-y-0.5 overflow-hidden">
-      {/* Source (pattern) */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-[9px] text-muted-foreground shrink-0 w-9">source</span>
-        <span className="text-[10px] font-mono truncate flex-1 w-0" title={source}>
+    <div className="px-2.5 py-2 hover:bg-muted/25">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-foreground" title={source}>
           {source}
         </span>
+        {isFiltered && (
+          <ListFilter className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Filtered rule" />
+        )}
+        <span className="shrink-0 rounded-sm border border-border/70 px-1 py-0.5 text-[9px] leading-none text-muted-foreground">
+          {actionType}
+        </span>
       </div>
-      
-      {/* Target (action destination) */}
+
       {target && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-[9px] text-muted-foreground shrink-0 w-9">target</span>
-          <span className="text-[10px] font-mono truncate flex-1 w-0 text-blue-600 dark:text-blue-400" title={target}>
+        <div className="mt-0.5 flex min-w-0 items-center gap-1 text-[9px] leading-4">
+          <ArrowRight className="h-2.5 w-2.5 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 truncate font-mono text-blue-600 dark:text-blue-400" title={target}>
             {target}
           </span>
         </div>
       )}
-      
-      {/* Action type */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-[9px] text-muted-foreground shrink-0 w-9">action</span>
-        <div className="flex items-center gap-0.5 flex-1 w-0 overflow-hidden">
-          <Badge variant="outline" className="text-[9px] px-1 py-0 h-3.5 shrink-0">
-            {actionType}
-          </Badge>
-          {rule.filters && Object.keys(rule.filters).some(k => {
-            const v = rule.filters?.[k as keyof typeof rule.filters];
-            return Array.isArray(v) ? v.length > 0 : !!v;
-          }) && (
-            <Badge variant="secondary" className="text-[9px] px-1 py-0 h-3.5 text-purple-600 dark:text-purple-400 shrink-0">
-              filtered
-            </Badge>
-          )}
-        </div>
-      </div>
     </div>
   );
 }

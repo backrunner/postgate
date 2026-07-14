@@ -52,6 +52,7 @@ export interface ReplayResponse {
   statusText: string;
   headers: Record<string, string>;
   body: string | null;
+  bodyIsBase64: boolean;
   bodySize: number;
   contentType: string | null;
   durationMs: number;
@@ -131,7 +132,7 @@ const defaultRequest: SavedRequest = {
   collection_id: null,
   method: 'GET',
   url: '',
-  headers: [{ key: 'Content-Type', value: 'application/json', enabled: true }],
+  headers: [],
   query_params: [],
   body: { type: 'none' },
   created_at: 0,
@@ -252,10 +253,12 @@ export const useReplayStore = create<ReplayState>((set, get) => ({
       const response = await invoke<ReplayResponse>('execute_saved_request', { 
         request: currentRequest 
       });
-      set({ response, isExecuting: false });
-      await get().fetchHistory();
+      set({ response });
     } catch (error) {
-      set({ error: String(error), isExecuting: false });
+      set({ error: String(error) });
+    } finally {
+      set({ isExecuting: false });
+      await get().fetchHistory();
     }
   },
 

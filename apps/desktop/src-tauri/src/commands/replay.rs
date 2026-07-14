@@ -222,21 +222,26 @@ pub async fn execute_saved_request(
     state: State<'_, Arc<AppState>>,
     request: SavedRequest,
 ) -> Result<ReplayResponse> {
-    let response = execute_request(&request).await?;
+    let execution = execute_request(&request).await;
+    let (response, error) = match &execution {
+        Ok(response) => (Some(response.clone()), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
 
-    // Optionally save to history
+    // Save both successful and failed sends so Sender history is a reliable
+    // record of what the user attempted.
     let db = state.get_database().await?;
     let history = RequestHistory {
         id: Uuid::new_v4().to_string(),
-        saved_request_id: Some(request.id.clone()),
+        saved_request_id: (!request.id.is_empty()).then(|| request.id.clone()),
         request: request.clone(),
-        response: Some(response.clone()),
-        error: None,
+        response,
+        error,
         executed_at: chrono::Utc::now().timestamp_millis(),
     };
     let _ = db.save_history(&history).await;
 
-    Ok(response)
+    execution
 }
 
 /// Get request history
@@ -395,6 +400,7 @@ fn header_value<'a>(headers: &'a HashMap<String, String>, name: &str) -> Option<
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

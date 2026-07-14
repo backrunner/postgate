@@ -2,14 +2,17 @@
 
 use crate::error::{PostGateError, Result};
 use crate::replay::types::*;
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
-use hyper::{Method, Request, Response};
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
+use reqwest::{Client, Method};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+const REPLAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_REDIRECTS: usize = 10;
+
+static REPLAY_CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
 
 struct BuiltRequestBody {
     bytes: Vec<u8>,
@@ -18,101 +21,86 @@ struct BuiltRequestBody {
 
 /// Execute a saved request and return the response
 pub async fn execute_request(request: &SavedRequest) -> Result<ReplayResponse> {
+    let client = replay_client()?;
+    execute_request_with_client(request, client).await
+}
+
+fn replay_client() -> Result<&'static Client> {
+    REPLAY_CLIENT
+        .get_or_init(|| {
+            build_replay_client(REPLAY_REQUEST_TIMEOUT).map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| PostGateError::Proxy(format!("Failed to create HTTP client: {error}")))
+}
+
+fn build_replay_client(timeout: Duration) -> std::result::Result<Client, reqwest::Error> {
+    Client::builder()
+        .connect_timeout(REPLAY_CONNECT_TIMEOUT.min(timeout))
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+        .build()
+}
+
+async fn execute_request_with_client(
+    request: &SavedRequest,
+    client: &Client,
+) -> Result<ReplayResponse> {
     let start = Instant::now();
 
-    // Build the URL with query parameters
-    let mut url = request.url.clone();
-    let enabled_params: Vec<_> = request.query_params.iter().filter(|p| p.enabled).collect();
-
-    if !enabled_params.is_empty() {
-        let query_string = enabled_params
-            .iter()
-            .map(|p| {
-                format!(
-                    "{}={}",
-                    urlencoding::encode(&p.key),
-                    urlencoding::encode(&p.value)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("&");
-
-        if url.contains('?') {
-            url = format!("{}&{}", url, query_string);
-        } else {
-            url = format!("{}?{}", url, query_string);
-        }
-    }
-
-    // Parse the URL
-    let uri: hyper::Uri = url
-        .parse()
-        .map_err(|e| PostGateError::Proxy(format!("Invalid URL: {}", e)))?;
-
-    // Determine the host and scheme
-    let scheme = uri.scheme_str().unwrap_or("http");
-    let host = uri
-        .host()
-        .ok_or_else(|| PostGateError::Proxy("URL missing host".into()))?;
-    let port = uri
-        .port_u16()
-        .unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let url = build_request_url(request)?;
 
     // Build request body
     let body = build_request_body(&request.body)?;
 
-    // Create the HTTP request
+    // Create the HTTP request and validate user-provided headers up front.
     let method: Method = request
         .method
         .parse()
         .map_err(|_| PostGateError::Proxy(format!("Invalid method: {}", request.method)))?;
+    let mut headers = HeaderMap::new();
 
-    let mut req_builder = Request::builder().method(method).uri(&url);
-
-    // Add headers
     for header in &request.headers {
         if header.enabled && !header.key.is_empty() {
-            req_builder = req_builder.header(&header.key, &header.value);
+            let lower = header.key.trim().to_ascii_lowercase();
+            // Reqwest owns framing. Replaying captured Content-Length or
+            // Transfer-Encoding alongside an edited body produces duplicate
+            // or contradictory entity headers.
+            if lower == "content-length" || lower == "transfer-encoding" {
+                continue;
+            }
+            let name = HeaderName::from_bytes(header.key.trim().as_bytes()).map_err(|error| {
+                PostGateError::Proxy(format!("Invalid header name '{}': {error}", header.key))
+            })?;
+            let value = HeaderValue::from_str(&header.value).map_err(|error| {
+                PostGateError::Proxy(format!(
+                    "Invalid value for header '{}': {error}",
+                    header.key
+                ))
+            })?;
+            headers.append(name, value);
         }
-    }
-
-    // Add Host header if not present
-    let has_host = request
-        .headers
-        .iter()
-        .any(|h| h.enabled && h.key.to_lowercase() == "host");
-    if !has_host {
-        req_builder = req_builder.header("Host", format!("{}:{}", host, port));
     }
 
     // Add Content-Type header for body if needed
     if let Some(content_type) = body.content_type.as_deref() {
-        let has_content_type = request
-            .headers
-            .iter()
-            .any(|h| h.enabled && h.key.to_lowercase() == "content-type");
-        if !has_content_type {
-            req_builder = req_builder.header("Content-Type", content_type);
+        if !headers.contains_key(CONTENT_TYPE) {
+            headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_str(content_type).map_err(|error| {
+                    PostGateError::Proxy(format!("Invalid body content type: {error}"))
+                })?,
+            );
         }
     }
 
-    // Add Content-Length
-    if !body.bytes.is_empty() {
-        req_builder = req_builder.header("Content-Length", body.bytes.len().to_string());
-    }
-
-    let req = req_builder
-        .body(Full::new(Bytes::from(body.bytes)))
-        .map_err(|e| PostGateError::Proxy(format!("Failed to build request: {}", e)))?;
-
-    // Create HTTP client based on scheme
-    let response = if scheme == "https" {
-        execute_https_request(req, host, port).await?
-    } else {
-        execute_http_request(req).await?
-    };
-
-    let duration_ms = start.elapsed().as_millis() as u64;
+    let response = client
+        .request(method, url)
+        .headers(headers)
+        .body(body.bytes)
+        .send()
+        .await
+        .map_err(|error| PostGateError::Proxy(format!("Request failed: {error}")))?;
 
     // Extract response info
     let status = response.status().as_u16();
@@ -122,76 +110,86 @@ pub async fn execute_request(request: &SavedRequest) -> Result<ReplayResponse> {
         .unwrap_or("Unknown")
         .to_string();
 
-    let mut headers = HashMap::new();
-    for (name, value) in response.headers() {
-        if let Ok(v) = value.to_str() {
-            headers.insert(name.to_string(), v.to_string());
-        }
+    let mut response_headers = HashMap::new();
+    for name in response.headers().keys() {
+        let values = response
+            .headers()
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        response_headers.insert(name.as_str().to_string(), values);
     }
 
-    let content_type = headers.get("content-type").cloned();
+    let content_type = response_headers.get("content-type").cloned();
 
-    // Collect body
+    // Reqwest transparently decodes gzip, br, deflate and zstd when the
+    // corresponding response Content-Encoding is present.
     let body_bytes = response
-        .into_body()
-        .collect()
+        .bytes()
         .await
-        .map_err(|e| PostGateError::Proxy(format!("Failed to read response body: {}", e)))?
-        .to_bytes();
+        .map_err(|error| PostGateError::Proxy(format!("Failed to read response body: {error}")))?;
 
     let body_size = body_bytes.len() as u64;
+    let duration_ms = start.elapsed().as_millis() as u64;
 
-    // Try to decode as text, fallback to base64
-    let body = if is_text_content(&content_type) {
-        String::from_utf8(body_bytes.to_vec()).ok()
+    // Try to decode text, but never turn invalid UTF-8 into an unexplained
+    // empty response. Binary and invalid-text responses are explicit base64.
+    let (body, body_is_base64) = if is_text_content(&content_type) || content_type.is_none() {
+        match String::from_utf8(body_bytes.to_vec()) {
+            Ok(text) => (Some(text), false),
+            Err(error) => (
+                Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    error.into_bytes(),
+                )),
+                true,
+            ),
+        }
     } else {
-        Some(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &body_bytes,
-        ))
+        (
+            Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &body_bytes,
+            )),
+            true,
+        )
     };
 
     Ok(ReplayResponse {
         status,
         status_text,
-        headers,
+        headers: response_headers,
         body,
+        body_is_base64,
         body_size,
         content_type,
         duration_ms,
     })
 }
 
-/// Execute an HTTP request
-async fn execute_http_request(req: Request<Full<Bytes>>) -> Result<Response<Incoming>> {
-    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build_http();
-
-    client
-        .request(req)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTP request failed: {}", e)))
-}
-
-/// Execute an HTTPS request
-async fn execute_https_request(
-    req: Request<Full<Bytes>>,
-    _host: &str,
-    _port: u16,
-) -> Result<Response<Incoming>> {
-    use hyper_rustls::HttpsConnectorBuilder;
-
-    let https = HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .build();
-
-    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(https);
-
-    client
-        .request(req)
-        .await
-        .map_err(|e| PostGateError::Proxy(format!("HTTPS request failed: {}", e)))
+fn build_request_url(request: &SavedRequest) -> Result<url::Url> {
+    let mut url = url::Url::parse(request.url.trim())
+        .map_err(|error| PostGateError::Proxy(format!("Invalid URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(PostGateError::Proxy(format!(
+            "Unsupported URL scheme: {}",
+            url.scheme()
+        )));
+    }
+    url.set_fragment(None);
+    {
+        let mut query = url.query_pairs_mut();
+        for parameter in request
+            .query_params
+            .iter()
+            .filter(|parameter| parameter.enabled)
+        {
+            query.append_pair(&parameter.key, &parameter.value);
+        }
+    }
+    Ok(url)
 }
 
 /// Build request body bytes and the Content-Type implied by the body editor.
@@ -320,6 +318,73 @@ fn is_text_content(content_type: &Option<String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+
+    fn saved_request(url: String, body: RequestBody) -> SavedRequest {
+        SavedRequest {
+            id: "request-1".into(),
+            name: "Test".into(),
+            collection_id: None,
+            method: "POST".into(),
+            url,
+            headers: Vec::new(),
+            query_params: Vec::new(),
+            body,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    async fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+
+        request
+    }
+
+    async fn spawn_single_response(response: Vec<u8>) -> (String, oneshot::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (request_tx, request_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await;
+            let _ = request_tx.send(request);
+            stream.write_all(&response).await.unwrap();
+        });
+        (format!("http://127.0.0.1:{port}/test"), request_rx)
+    }
 
     #[test]
     fn raw_body_content_type_does_not_leak_static_string() {
@@ -367,5 +432,108 @@ mod tests {
         assert!(is_text_content(&Some(
             "Application/JSON; Charset=UTF-8".to_string()
         )));
+    }
+
+    #[test]
+    fn request_url_appends_encoded_query_and_drops_fragment() {
+        let mut request = saved_request(
+            "https://example.com/path?existing=1#section".into(),
+            RequestBody::None,
+        );
+        request.query_params.push(KeyValuePair {
+            key: "a b".into(),
+            value: "x/y".into(),
+            enabled: true,
+            description: None,
+        });
+
+        let url = build_request_url(&request).unwrap();
+        assert_eq!(url.fragment(), None);
+        assert_eq!(
+            url.query_pairs().collect::<Vec<_>>(),
+            vec![
+                ("existing".into(), "1".into()),
+                ("a b".into(), "x/y".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_request_decodes_gzip_json() {
+        let json = br#"{"ok":true,"message":"compressed"}"#;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(json).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: Application/JSON; Charset=UTF-8\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            compressed.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&compressed);
+        let (url, _request_rx) = spawn_single_response(response).await;
+        let client = build_replay_client(Duration::from_secs(2)).unwrap();
+        let request = saved_request(url, RequestBody::None);
+
+        let result = execute_request_with_client(&request, &client)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.body.as_deref(),
+            Some(std::str::from_utf8(json).unwrap())
+        );
+        assert!(!result.body_is_base64);
+        assert_eq!(result.body_size, json.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn execute_request_replaces_captured_content_length() {
+        let response = b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_vec();
+        let (url, request_rx) = spawn_single_response(response).await;
+        let client = build_replay_client(Duration::from_secs(2)).unwrap();
+        let mut request = saved_request(
+            url,
+            RequestBody::Raw {
+                content: "hello".into(),
+                content_type: "text/plain".into(),
+            },
+        );
+        request.headers.push(KeyValuePair {
+            key: "Content-Length".into(),
+            value: "999".into(),
+            enabled: true,
+            description: None,
+        });
+
+        execute_request_with_client(&request, &client)
+            .await
+            .unwrap();
+        let wire = String::from_utf8(request_rx.await.unwrap()).unwrap();
+        let lower = wire.to_ascii_lowercase();
+
+        assert_eq!(lower.matches("content-length:").count(), 1);
+        assert!(lower.contains("content-length: 5"));
+        assert!(wire.ends_with("hello"));
+    }
+
+    #[tokio::test]
+    async fn execute_request_honors_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let client = build_replay_client(Duration::from_millis(50)).unwrap();
+        let request = saved_request(format!("http://127.0.0.1:{port}/slow"), RequestBody::None);
+
+        let started = Instant::now();
+        let error = execute_request_with_client(&request, &client)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(error.contains("Request failed"));
     }
 }

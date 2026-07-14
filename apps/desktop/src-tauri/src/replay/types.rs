@@ -98,6 +98,8 @@ pub struct ReplayResponse {
     pub status_text: String,
     pub headers: HashMap<String, String>,
     pub body: Option<String>, // Base64 encoded for binary
+    #[serde(default, rename = "bodyIsBase64")]
+    pub body_is_base64: bool,
     #[serde(rename = "bodySize")]
     pub body_size: u64,
     #[serde(rename = "contentType")]

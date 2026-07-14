@@ -45,10 +45,13 @@ import {
   SavedRequest,
   CollectionNode,
   KeyValuePair,
+  FormDataField,
   RequestBody,
   RequestHistory,
 } from "@/stores/replay";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { PanelEmptyState } from "@/components/layout/PanelEmptyState";
+import { WorkspaceSidebar } from "@/components/layout/WorkspaceSidebar";
 import { cn, getMethodClass, getStatusClass, formatDuration, formatBytes } from "@/lib/utils";
 
 export function ReplayPage() {
@@ -125,22 +128,25 @@ export function ReplayPage() {
     }
   };
 
+  const collectionTreeIsEmpty = !isLoading && !!tree &&
+    tree.root_requests.length === 0 && tree.collections.length === 0;
+
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div className="flex h-full flex-col">
       {/* Unified page header */}
       <PageHeader icon={Send} title="Replay" />
 
       <div className="flex flex-1 overflow-hidden">
-      {/* Sidebar - Collections */}
-      <div className="w-60 border-r flex flex-col bg-muted/10">
-        <div className="flex h-10 items-center justify-between border-b px-3 bg-muted/10">
-          <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Collections</h2>
-          <div className="flex items-center gap-0.5">
+      <WorkspaceSidebar
+        title="Collections"
+        actions={(
+          <>
             <Button 
               variant="ghost" 
               size="icon" 
               className="h-7 w-7"
               title="New Collection"
+              aria-label="New collection"
               onClick={() => setShowNewCollection(true)}
             >
               <FolderPlus className="h-3.5 w-3.5" />
@@ -150,55 +156,54 @@ export function ReplayPage() {
               size="icon" 
               className="h-7 w-7"
               title="New Request"
+              aria-label="New request"
               onClick={() => handleNewRequest()}
             >
               <FilePlus className="h-3.5 w-3.5" />
             </Button>
-          </div>
-        </div>
-
-        {/* Search & Filter */}
-        <div className="p-2 border-b">
+          </>
+        )}
+        toolbar={(
           <div className="relative">
             <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
             <Input 
               placeholder="Filter..." 
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              className="h-7 pl-7 text-xs bg-background" 
+              className="h-7 bg-background/80 pl-7 text-xs"
             />
           </div>
-        </div>
-
-        {/* New Collection Input */}
-        {showNewCollection && (
-          <div className="p-2 border-b bg-muted/20 animate-in slide-in-from-top-2 duration-200">
-            <div className="flex items-center gap-1.5">
-              <Folder className="h-3.5 w-3.5 text-blue-500" />
-              <Input
-                value={newCollectionName}
-                onChange={(e) => setNewCollectionName(e.target.value)}
-                placeholder="Collection Name"
-                className="h-7 text-xs flex-1"
-                onKeyDown={(e) => e.key === "Enter" && handleCreateCollection()}
-                autoFocus
-              />
-              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={handleCreateCollection}>
-                <Plus className="h-3.5 w-3.5" />
-              </Button>
-              <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setShowNewCollection(false)}>
-                <X className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          </div>
         )}
+      >
+        <div className="flex h-full min-h-0 flex-col">
+          {showNewCollection && (
+            <div className="relative z-10 shrink-0 animate-in border-b bg-background/70 p-2 slide-in-from-top-2 duration-200">
+              <div className="flex items-center gap-1.5">
+                <Folder className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                <Input
+                  value={newCollectionName}
+                  onChange={(e) => setNewCollectionName(e.target.value)}
+                  placeholder="Collection Name"
+                  className="h-7 min-w-0 flex-1 text-xs"
+                  onKeyDown={(e) => e.key === "Enter" && handleCreateCollection()}
+                  autoFocus
+                />
+                <Button size="icon" variant="ghost" className="h-7 w-7 shrink-0" onClick={handleCreateCollection} aria-label="Create collection">
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+                <Button size="icon" variant="ghost" className="h-7 w-7 shrink-0" onClick={() => setShowNewCollection(false)} aria-label="Cancel">
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          )}
 
-        <ScrollArea className="flex-1">
+          <ScrollArea className="min-h-0 flex-1">
           {isLoading ? (
             <div className="flex items-center justify-center p-8">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             </div>
-          ) : tree ? (
+          ) : tree && !collectionTreeIsEmpty ? (
             <div className="p-2 space-y-0.5">
               {/* Root requests */}
               {tree.root_requests.map((request) => (
@@ -227,17 +232,20 @@ export function ReplayPage() {
                   onNewRequest={handleNewRequest}
                 />
               ))}
-
-              {tree.root_requests.length === 0 && tree.collections.length === 0 && (
-                <div className="flex flex-col items-center justify-center p-8 text-center text-muted-foreground">
-                  <Database className="h-8 w-8 mb-2 opacity-20" />
-                  <p className="text-xs">No collections yet</p>
-                </div>
-              )}
             </div>
           ) : null}
-        </ScrollArea>
-      </div>
+          </ScrollArea>
+
+          {collectionTreeIsEmpty && (
+            <PanelEmptyState
+              icon={Database}
+              title="No collections yet"
+              compact
+              className="pointer-events-none absolute inset-0"
+            />
+          )}
+        </div>
+      </WorkspaceSidebar>
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -271,6 +279,11 @@ export function ReplayPage() {
                   <Input
                     value={currentRequest.url}
                     onChange={(e) => updateCurrentRequest({ url: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && currentRequest.url.trim() && !isExecuting) {
+                        void executeRequest();
+                      }
+                    }}
                     placeholder="https://api.example.com/endpoint"
                     className="h-8 font-mono text-xs border-muted-foreground/20 focus-visible:ring-primary/20"
                   />
@@ -280,7 +293,7 @@ export function ReplayPage() {
               <div className="flex items-center gap-2">
                 <Button 
                   onClick={executeRequest} 
-                  disabled={isExecuting}
+                  disabled={isExecuting || !currentRequest.url.trim()}
                   className="h-8 px-4 text-xs font-medium gap-1.5"
                 >
                   {isExecuting ? (
@@ -451,6 +464,7 @@ export function ReplayPage() {
                           <ResponseBodyView 
                             body={response.body} 
                             contentType={response.contentType} 
+                            bodyIsBase64={response.bodyIsBase64}
                           />
                         </TabsContent>
 
@@ -485,16 +499,11 @@ export function ReplayPage() {
             </div>
           </>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center bg-muted/5">
-            <div className="text-center max-w-md p-8">
-              <div className="mx-auto h-16 w-16 bg-primary/5 rounded-2xl flex items-center justify-center mb-6 ring-1 ring-primary/10">
-                <Send className="h-8 w-8 text-primary/60" />
-              </div>
-              <h3 className="text-lg font-semibold mb-2">Request Replay</h3>
-              <p className="text-sm text-muted-foreground mb-8 leading-relaxed">
-                Test APIs directly from PostGate. Create collections, save requests, 
-                and inspect responses with a powerful HTTP client.
-              </p>
+          <PanelEmptyState
+            icon={Send}
+            title="Request Replay"
+            description="Test APIs directly from PostGate. Create collections, save requests, and inspect responses with a powerful HTTP client."
+            action={(
               <div className="flex items-center justify-center gap-3">
                 <Button onClick={() => handleNewRequest()} className="gap-2">
                   <FilePlus className="h-4 w-4" />
@@ -505,8 +514,9 @@ export function ReplayPage() {
                   New Collection
                 </Button>
               </div>
-            </div>
-          </div>
+            )}
+            className="flex-1 bg-muted/5"
+          />
         )}
       </div>
       </div>
@@ -825,11 +835,19 @@ interface BodyEditorProps {
 
 function BodyEditor({ body, onChange }: BodyEditorProps) {
   const bodyType = body.type;
+  const bodyTypes = [
+    "none",
+    "raw",
+    "json",
+    "form-data",
+    "x-www-form-urlencoded",
+    "binary",
+  ] as const;
 
   return (
     <div className="space-y-4">
-      <div className="flex gap-1 p-1 bg-muted/20 rounded-md w-fit">
-        {(["none", "raw", "json", "x-www-form-urlencoded"] as const).map((type) => (
+      <div className="flex flex-wrap gap-1 p-1 bg-muted/20 rounded-md w-full">
+        {bodyTypes.map((type) => (
           <Button
             key={type}
             variant={bodyType === type ? "secondary" : "ghost"}
@@ -842,24 +860,43 @@ function BodyEditor({ body, onChange }: BodyEditorProps) {
                 onChange({ type: "raw", content: "", contentType: "text/plain" });
               } else if (type === "json") {
                 onChange({ type: "json", content: "{}" });
+              } else if (type === "form-data") {
+                onChange({ type: "form-data", fields: [] });
               } else if (type === "x-www-form-urlencoded") {
                 onChange({ type: "x-www-form-urlencoded", fields: [] });
+              } else if (type === "binary") {
+                onChange({ type: "binary" });
               }
             }}
           >
-            {type === "x-www-form-urlencoded" ? "Form URL Encoded" : type.charAt(0).toUpperCase() + type.slice(1)}
+            {type === "x-www-form-urlencoded"
+              ? "URL Encoded"
+              : type === "form-data"
+                ? "Form Data"
+                : type.charAt(0).toUpperCase() + type.slice(1)}
           </Button>
         ))}
       </div>
 
       <div className="border rounded-md min-h-[200px] relative bg-background">
         {body.type === "raw" && (
-          <textarea
-            value={body.content}
-            onChange={(e) => onChange({ ...body, content: e.target.value })}
-            placeholder="Raw body content"
-            className="w-full h-full min-h-[200px] p-3 text-xs font-mono bg-transparent border-none resize-y focus:ring-0 outline-none"
-          />
+          <div>
+            <div className="border-b p-2">
+              <Input
+                value={body.contentType}
+                onChange={(e) => onChange({ ...body, contentType: e.target.value })}
+                placeholder="text/plain"
+                className="h-7 text-xs font-mono"
+                aria-label="Raw body content type"
+              />
+            </div>
+            <textarea
+              value={body.content}
+              onChange={(e) => onChange({ ...body, content: e.target.value })}
+              placeholder="Raw body content"
+              className="w-full min-h-[200px] p-3 text-xs font-mono bg-transparent border-none resize-y focus:ring-0 outline-none"
+            />
+          </div>
         )}
 
         {body.type === "json" && (
@@ -881,6 +918,17 @@ function BodyEditor({ body, onChange }: BodyEditorProps) {
           </div>
         )}
 
+        {body.type === "form-data" && (
+          <FormDataEditor
+            fields={body.fields}
+            onChange={(fields) => onChange({ ...body, fields })}
+          />
+        )}
+
+        {body.type === "binary" && (
+          <BinaryBodyEditor body={body} onChange={onChange} />
+        )}
+
         {body.type === "none" && (
           <div className="flex flex-col items-center justify-center min-h-[200px] text-muted-foreground/50">
             <p className="text-xs">This request does not have a body</p>
@@ -891,13 +939,159 @@ function BodyEditor({ body, onChange }: BodyEditorProps) {
   );
 }
 
+function FormDataEditor({
+  fields,
+  onChange,
+}: {
+  fields: FormDataField[];
+  onChange: (fields: FormDataField[]) => void;
+}) {
+  const updateField = (index: number, update: Partial<FormDataField>) => {
+    const next = [...fields];
+    next[index] = { ...next[index], ...update };
+    onChange(next);
+  };
+
+  const selectFile = async (index: number, file: File | undefined) => {
+    if (!file) return;
+    updateField(index, {
+      type: "file",
+      value: await fileToBase64(file),
+      fileName: file.name,
+      contentType: file.type || "application/octet-stream",
+    });
+  };
+
+  return (
+    <div className="p-3 space-y-2">
+      {fields.map((field, index) => (
+        <div key={index} className="grid grid-cols-[20px_84px_minmax(100px,1fr)_minmax(120px,1.4fr)_28px] items-center gap-2">
+          <input
+            type="checkbox"
+            checked={field.enabled}
+            onChange={(e) => updateField(index, { enabled: e.target.checked })}
+            aria-label={`Enable form field ${index + 1}`}
+          />
+          <Select
+            value={field.type}
+            onValueChange={(type: "text" | "file") => updateField(index, {
+              type,
+              value: "",
+              fileName: undefined,
+              contentType: undefined,
+            })}
+          >
+            <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="text">Text</SelectItem>
+              <SelectItem value="file">File</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            value={field.key}
+            onChange={(e) => updateField(index, { key: e.target.value })}
+            placeholder="Key"
+            className="h-7 text-xs"
+          />
+          {field.type === "text" ? (
+            <Input
+              value={field.value}
+              onChange={(e) => updateField(index, { value: e.target.value })}
+              placeholder="Value"
+              className="h-7 text-xs"
+            />
+          ) : (
+            <label className="flex h-7 cursor-pointer items-center truncate rounded border px-2 text-xs text-muted-foreground hover:bg-muted/50">
+              <input
+                type="file"
+                className="sr-only"
+                onChange={(e) => void selectFile(index, e.target.files?.[0])}
+              />
+              {field.fileName || "Choose file"}
+            </label>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={() => onChange(fields.filter((_, fieldIndex) => fieldIndex !== index))}
+            title="Remove field"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      ))}
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 text-xs gap-1.5"
+        onClick={() => onChange([
+          ...fields,
+          { key: "", value: "", type: "text", enabled: true },
+        ])}
+      >
+        <Plus className="h-3.5 w-3.5" />
+        Add field
+      </Button>
+    </div>
+  );
+}
+
+function BinaryBodyEditor({
+  body,
+  onChange,
+}: {
+  body: Extract<RequestBody, { type: "binary" }>;
+  onChange: (body: RequestBody) => void;
+}) {
+  const size = body.data ? Math.floor((body.data.length * 3) / 4) : 0;
+
+  return (
+    <div className="flex min-h-[200px] flex-col items-center justify-center gap-3 p-6 text-center">
+      <label className="cursor-pointer rounded border bg-background px-3 py-2 text-xs hover:bg-muted/50">
+        <input
+          type="file"
+          className="sr-only"
+          onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            onChange({
+              type: "binary",
+              fileName: file.name,
+              data: await fileToBase64(file),
+            });
+          }}
+        />
+        Choose binary file
+      </label>
+      {body.fileName && (
+        <div className="text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">{body.fileName}</span>
+          {size > 0 && <span> · {formatBytes(size)}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
 // Response Body View with syntax highlighting
 interface ResponseBodyViewProps {
   body: string | null;
   contentType: string | null;
+  bodyIsBase64?: boolean;
 }
 
-function ResponseBodyView({ body, contentType }: ResponseBodyViewProps) {
+function ResponseBodyView({ body, contentType, bodyIsBase64 = false }: ResponseBodyViewProps) {
   const [wordWrap, setWordWrap] = useState(true);
 
   const { isJson, highlighted } = useMemo(() => {
@@ -905,7 +1099,13 @@ function ResponseBodyView({ body, contentType }: ResponseBodyViewProps) {
       return { isJson: false, highlighted: "" };
     }
 
-    const isJsonContent = contentType?.includes("json") || false;
+    const normalizedContentType = contentType?.toLowerCase() || "";
+    const trimmed = body.trim();
+    const isJsonContent = !bodyIsBase64 && (
+      normalizedContentType.includes("json") ||
+      trimmed.startsWith("{") ||
+      trimmed.startsWith("[")
+    );
 
     let html: string;
     if (isJsonContent) {
@@ -921,7 +1121,7 @@ function ResponseBodyView({ body, contentType }: ResponseBodyViewProps) {
     }
 
     return { isJson: isJsonContent, highlighted: html };
-  }, [body, contentType]);
+  }, [body, bodyIsBase64, contentType]);
 
   if (!body) {
     return (
@@ -933,6 +1133,11 @@ function ResponseBodyView({ body, contentType }: ResponseBodyViewProps) {
 
   return (
     <div className="relative">
+      {bodyIsBase64 && (
+        <div className="border-b bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
+          Binary response shown as Base64.
+        </div>
+      )}
       <div className="absolute top-2 right-12 z-10">
         <Button
           variant="ghost"
@@ -1178,6 +1383,7 @@ function HistoryPanel({ history, onSelect }: HistoryPanelProps) {
                       <ResponseBodyView 
                         body={selectedItem.response.body} 
                         contentType={selectedItem.response.contentType} 
+                        bodyIsBase64={selectedItem.response.bodyIsBase64}
                       />
                     </div>
                   ) : (

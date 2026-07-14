@@ -12,6 +12,9 @@ const MENU_SHOW: &str = "postgate.tray.show";
 const MENU_REFRESH: &str = "postgate.tray.refresh";
 const MENU_QUIT: &str = "postgate.tray.quit";
 const GROUP_ITEM_PREFIX: &str = "postgate.tray.rule-group.";
+const TRAY_ICON_SIZE: u32 = 32;
+const TRAY_GLYPH_SIZE: u32 = 26;
+const TRAY_CONTENT_ALPHA_THRESHOLD: u8 = 64;
 
 pub(crate) fn setup(app: &mut App, state: Arc<AppState>) -> tauri::Result<()> {
     let menu = build_menu(app.handle(), &[])?;
@@ -205,7 +208,6 @@ fn show_main_window(app: &AppHandle) {
 }
 
 fn template_icon_from_app_icon(source: &Image<'_>) -> Image<'static> {
-    const SIZE: u32 = 32;
     let source_width = source.width();
     let source_height = source.height();
 
@@ -213,27 +215,65 @@ fn template_icon_from_app_icon(source: &Image<'_>) -> Image<'static> {
         return fallback_tray_icon_image();
     }
 
-    let scale = (SIZE as f32 / source_width as f32).min(SIZE as f32 / source_height as f32);
-    let output_width = (source_width as f32 * scale)
+    let Some((min_x, min_y, max_x, max_y)) =
+        template_alpha_bounds(source, TRAY_CONTENT_ALPHA_THRESHOLD)
+    else {
+        return fallback_tray_icon_image();
+    };
+    let content_width = max_x - min_x + 1;
+    let content_height = max_y - min_y + 1;
+    let scale = (TRAY_GLYPH_SIZE as f32 / content_width as f32)
+        .min(TRAY_GLYPH_SIZE as f32 / content_height as f32);
+    let output_width = (content_width as f32 * scale)
         .round()
-        .clamp(1.0, SIZE as f32) as u32;
-    let output_height = (source_height as f32 * scale)
+        .clamp(1.0, TRAY_GLYPH_SIZE as f32) as u32;
+    let output_height = (content_height as f32 * scale)
         .round()
-        .clamp(1.0, SIZE as f32) as u32;
-    let offset_x = (SIZE - output_width) / 2;
-    let offset_y = (SIZE - output_height) / 2;
+        .clamp(1.0, TRAY_GLYPH_SIZE as f32) as u32;
+    let offset_x = (TRAY_ICON_SIZE - output_width) / 2;
+    let offset_y = (TRAY_ICON_SIZE - output_height) / 2;
 
-    let mut rgba = vec![0; (SIZE * SIZE * 4) as usize];
+    let mut rgba = vec![0; (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize];
     for y in 0..output_height {
         for x in 0..output_width {
-            let source_x = ((x as f32 + 0.5) / scale - 0.5).clamp(0.0, source_width as f32 - 1.0);
-            let source_y = ((y as f32 + 0.5) / scale - 0.5).clamp(0.0, source_height as f32 - 1.0);
+            let source_x = (min_x as f32 + (x as f32 + 0.5) / scale - 0.5)
+                .clamp(0.0, source_width as f32 - 1.0);
+            let source_y = (min_y as f32 + (y as f32 + 0.5) / scale - 0.5)
+                .clamp(0.0, source_height as f32 - 1.0);
             let alpha = sample_template_alpha(source, source_x, source_y);
-            set_alpha(&mut rgba, SIZE, offset_x + x, offset_y + y, alpha);
+            set_alpha(&mut rgba, TRAY_ICON_SIZE, offset_x + x, offset_y + y, alpha);
         }
     }
 
-    Image::new_owned(rgba, SIZE, SIZE)
+    Image::new_owned(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE)
+}
+
+fn template_alpha_bounds(source: &Image<'_>, threshold: u8) -> Option<(u32, u32, u32, u32)> {
+    let mut min_x = source.width();
+    let mut min_y = source.height();
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+
+    for y in 0..source.height() {
+        for x in 0..source.width() {
+            if pixel_template_alpha(source, x, y) < threshold {
+                continue;
+            }
+            found = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    found.then_some((
+        min_x.saturating_sub(1),
+        min_y.saturating_sub(1),
+        (max_x + 1).min(source.width() - 1),
+        (max_y + 1).min(source.height() - 1),
+    ))
 }
 
 fn sample_template_alpha(source: &Image<'_>, x: f32, y: f32) -> u8 {
@@ -276,23 +316,22 @@ fn lerp(start: f32, end: f32, amount: f32) -> f32 {
 }
 
 fn fallback_tray_icon_image() -> Image<'static> {
-    const SIZE: u32 = 32;
-    let mut rgba = vec![0; (SIZE * SIZE * 4) as usize];
+    let mut rgba = vec![0; (TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4) as usize];
 
-    fill_rect(&mut rgba, SIZE, 8, 7, 16, 4, 255);
-    fill_rect(&mut rgba, SIZE, 8, 7, 4, 19, 255);
-    fill_rect(&mut rgba, SIZE, 20, 7, 4, 19, 255);
-    fill_rect(&mut rgba, SIZE, 12, 14, 8, 3, 255);
-    fill_rect(&mut rgba, SIZE, 12, 20, 8, 3, 255);
+    fill_rect(&mut rgba, TRAY_ICON_SIZE, 5, 3, 22, 4, 255);
+    fill_rect(&mut rgba, TRAY_ICON_SIZE, 5, 3, 4, 26, 255);
+    fill_rect(&mut rgba, TRAY_ICON_SIZE, 23, 3, 4, 26, 255);
+    fill_rect(&mut rgba, TRAY_ICON_SIZE, 9, 13, 14, 3, 255);
+    fill_rect(&mut rgba, TRAY_ICON_SIZE, 9, 21, 14, 3, 255);
 
     // Slightly soften the outer corners so the template icon scales cleanly
     // in the macOS menu bar without relying on a PNG asset pipeline.
-    set_alpha(&mut rgba, SIZE, 8, 7, 160);
-    set_alpha(&mut rgba, SIZE, 23, 7, 160);
-    set_alpha(&mut rgba, SIZE, 8, 25, 160);
-    set_alpha(&mut rgba, SIZE, 23, 25, 160);
+    set_alpha(&mut rgba, TRAY_ICON_SIZE, 5, 3, 160);
+    set_alpha(&mut rgba, TRAY_ICON_SIZE, 26, 3, 160);
+    set_alpha(&mut rgba, TRAY_ICON_SIZE, 5, 28, 160);
+    set_alpha(&mut rgba, TRAY_ICON_SIZE, 26, 28, 160);
 
-    Image::new_owned(rgba, SIZE, SIZE)
+    Image::new_owned(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE)
 }
 
 fn fill_rect(rgba: &mut [u8], size: u32, x: u32, y: u32, width: u32, height: u32, alpha: u8) {
@@ -309,4 +348,65 @@ fn set_alpha(rgba: &mut [u8], size: u32, x: u32, y: u32, alpha: u8) {
     rgba[index + 1] = 0;
     rgba[index + 2] = 0;
     rgba[index + 3] = alpha;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn occupied_alpha_bounds(image: &Image<'_>) -> Option<(u32, u32, u32, u32)> {
+        let mut min_x = image.width();
+        let mut min_y = image.height();
+        let mut max_x = 0;
+        let mut max_y = 0;
+        let mut found = false;
+
+        for y in 0..image.height() {
+            for x in 0..image.width() {
+                let alpha = image.rgba()[((y * image.width() + x) * 4 + 3) as usize];
+                if alpha == 0 {
+                    continue;
+                }
+                found = true;
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+
+        found.then_some((min_x, min_y, max_x, max_y))
+    }
+
+    #[test]
+    fn tray_template_expands_small_source_glyph() {
+        const SOURCE_SIZE: u32 = 64;
+        let mut rgba = vec![0; (SOURCE_SIZE * SOURCE_SIZE * 4) as usize];
+        for y in 18..46 {
+            for x in 25..39 {
+                let index = ((y * SOURCE_SIZE + x) * 4) as usize;
+                rgba[index] = 255;
+                rgba[index + 1] = 255;
+                rgba[index + 2] = 255;
+                rgba[index + 3] = 255;
+            }
+        }
+        let source = Image::new_owned(rgba, SOURCE_SIZE, SOURCE_SIZE);
+
+        let tray = template_icon_from_app_icon(&source);
+        let (min_x, min_y, max_x, max_y) = occupied_alpha_bounds(&tray).unwrap();
+
+        assert_eq!(tray.width(), TRAY_ICON_SIZE);
+        assert_eq!(tray.height(), TRAY_ICON_SIZE);
+        assert!(max_y - min_y + 1 >= 24);
+        assert!(max_x - min_x + 1 >= 12);
+    }
+
+    #[test]
+    fn fallback_tray_glyph_uses_the_menu_bar_safe_area() {
+        let tray = fallback_tray_icon_image();
+        let (_, min_y, _, max_y) = occupied_alpha_bounds(&tray).unwrap();
+
+        assert_eq!(max_y - min_y + 1, TRAY_GLYPH_SIZE);
+    }
 }

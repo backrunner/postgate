@@ -32,6 +32,8 @@
     --sidebar-accent-foreground: 240 5.9% 10%;
     --sidebar-border: 240 5.9% 90%;
     --sidebar-ring: 240 5.9% 10%;
+    --surface-tint-a: 210 35% 98.2%;
+    --surface-tint-b: 270 24% 98.4%;
   }
 
   .dark {
@@ -63,7 +65,19 @@
     --sidebar-accent-foreground: 240 4.8% 95.9%;
     --sidebar-border: 240 3.7% 15.9%;
     --sidebar-ring: 240 4.9% 83.9%;
+    --surface-tint-a: 220 12% 5.4%;
+    --surface-tint-b: 270 10% 5.8%;
   }
+}
+
+.app-surface {
+  background-color: hsl(var(--background));
+  background-image: linear-gradient(
+    145deg,
+    hsl(var(--background)) 0%,
+    hsl(var(--surface-tint-a)) 54%,
+    hsl(var(--surface-tint-b)) 100%
+  );
 }
 
 @layer base {

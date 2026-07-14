@@ -10,7 +10,7 @@ export function AppLayout() {
         <TitleBar />
         <div className="flex flex-1 overflow-hidden">
           <Sidebar />
-          <main className="flex flex-1 flex-col min-w-0 overflow-hidden">
+          <main className="app-surface flex flex-1 flex-col min-w-0 overflow-hidden">
             <Outlet />
           </main>
         </div>

@@ -123,6 +123,7 @@ impl RuleFilters {
         self.matches_request(method, protocol, port, headers, url, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn matches_request(
         &self,
         method: &str,
@@ -147,6 +148,7 @@ impl RuleFilters {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn matches_response(
         &self,
         method: &str,
@@ -367,7 +369,7 @@ impl Pattern {
                     let url_no_query = format!(
                         "{}://{}{}",
                         parsed.scheme(),
-                        parsed.host_str().unwrap_or(""),
+                        &parsed[url::Position::BeforeHost..url::Position::AfterPort],
                         parsed.path()
                     );
                     if url == s || url_no_query == *s {
@@ -538,7 +540,12 @@ impl Pattern {
 
         // Check host (exact or wildcard)
         let url_host = parsed.host_str().unwrap_or("");
-        if url_host != expected_host && !wildcard_match(expected_host, url_host) {
+        let url_authority = parsed[url::Position::BeforeHost..url::Position::AfterPort].to_string();
+        if url_host != expected_host
+            && url_authority != expected_host
+            && !wildcard_match(expected_host, url_host)
+            && !wildcard_match(expected_host, &url_authority)
+        {
             return no_match;
         }
 
@@ -938,6 +945,9 @@ pub enum RuleAction {
         modifications: UrlParamModifications,
     },
 
+    /// Merge fields into a JSON/form request body (params:// / reqMerge://)
+    RequestMerge { content: BodyContent },
+
     /// Replace URL path (pathReplace:// / urlReplace://)
     PathReplace {
         pattern: String,
@@ -975,6 +985,9 @@ pub enum RuleAction {
     /// Replace response body (resBody://)
     ResponseBody { content: BodyContent },
 
+    /// Merge fields into a JSON/JSONP/form response body (resMerge://)
+    ResponseMerge { content: BodyContent },
+
     /// Replace with HTML body (htmlBody://)
     HtmlBody { content: String },
 
@@ -1011,6 +1024,9 @@ pub enum RuleAction {
 
     /// Set attachment header (attachment:// / download://)
     Attachment { filename: Option<String> },
+
+    /// Configure response caching (cache://)
+    Cache { policy: String },
 
     // === INJECTION ACTIONS ===
     /// Append to HTML (htmlAppend:// / html://)
@@ -1283,6 +1299,10 @@ mod tests {
         // Whistle: exact also matches with query stripped
         assert!(exact.matches("https://example.com/api?q=1"));
         assert!(!exact.matches("https://example.com/api/v2"));
+
+        let exact_port = Pattern::Exact("https://example.com:8443/api".to_string());
+        assert!(exact_port.matches("https://example.com:8443/api?q=1"));
+        assert!(!exact_port.matches("https://example.com/api?q=1"));
     }
 
     #[test]

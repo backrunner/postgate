@@ -13,7 +13,11 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 use url::Url;
+
+const DEFAULT_MERGE_BODY_LIMIT: usize = 2 * 1024 * 1024;
+const BIG_MERGE_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 /// Handle to the shared values store + current request context, passed into
 /// the applicator so `{name}` and `` `{name}` `` references can be resolved
@@ -60,6 +64,13 @@ pub fn remote_resource_urls_for_request(matched_rules: &[MatchedRule]) -> Vec<St
                     collect_remote_resource_url_from_path(path, &matched.remaining_path, &mut urls);
                 }
                 RuleAction::RequestBody { content } => {
+                    collect_remote_resource_url_from_body_content(
+                        content,
+                        &matched.remaining_path,
+                        &mut urls,
+                    );
+                }
+                RuleAction::RequestMerge { content } => {
                     collect_remote_resource_url_from_body_content(
                         content,
                         &matched.remaining_path,
@@ -154,6 +165,13 @@ fn remote_resource_urls_for_response_with_context(
                         &mut urls,
                     );
                 }
+                RuleAction::ResponseMerge { content } => {
+                    collect_remote_resource_url_from_body_content(
+                        content,
+                        &matched.remaining_path,
+                        &mut urls,
+                    );
+                }
                 RuleAction::Mock { path } => {
                     collect_remote_resource_url_from_path(path, &matched.remaining_path, &mut urls);
                 }
@@ -203,6 +221,26 @@ fn effective_content_type<'a>(
     fallback: Option<&'a str>,
 ) -> Option<&'a str> {
     headers.get("content-type").map(String::as_str).or(fallback)
+}
+
+const DEBUG_BLOCKING_RESPONSE_HEADERS: [&str; 4] = [
+    "content-security-policy",
+    "content-security-policy-report-only",
+    "x-content-security-policy",
+    "x-webkit-csp",
+];
+
+fn remove_debug_blocking_headers(modification: &mut ResponseModification) {
+    for header in DEBUG_BLOCKING_RESPONSE_HEADERS {
+        modification.headers.remove(header);
+        if !modification
+            .headers_to_remove
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(header))
+        {
+            modification.headers_to_remove.push(header.to_string());
+        }
+    }
 }
 
 /// Result of applying rules to a request
@@ -356,6 +394,7 @@ pub fn rules_require_response_body(matched_rules: &[MatchedRule]) -> bool {
             match action {
                 // Body replacement or injection.
                 RuleAction::ResponseBody { .. }
+                | RuleAction::ResponseMerge { .. }
                 | RuleAction::HtmlBody { .. }
                 | RuleAction::CssBody { .. }
                 | RuleAction::JsBody { .. }
@@ -398,10 +437,14 @@ pub fn rules_require_request_body(matched_rules: &[MatchedRule]) -> bool {
         for action in &matched.rule.actions {
             match action {
                 RuleAction::RequestBody { .. }
+                | RuleAction::RequestMerge { .. }
                 | RuleAction::RequestReplace { .. }
                 | RuleAction::RequestPrepend { .. }
                 | RuleAction::RequestAppend { .. }
-                | RuleAction::RequestWrite { .. } => return true,
+                | RuleAction::RequestWrite { .. }
+                | RuleAction::HttpProxy { .. }
+                | RuleAction::HttpsProxy { .. }
+                | RuleAction::SocksProxy { .. } => return true,
                 RuleAction::Speed { request_kbps, .. } if request_kbps.is_some() => return true,
                 RuleAction::Plugin { .. } => return true,
                 _ => {}
@@ -409,6 +452,22 @@ pub fn rules_require_request_body(matched_rules: &[MatchedRule]) -> bool {
         }
     }
     false
+}
+
+/// Direct responses consume the incoming body before returning so HTTP/1
+/// keep-alive remains reusable and request capture is complete.
+pub fn rules_may_short_circuit_request(matched_rules: &[MatchedRule]) -> bool {
+    matched_rules.iter().any(|matched| {
+        matched.rule.enabled
+            && matched.rule.actions.iter().any(|action| {
+                matches!(
+                    action,
+                    RuleAction::File { .. }
+                        | RuleAction::Redirect { .. }
+                        | RuleAction::StatusCode { .. }
+                )
+            })
+    })
 }
 
 /// Whistle feature flags consumed by the proxy. Values match the whistle
@@ -425,6 +484,12 @@ pub mod feature {
     pub const FORCE_REQ_WRITE: &str = "forcereqwrite";
     /// Allow resWrite:// / resWriteRaw:// to overwrite existing files.
     pub const FORCE_RES_WRITE: &str = "forcereswrite";
+    /// Allow reqMerge:// to process request bodies up to Whistle's 16 MiB
+    /// expanded limit instead of the default 2 MiB cap.
+    pub const REQ_MERGE_BIG_DATA: &str = "reqmergebigdata";
+    /// Allow resMerge:// to process response bodies up to Whistle's 16 MiB
+    /// expanded limit instead of the default 2 MiB cap.
+    pub const RES_MERGE_BIG_DATA: &str = "resmergebigdata";
 }
 
 /// Returns true if `feature` is not in the modification's `disabled_features`.
@@ -547,6 +612,21 @@ pub fn apply_request_rules_with_values(
                     if let Some(ref url) = parsed_url {
                         modification.query_params =
                             Some(apply_url_param_modifications(url, modifications));
+                    }
+                }
+
+                RuleAction::RequestMerge { content } => {
+                    let limit = merge_body_limit(matched_rules, feature::REQ_MERGE_BIG_DATA);
+                    let current = modification.body.as_ref().cloned().unwrap_or_default();
+                    if current.len() <= limit {
+                        let merge =
+                            resolve_body_content(content, &matched.remaining_path, inline, res);
+                        let content_type =
+                            modification.headers.get("content-type").map(String::as_str);
+                        if let Some(merged) = merge_structured_body(&current, &merge, content_type)
+                        {
+                            modification.body = Some(merged);
+                        }
                     }
                 }
 
@@ -866,6 +946,7 @@ pub fn apply_request_rules_with_values(
 }
 
 /// Apply rules to a response and return modifications
+#[allow(clippy::too_many_arguments)]
 pub fn apply_response_rules(
     matched_rules: &[MatchedRule],
     url: &str,
@@ -964,6 +1045,19 @@ pub fn apply_response_rules_with_values(
                     ));
                 }
 
+                RuleAction::ResponseMerge { content } if can_modify_body => {
+                    let current = modification.body.as_ref().cloned().unwrap_or_default();
+                    let limit = merge_body_limit(matched_rules, feature::RES_MERGE_BIG_DATA);
+                    if current.len() <= limit {
+                        let merge =
+                            resolve_body_content(content, &matched.remaining_path, inline, res);
+                        let effective = effective_content_type(&modification.headers, content_type);
+                        if let Some(merged) = merge_structured_body(&current, &merge, effective) {
+                            modification.body = Some(merged);
+                        }
+                    }
+                }
+
                 RuleAction::ResponseReplace {
                     pattern,
                     replacement,
@@ -1012,6 +1106,15 @@ pub fn apply_response_rules_with_values(
                     modification
                         .headers
                         .insert("content-disposition".to_string(), value);
+                }
+
+                RuleAction::Cache { policy } => {
+                    let policy = resolve_ref(policy, inline, res);
+                    apply_cache_policy(
+                        &mut modification.headers,
+                        &mut modification.headers_to_remove,
+                        &policy,
+                    );
                 }
 
                 RuleAction::ResponseCors {
@@ -1219,6 +1322,11 @@ pub fn apply_response_rules_with_values(
                     // Enable debug script injection for HTML responses
                     if is_html(effective_content_type(&modification.headers, content_type)) {
                         modification.inject_debug = true;
+                        // The injected bridge needs inline execution, a
+                        // localhost WebSocket, and the bundled Chobitsu asset.
+                        // A response CSP would otherwise make debug:// appear
+                        // active while silently preventing the CDP connection.
+                        remove_debug_blocking_headers(&mut modification);
                     }
                 }
 
@@ -1845,6 +1953,285 @@ fn collect_remote_resource_url_from_path(
     }
 }
 
+fn merge_body_limit(matched_rules: &[MatchedRule], feature_name: &str) -> usize {
+    let mut enabled = false;
+    for matched in matched_rules {
+        for action in &matched.rule.actions {
+            match action {
+                RuleAction::Enable { features }
+                    if features.iter().any(|feature| feature == feature_name) =>
+                {
+                    enabled = true;
+                }
+                RuleAction::Disable { features }
+                    if features.iter().any(|feature| feature == feature_name) =>
+                {
+                    enabled = false;
+                }
+                _ => {}
+            }
+        }
+    }
+    if enabled {
+        BIG_MERGE_BODY_LIMIT
+    } else {
+        DEFAULT_MERGE_BODY_LIMIT
+    }
+}
+
+fn merge_structured_body(
+    current: &Bytes,
+    merge: &Bytes,
+    content_type: Option<&str>,
+) -> Option<Bytes> {
+    let merge_value = parse_merge_value(merge)?;
+    let content_type = content_type.unwrap_or_default().to_ascii_lowercase();
+
+    if content_type.contains("application/x-www-form-urlencoded") {
+        return merge_form_body(current, merge_value);
+    }
+
+    if !(content_type.is_empty()
+        || content_type.contains("json")
+        || content_type.contains("javascript")
+        || content_type.contains("html"))
+    {
+        return None;
+    }
+
+    merge_json_or_jsonp(current, merge_value)
+}
+
+fn parse_merge_value(raw: &Bytes) -> Option<serde_json::Value> {
+    let text = String::from_utf8_lossy(raw);
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        if value.is_object() {
+            return Some(value);
+        }
+    }
+
+    let mut object = serde_json::Map::new();
+    if text.contains('=') {
+        for (key, value) in url::form_urlencoded::parse(text.as_bytes()) {
+            insert_dotted_value(&mut object, &key, parse_scalar_value(&value));
+        }
+    } else {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            insert_dotted_value(&mut object, key.trim(), parse_scalar_value(value.trim()));
+        }
+    }
+
+    (!object.is_empty()).then_some(serde_json::Value::Object(object))
+}
+
+fn parse_scalar_value(value: &str) -> serde_json::Value {
+    serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
+}
+
+fn split_dotted_key(key: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut part = String::new();
+    let mut escaped = false;
+    for ch in key.chars() {
+        if escaped {
+            part.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '.' {
+            parts.push(std::mem::take(&mut part));
+        } else {
+            part.push(ch);
+        }
+    }
+    if escaped {
+        part.push('\\');
+    }
+    parts.push(part);
+    parts.retain(|part| !part.is_empty());
+    parts
+}
+
+fn insert_dotted_value(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: serde_json::Value,
+) {
+    let parts = split_dotted_key(key);
+    insert_value_path(object, &parts, value);
+}
+
+fn insert_value_path(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    parts: &[String],
+    value: serde_json::Value,
+) {
+    let Some((head, tail)) = parts.split_first() else {
+        return;
+    };
+    if tail.is_empty() {
+        object.insert(head.clone(), value);
+        return;
+    }
+
+    let entry = object
+        .entry(head.clone())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(child) = entry.as_object_mut() {
+        insert_value_path(child, tail, value);
+    }
+}
+
+fn deep_merge_json(target: &mut serde_json::Value, patch: serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                match target.get_mut(&key) {
+                    Some(existing) => deep_merge_json(existing, value),
+                    None => {
+                        target.insert(key, value);
+                    }
+                }
+            }
+        }
+        (target, patch) => *target = patch,
+    }
+}
+
+fn merge_json_or_jsonp(current: &Bytes, patch: serde_json::Value) -> Option<Bytes> {
+    let text = String::from_utf8_lossy(current);
+    if text.trim().is_empty() {
+        return serde_json::to_vec(&patch).ok().map(Bytes::from);
+    }
+
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
+        deep_merge_json(&mut value, patch);
+        return serde_json::to_vec(&value).ok().map(Bytes::from);
+    }
+
+    let (start, end) = jsonp_payload_range(&text)?;
+    let mut value = serde_json::from_str::<serde_json::Value>(&text[start..end]).ok()?;
+    deep_merge_json(&mut value, patch);
+    let replacement = serde_json::to_string(&value).ok()?;
+    let mut output = String::with_capacity(text.len() + replacement.len());
+    output.push_str(&text[..start]);
+    output.push_str(&replacement);
+    output.push_str(&text[end..]);
+    Some(Bytes::from(output))
+}
+
+fn jsonp_payload_range(text: &str) -> Option<(usize, usize)> {
+    let start = text.find(['{', '['])?;
+    let open = text.as_bytes()[start];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (offset, byte) in text.as_bytes()[start..].iter().copied().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+        } else if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some((start, start + offset + 1));
+            }
+        }
+    }
+    None
+}
+
+fn merge_form_body(current: &Bytes, patch: serde_json::Value) -> Option<Bytes> {
+    let mut fields: HashMap<String, String> = url::form_urlencoded::parse(current)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let patch = patch.as_object()?;
+    for (key, value) in patch {
+        let value = match value {
+            serde_json::Value::String(value) => value.clone(),
+            other => other.to_string(),
+        };
+        fields.insert(key.clone(), value);
+    }
+
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    let mut fields: Vec<_> = fields.into_iter().collect();
+    fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    serializer.extend_pairs(fields);
+    Some(Bytes::from(serializer.finish()))
+}
+
+fn apply_cache_policy(
+    headers: &mut HashMap<String, String>,
+    headers_to_remove: &mut Vec<String>,
+    policy: &str,
+) {
+    let policy = policy.trim().to_ascii_lowercase();
+    if matches!(policy.as_str(), "keep" | "reserve") {
+        return;
+    }
+
+    let max_age = policy.parse::<i64>().ok();
+    let no_cache = matches!(policy.as_str(), "no" | "no-cache" | "no-store")
+        || max_age.is_some_and(|age| age < 0);
+    if max_age.is_none() && !no_cache {
+        return;
+    }
+
+    if no_cache {
+        let value = if policy == "no-store" {
+            "no-store"
+        } else {
+            "no-cache"
+        };
+        headers.insert("cache-control".to_string(), value.to_string());
+        headers.insert("pragma".to_string(), "no-cache".to_string());
+        let expires = SystemTime::now()
+            .checked_sub(Duration::from_secs(60_000))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        headers.insert("expires".to_string(), httpdate::fmt_http_date(expires));
+        return;
+    }
+
+    let seconds = max_age.unwrap_or_default() as u64;
+    headers.insert("cache-control".to_string(), format!("max-age={seconds}"));
+    let expires = SystemTime::now()
+        .checked_add(Duration::from_secs(seconds))
+        .unwrap_or(SystemTime::now());
+    headers.insert("expires".to_string(), httpdate::fmt_http_date(expires));
+    headers.remove("pragma");
+    if !headers_to_remove.iter().any(|header| header == "pragma") {
+        headers_to_remove.push("pragma".to_string());
+    }
+}
+
 fn resolve_file_content(
     path: &std::path::Path,
     remaining_path: &str,
@@ -2059,7 +2446,7 @@ mod tests {
         remaining_path: impl Into<String>,
     ) -> MatchedRule {
         MatchedRule {
-            rule: Rule {
+            rule: Arc::new(Rule {
                 id: "t".into(),
                 pattern: Pattern::Domain("example.com".into()),
                 filters,
@@ -2068,7 +2455,7 @@ mod tests {
                 priority: 0,
                 raw_line: String::new(),
                 negated: false,
-            },
+            }),
             remaining_path: remaining_path.into(),
             inline_values: Arc::new(HashMap::new()),
         }
@@ -2179,6 +2566,84 @@ mod tests {
         let mut body = Some(Bytes::from("user=123; user=456"));
         apply_body_replace(&mut body, r"user=\d+", "user=X", true);
         assert_eq!(body.unwrap(), Bytes::from("user=X; user=X"));
+    }
+
+    #[test]
+    fn test_request_merge_updates_json_and_form_bodies() {
+        let json_rules = vec![matched_rule(RuleAction::RequestMerge {
+            content: BodyContent::Text {
+                content: "user.name=postgate&enabled=true".into(),
+                content_type: "text/plain".into(),
+            },
+        })];
+        let json_headers =
+            HashMap::from([("content-type".to_string(), "application/json".to_string())]);
+        let json_body = Bytes::from_static(br#"{"user":{"id":7},"keep":true}"#);
+        let json = apply_request_rules(
+            &json_rules,
+            "https://example.com/api",
+            "POST",
+            &json_headers,
+            Some(&json_body),
+        );
+        let value: serde_json::Value = serde_json::from_slice(json.body.as_ref().unwrap()).unwrap();
+        assert_eq!(value["user"]["id"], 7);
+        assert_eq!(value["user"]["name"], "postgate");
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["keep"], true);
+
+        let form_headers = HashMap::from([(
+            "content-type".to_string(),
+            "application/x-www-form-urlencoded".to_string(),
+        )]);
+        let form = apply_request_rules(
+            &json_rules,
+            "https://example.com/api",
+            "POST",
+            &form_headers,
+            Some(&Bytes::from_static(b"keep=1&enabled=false")),
+        );
+        let fields: HashMap<_, _> = url::form_urlencoded::parse(form.body.as_ref().unwrap())
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(fields.get("keep").map(String::as_str), Some("1"));
+        assert_eq!(fields.get("enabled").map(String::as_str), Some("true"));
+    }
+
+    #[test]
+    fn test_response_merge_preserves_jsonp_wrapper_and_cache_policy() {
+        let rules = vec![
+            matched_rule(RuleAction::ResponseMerge {
+                content: BodyContent::Text {
+                    content: r#"nested.value=2&added=true"#.into(),
+                    content_type: "text/plain".into(),
+                },
+            }),
+            matched_rule(RuleAction::Cache {
+                policy: "60".into(),
+            }),
+        ];
+        let response = apply_response_rules(
+            &rules,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::from([("pragma".to_string(), "no-cache".to_string())]),
+            200,
+            Some(&Bytes::from_static(b"callback({\"nested\":{\"keep\":1}});")),
+            Some("application/javascript"),
+        );
+        assert_eq!(
+            response.headers.get("cache-control").map(String::as_str),
+            Some("max-age=60")
+        );
+        assert!(response.headers_to_remove.contains(&"pragma".to_string()));
+        let body = String::from_utf8(response.body.unwrap().to_vec()).unwrap();
+        assert!(body.starts_with("callback("));
+        assert!(body.ends_with(");"));
+        assert!(body.contains("\"keep\":1"));
+        assert!(body.contains("\"value\":2"));
+        assert!(body.contains("\"added\":true"));
     }
 
     #[test]
@@ -2991,13 +3456,55 @@ mod tests {
     }
 
     #[test]
+    fn test_debug_rule_removes_csp_from_html_responses() {
+        let request_headers = HashMap::new();
+        let response_headers = HashMap::from([
+            (
+                "content-type".to_string(),
+                "text/html; charset=utf-8".to_string(),
+            ),
+            (
+                "content-security-policy".to_string(),
+                "default-src 'self'".to_string(),
+            ),
+            (
+                "content-security-policy-report-only".to_string(),
+                "default-src 'none'".to_string(),
+            ),
+        ]);
+        let body = Bytes::from_static(b"<html><head></head><body></body></html>");
+
+        let modification = apply_response_rules(
+            &[matched_rule(RuleAction::Debug {
+                name: "page".to_string(),
+            })],
+            "https://example.com/",
+            "GET",
+            &request_headers,
+            &response_headers,
+            200,
+            Some(&body),
+            Some("text/html; charset=utf-8"),
+        );
+
+        assert!(modification.inject_debug);
+        for header in DEBUG_BLOCKING_RESPONSE_HEADERS {
+            assert!(!modification.headers.contains_key(header));
+            assert!(modification
+                .headers_to_remove
+                .iter()
+                .any(|removed| removed == header));
+        }
+    }
+
+    #[test]
     fn test_rules_require_response_body_covers_all_body_actions() {
         // Guard against future regressions: if we add a body-modifying action
         // and forget to list it here, streaming-path users silently lose it.
         // This test exercises the predicate for a representative sample of
         // the newly-added actions.
         let mk_rule = |action: RuleAction| MatchedRule {
-            rule: Rule {
+            rule: Arc::new(Rule {
                 id: "t".into(),
                 pattern: Pattern::Domain("example.com".into()),
                 filters: None,
@@ -3006,7 +3513,7 @@ mod tests {
                 priority: 0,
                 raw_line: String::new(),
                 negated: false,
-            },
+            }),
             remaining_path: String::new(),
             inline_values: Arc::new(HashMap::new()),
         };

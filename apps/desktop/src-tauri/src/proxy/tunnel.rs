@@ -1,7 +1,7 @@
 use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
 use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
-use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::body::{collect_body, CapturedBody, RequestCapturingBody, MAX_BODY_SIZE};
 use crate::proxy::error_page::ProxyErrorKind;
 use crate::proxy::forward::{
     apply_request_url_modifications, path_and_query_from_url, ForwardTarget,
@@ -16,7 +16,8 @@ use crate::proxy::websocket;
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, feature, is_enabled,
     persist_request_writes, persist_response_writes, remote_resource_urls_for_request,
-    RequestWriteContext, ResolveCtx, ResolvedResources, ResponseModification, ResponseWriteContext,
+    rules_may_short_circuit_request, rules_require_request_body, RequestWriteContext, ResolveCtx,
+    ResolvedResources, ResponseModification, ResponseWriteContext,
 };
 use crate::state::{CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
@@ -29,6 +30,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
@@ -225,21 +227,34 @@ async fn handle_https_request(
         };
     }
 
-    // Collect request body
+    // Buffer only when request-stage actions need body bytes. Otherwise the
+    // client body stays streaming all the way into the pooled upstream client.
     let (parts, body) = req.into_parts();
-    let request_body = match collect_body(body, MAX_BODY_SIZE).await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!("Failed to collect request body: {}", e);
-            return Ok(html_error_response(
-                502,
-                ProxyErrorKind::Request,
-                &format!("Failed to read request body: {}", e),
-            ));
-        }
+    let buffer_request_body = rules_require_request_body(&matched_rules)
+        || rules_may_short_circuit_request(&matched_rules);
+    let (request_body, streaming_body) = if buffer_request_body {
+        let request_body = match collect_body(body, MAX_BODY_SIZE).await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::error!("Failed to collect request body: {error}");
+                return Ok(html_error_response(
+                    502,
+                    ProxyErrorKind::Request,
+                    &format!("Failed to read request body: {error}"),
+                ));
+            }
+        };
+        (Some(request_body), None)
+    } else {
+        (None, Some(body))
     };
 
-    let request_size = request_body.size as u64;
+    let request_size = Arc::new(AtomicU64::new(
+        request_body
+            .as_ref()
+            .map(|body| body.size as u64)
+            .unwrap_or(0),
+    ));
 
     // Build resolver context for whistle `{name}` references.
     let _ = ctx.app_state.ensure_values_loaded().await;
@@ -275,7 +290,7 @@ async fn handle_https_request(
             &url,
             &method_str,
             &request_headers,
-            Some(&request_body.data),
+            request_body.as_ref().map(|body| &body.data),
             &resolve_ctx,
         )
     };
@@ -305,15 +320,18 @@ async fn handle_https_request(
     let mut body_to_send = request_modification
         .body
         .clone()
-        .unwrap_or(request_body.data.clone());
+        .or_else(|| request_body.as_ref().map(|body| body.data.clone()))
+        .unwrap_or_default();
     if let Some(speed_kbps) = request_modification.speed_kbps {
         body_to_send = super::throttle::apply_throttle(body_to_send, Some(speed_kbps)).await;
     }
-    sync_request_body_headers(
-        &mut request_modification.headers,
-        &request_body.data,
-        &body_to_send,
-    );
+    if let Some(request_body) = &request_body {
+        sync_request_body_headers(
+            &mut request_modification.headers,
+            &request_body.data,
+            &body_to_send,
+        );
+    }
 
     let base_absolute_url: std::result::Result<String, PostGateError> =
         if let Some(target_host) = &request_modification.target_host {
@@ -377,13 +395,15 @@ async fn handle_https_request(
         },
     );
 
-    if capture {
+    if let (true, Some(request_body)) = (capture, request_body.as_ref()) {
         ctx.body_storage
             .store_request_body(&request_id, request_body.clone())
             .await;
         ctx.app_state
-            .persist_body(request_id.clone(), request_body.data.clone(), true);
+            .persist_body(request_id.clone(), request_body.capture_bytes(), true);
+    }
 
+    if capture {
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
             id: request_id.clone(),
             event_type: RequestEventType::Started,
@@ -452,7 +472,7 @@ async fn handle_https_request(
                 .store_response_body(&request_id, response_body.clone())
                 .await;
             ctx.app_state
-                .persist_body(request_id.clone(), response_body.data.clone(), false);
+                .persist_body(request_id.clone(), response_body.capture_bytes(), false);
 
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
                 id: request_id.clone(),
@@ -471,7 +491,7 @@ async fn handle_https_request(
                     matched_rules: matched_rule_ids,
                     protocol: "https".to_string(),
                     content_type: final_response.flat_headers.get("content-type").cloned(),
-                    request_size,
+                    request_size: request_size.load(Ordering::Relaxed),
                     response_size: Some(final_response.body.len() as u64),
                     tls_version: Some(tls_version.to_string()),
                     ..Default::default()
@@ -584,7 +604,7 @@ async fn handle_https_request(
                         .await;
                     ctx.app_state.persist_body(
                         request_id.clone(),
-                        response_body.data.clone(),
+                        response_body.capture_bytes(),
                         false,
                     );
 
@@ -605,7 +625,7 @@ async fn handle_https_request(
                             matched_rules: matched_rule_ids,
                             protocol: "https".to_string(),
                             content_type: final_response.flat_headers.get("content-type").cloned(),
-                            request_size,
+                            request_size: request_size.load(Ordering::Relaxed),
                             response_size: Some(final_response.body.len() as u64),
                             tls_version: Some(tls_version.to_string()),
                             ..Default::default()
@@ -639,6 +659,21 @@ async fn handle_https_request(
         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
     }
 
+    let mut upstream_body = Some(match streaming_body {
+        Some(body) => RequestCapturingBody::new(
+            body,
+            request_id.clone(),
+            ctx.app_state.clone(),
+            ctx.body_storage.clone(),
+            request_size.clone(),
+            capture,
+        )
+        .boxed(),
+        None => Full::new(body_to_send.clone())
+            .map_err(|_| unreachable!())
+            .boxed(),
+    });
+
     // Decide whether to buffer the response body. Streaming is the common
     // case (no resBody://, no htmlAppend://, no debug, no plugin) and matches
     // whistle's default behaviour — TTFB tracks upstream directly.
@@ -650,12 +685,12 @@ async fn handle_https_request(
     if !buffer_response_body && request_modification.upstream_proxy.is_none() {
         let stream_result = match absolute_url {
             Ok(target_url) => {
-                super::upstream::forward_stream_headermap(
+                super::upstream::forward_stream_headermap_body(
                     &ctx.upstream_client,
                     final_method.clone(),
                     &target_url,
                     &forward_header_map,
-                    body_to_send.clone(),
+                    upstream_body.take().expect("request body available"),
                     request_modification.timeout_ms,
                 )
                 .await
@@ -730,7 +765,7 @@ async fn handle_https_request(
                         matched_rules: matched_rule_ids.clone(),
                         protocol: "https".to_string(),
                         content_type: response_content_type,
-                        request_size,
+                        request_size: request_size.load(Ordering::Relaxed),
                         start_time,
                         persistence_enabled: ctx.app_state.is_persistence_enabled(),
                         tls_version: Some(tls_version.to_string()),
@@ -763,7 +798,7 @@ async fn handle_https_request(
                             duration_ms: Some(duration),
                             matched_rules: matched_rule_ids,
                             protocol: "https".to_string(),
-                            request_size,
+                            request_size: request_size.load(Ordering::Relaxed),
                             error: Some(e.to_string()),
                             tls_version: Some(tls_version.to_string()),
                             ..Default::default()
@@ -798,12 +833,12 @@ async fn handle_https_request(
                 )
                 .await
             } else {
-                super::upstream::forward_collect_headermap(
+                super::upstream::forward_collect_headermap_body(
                     &ctx.upstream_client,
                     final_method.clone(),
                     &url,
                     &forward_header_map,
-                    body_to_send.clone(),
+                    upstream_body.take().expect("request body available"),
                     request_modification.timeout_ms,
                 )
                 .await
@@ -1012,8 +1047,11 @@ async fn handle_https_request(
                 ctx.body_storage
                     .store_response_body(&request_id, final_body_captured)
                     .await;
-                ctx.app_state
-                    .persist_body(request_id.clone(), final_body.clone(), false);
+                ctx.app_state.persist_body(
+                    request_id.clone(),
+                    crate::proxy::body::capture_bytes(&final_body),
+                    false,
+                );
 
                 ctx.app_state.emit_request_event(&CapturedRequestEvent {
                     id: request_id.clone(),
@@ -1032,7 +1070,7 @@ async fn handle_https_request(
                         matched_rules: matched_rule_ids,
                         protocol: "https".to_string(),
                         content_type: final_headers.get("content-type").cloned(),
-                        request_size,
+                        request_size: request_size.load(Ordering::Relaxed),
                         response_size: Some(response_size),
                         tls_version: Some(tls_version.to_string()),
                         ..Default::default()
@@ -1067,7 +1105,7 @@ async fn handle_https_request(
                         duration_ms: Some(duration),
                         matched_rules: matched_rule_ids,
                         protocol: "https".to_string(),
-                        request_size,
+                        request_size: request_size.load(Ordering::Relaxed),
                         error: Some(e.to_string()),
                         tls_version: Some(tls_version.to_string()),
                         ..Default::default()

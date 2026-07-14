@@ -10,6 +10,7 @@ export interface ProxyConfig {
   enableHttp2: boolean;
   enableQuic: boolean;
   quicPort: number | null;
+  debugPort: number;
 }
 
 export interface ProxyStatusResponse {
@@ -303,6 +304,7 @@ export function useProxy() {
         enableHttp2: proxyConfig?.enableHttp2 ?? config.enableHttp2,
         enableQuic: proxyConfig?.enableQuic ?? config.enableQuic,
         quicPort: proxyConfig?.quicPort ?? config.quicPort,
+        debugPort: proxyConfig?.debugPort ?? config.debugPort,
       };
 
       const result = await invoke<ProxyStatusResponse>("start_proxy", {

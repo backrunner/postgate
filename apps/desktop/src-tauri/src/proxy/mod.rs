@@ -7,7 +7,8 @@ mod handler;
 mod headers;
 mod http2;
 mod passthrough;
-mod pool;
+#[cfg(feature = "quic")]
+mod quic;
 mod resource;
 mod server;
 mod sse;

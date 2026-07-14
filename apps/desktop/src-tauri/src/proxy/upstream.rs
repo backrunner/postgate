@@ -34,7 +34,11 @@ pub type SharedClient = Arc<Client<HttpsConnector<HttpConnector>, UpstreamBody>>
 ///   support it. Falls back transparently to HTTP/1.1.
 /// * Idle pool timeout is kept modest (30s) to avoid holding many sockets open
 ///   against dev servers that restart frequently.
-pub fn build_upstream_client(enable_http2: bool) -> SharedClient {
+pub fn build_upstream_client(
+    enable_http2: bool,
+    max_idle_per_host: usize,
+    idle_timeout: Duration,
+) -> SharedClient {
     let builder = hyper_rustls::HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
@@ -49,8 +53,8 @@ pub fn build_upstream_client(enable_http2: bool) -> SharedClient {
     // Connection pool tuning: the defaults are fine for most workloads, but
     // we cap idle sockets so we don't hold file descriptors indefinitely.
     let client = Client::builder(TokioExecutor::new())
-        .pool_idle_timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(16)
+        .pool_idle_timeout(idle_timeout)
+        .pool_max_idle_per_host(max_idle_per_host)
         .build(https);
 
     Arc::new(client)
@@ -221,10 +225,24 @@ fn build_upstream_request_from_headermap(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Request<UpstreamBody>> {
+    build_upstream_request_from_headermap_body(
+        method,
+        absolute_url,
+        headers,
+        Full::new(body).map_err(|_| unreachable!()).boxed(),
+    )
+}
+
+fn build_upstream_request_from_headermap_body(
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HeaderMap,
+    body: UpstreamBody,
+) -> Result<Request<UpstreamBody>> {
     let mut req = Request::builder()
         .method(method)
         .uri(absolute_url)
-        .body(Full::new(body).map_err(|_| unreachable!()).boxed())
+        .body(body)
         .map_err(|e| PostGateError::Proxy(format!("Failed to build upstream request: {}", e)))?;
 
     // Copy headers directly so multi-value entries (e.g. several `cookie` or
@@ -239,6 +257,41 @@ fn build_upstream_request_from_headermap(
     }
 
     Ok(req)
+}
+
+pub async fn forward_collect_headermap_body(
+    client: &SharedClient,
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HeaderMap,
+    body: UpstreamBody,
+    timeout_ms: Option<u64>,
+) -> Result<(Response<()>, CapturedBody)> {
+    let req = build_upstream_request_from_headermap_body(method, absolute_url, headers, body)?;
+    let fut = async {
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+
+        let (parts, incoming) = resp.into_parts();
+        let captured = collect_body(incoming, MAX_BODY_SIZE)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Failed to read response: {}", e)))?;
+
+        Ok((Response::from_parts(parts, ()), captured))
+    };
+
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), fut).await {
+            Ok(result) => result,
+            Err(_) => Err(PostGateError::Proxy(format!(
+                "Upstream request timed out after {} ms",
+                ms
+            ))),
+        },
+        None => fut.await,
+    }
 }
 
 /// Forward a request using a caller-provided `HeaderMap`, then collect the
@@ -289,6 +342,35 @@ pub async fn forward_stream_headermap(
     timeout_ms: Option<u64>,
 ) -> Result<(hyper::http::response::Parts, hyper::body::Incoming)> {
     let req = build_upstream_request_from_headermap(method, absolute_url, headers, body)?;
+    let fut = async {
+        let resp = client
+            .request(req)
+            .await
+            .map_err(|e| PostGateError::Proxy(format!("Upstream request failed: {}", e)))?;
+        Ok(resp.into_parts())
+    };
+
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), fut).await {
+            Ok(result) => result,
+            Err(_) => Err(PostGateError::Proxy(format!(
+                "Upstream request timed out after {} ms",
+                ms
+            ))),
+        },
+        None => fut.await,
+    }
+}
+
+pub async fn forward_stream_headermap_body(
+    client: &SharedClient,
+    method: hyper::Method,
+    absolute_url: &str,
+    headers: &HeaderMap,
+    body: UpstreamBody,
+    timeout_ms: Option<u64>,
+) -> Result<(hyper::http::response::Parts, hyper::body::Incoming)> {
+    let req = build_upstream_request_from_headermap_body(method, absolute_url, headers, body)?;
     let fut = async {
         let resp = client
             .request(req)

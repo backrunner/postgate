@@ -1,7 +1,6 @@
 use crate::cert::CertificateAuthority;
 use crate::error::{PostGateError, Result};
 use crate::proxy::handler::{handle_connection, ProxyContext};
-use crate::proxy::pool::{ConnectionPool, PoolConfig};
 use crate::proxy::resource::RemoteResourceCache;
 use crate::proxy::upstream::build_upstream_client;
 use crate::proxy::BodyStorage;
@@ -24,6 +23,8 @@ pub struct ProxyConfig {
     pub enable_quic: bool,
     #[serde(rename = "quicPort")]
     pub quic_port: Option<u16>,
+    #[serde(rename = "debugPort", default = "default_debug_port")]
+    pub debug_port: u16,
     /// Maximum connections per upstream host
     #[serde(rename = "maxConnectionsPerHost", default = "default_max_connections")]
     pub max_connections_per_host: usize,
@@ -38,6 +39,9 @@ fn default_max_connections() -> usize {
 fn default_idle_timeout() -> u64 {
     60
 }
+fn default_debug_port() -> u16 {
+    9229
+}
 
 impl Default for ProxyConfig {
     fn default() -> Self {
@@ -46,6 +50,7 @@ impl Default for ProxyConfig {
             enable_http2: true,
             enable_quic: false,
             quic_port: None,
+            debug_port: default_debug_port(),
             max_connections_per_host: default_max_connections(),
             connection_idle_timeout: default_idle_timeout(),
         }
@@ -69,7 +74,8 @@ pub struct ProxyServer {
     ctx: Arc<ProxyContext>,
     running: Arc<AtomicBool>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
-    cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(feature = "quic")]
+    quic_server: Option<super::quic::QuicServer>,
 }
 
 impl ProxyServer {
@@ -81,20 +87,19 @@ impl ProxyServer {
         body_storage: Arc<BodyStorage>,
         app_state: Arc<AppState>,
     ) -> Self {
-        // Create connection pool (pooling not yet fully integrated)
-        let connection_pool =
-            ConnectionPool::new(PoolConfig).expect("Failed to create connection pool");
-
         // Build the shared upstream client once — its connection pool is what
         // makes the proxy fast. See proxy/upstream.rs.
-        let upstream_client = build_upstream_client(config.enable_http2);
+        let upstream_client = build_upstream_client(
+            config.enable_http2,
+            config.max_connections_per_host.max(1),
+            Duration::from_secs(config.connection_idle_timeout.max(1)),
+        );
 
         let ctx = Arc::new(ProxyContext {
             ca: Arc::new(ca),
             rule_engine,
             body_storage,
             app_state,
-            connection_pool: Arc::new(connection_pool),
             enable_http2: config.enable_http2,
             upstream_client,
             remote_resource_cache: RemoteResourceCache::new(),
@@ -105,7 +110,8 @@ impl ProxyServer {
             ctx,
             running: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
-            cleanup_handle: None,
+            #[cfg(feature = "quic")]
+            quic_server: None,
         }
     }
 
@@ -113,6 +119,14 @@ impl ProxyServer {
     pub async fn start(&mut self) -> Result<()> {
         if self.running.load(Ordering::SeqCst) {
             return Err(PostGateError::InvalidState("Proxy already running".into()));
+        }
+
+        #[cfg(not(feature = "quic"))]
+        if self.config.enable_quic {
+            return Err(PostGateError::InvalidState(
+                "QUIC is enabled in proxy settings, but this build was compiled without the `quic` feature"
+                    .into(),
+            ));
         }
 
         let addr: SocketAddr = format!("127.0.0.1:{}", self.config.port)
@@ -123,6 +137,24 @@ impl ProxyServer {
             .await
             .map_err(|e| PostGateError::Proxy(format!("Failed to bind to {}: {}", addr, e)))?;
 
+        #[cfg(feature = "quic")]
+        if self.config.enable_quic {
+            let quic_addr = SocketAddr::from((
+                std::net::Ipv4Addr::LOCALHOST,
+                self.config.quic_port.unwrap_or(self.config.port),
+            ));
+            self.quic_server = Some(super::quic::QuicServer::start(
+                quic_addr,
+                addr,
+                &self.ctx.ca,
+                self.config.max_connections_per_host,
+                Duration::from_secs(self.config.connection_idle_timeout.max(1)),
+            )?);
+            if let Some(server) = &self.quic_server {
+                tracing::info!("HTTP/3 ingress listening on {}", server.local_addr()?);
+            }
+        }
+
         tracing::info!("Proxy server listening on {}", addr);
 
         self.running.store(true, Ordering::SeqCst);
@@ -132,13 +164,6 @@ impl ProxyServer {
 
         let running = self.running.clone();
         let ctx = self.ctx.clone();
-
-        // Start connection pool cleanup task
-        let pool = self.ctx.connection_pool.clone();
-        self.cleanup_handle = Some(super::pool::start_cleanup_task(
-            pool,
-            Duration::from_secs(30),
-        ));
 
         // Spawn the accept loop
         tokio::spawn(async move {
@@ -192,13 +217,10 @@ impl ProxyServer {
             let _ = tx.send(());
         }
 
-        // Stop cleanup task
-        if let Some(handle) = self.cleanup_handle.take() {
-            handle.abort();
+        #[cfg(feature = "quic")]
+        if let Some(server) = self.quic_server.take() {
+            server.shutdown().await;
         }
-
-        // Clear connection pool
-        self.ctx.connection_pool.clear().await;
 
         // Give connections time to close
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

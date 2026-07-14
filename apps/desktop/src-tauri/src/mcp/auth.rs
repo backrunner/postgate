@@ -124,8 +124,6 @@ pub fn required_scopes_for_resource(uri: &str) -> Vec<&'static str> {
         vec![SCOPE_CAPTURE_READ]
     } else if uri == "postgate://debug/sessions" {
         vec![SCOPE_DEBUG_READ]
-    } else if uri == "postgate://mcp/audit" {
-        vec![SCOPE_MCP_ADMIN]
     } else {
         vec![SCOPE_MCP_ADMIN]
     }

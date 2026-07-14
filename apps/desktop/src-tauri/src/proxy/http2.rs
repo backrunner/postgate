@@ -296,7 +296,7 @@ async fn handle_http2_request(
             .store_request_body(&request_id, request_body.clone())
             .await;
         ctx.app_state
-            .persist_body(request_id.clone(), request_body.data.clone(), true);
+            .persist_body(request_id.clone(), request_body.capture_bytes(), true);
 
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
             id: request_id.clone(),
@@ -366,7 +366,7 @@ async fn handle_http2_request(
                 .store_response_body(&request_id, response_body.clone())
                 .await;
             ctx.app_state
-                .persist_body(request_id.clone(), response_body.data.clone(), false);
+                .persist_body(request_id.clone(), response_body.capture_bytes(), false);
 
             ctx.app_state.emit_request_event(&CapturedRequestEvent {
                 id: request_id.clone(),
@@ -496,7 +496,7 @@ async fn handle_http2_request(
                         .await;
                     ctx.app_state.persist_body(
                         request_id.clone(),
-                        response_body.data.clone(),
+                        response_body.capture_bytes(),
                         false,
                     );
 
@@ -918,7 +918,7 @@ async fn handle_http2_request(
                     .store_response_body(&request_id, stored_body.clone())
                     .await;
                 ctx.app_state
-                    .persist_body(request_id.clone(), stored_body.data.clone(), false);
+                    .persist_body(request_id.clone(), stored_body.capture_bytes(), false);
 
                 ctx.app_state.emit_request_event(&CapturedRequestEvent {
                     id: request_id.clone(),
@@ -1086,30 +1086,23 @@ fn apply_flat_headers_to(target: &mut HeaderMap, headers: &HashMap<String, Strin
 async fn collect_h2_body(mut body: RecvStream) -> Result<CapturedBody> {
     let mut collected = Vec::new();
     let mut truncated = false;
+    let mut total_size = 0usize;
 
     while let Some(chunk) = body.data().await {
         let chunk = chunk.map_err(|e| PostGateError::Proxy(format!("H2 body error: {}", e)))?;
         let chunk_len = chunk.len();
-
-        if collected.len() + chunk_len > MAX_BODY_SIZE {
-            let remaining = MAX_BODY_SIZE.saturating_sub(collected.len());
-            collected.extend_from_slice(&chunk[..remaining]);
-            // Still release the full chunk's capacity so the peer can continue
-            // draining; we intentionally stop buffering but keep the stream alive.
-            let _ = body.flow_control().release_capacity(chunk_len);
-            truncated = true;
-            break;
-        }
-
+        total_size += chunk_len;
         collected.extend_from_slice(&chunk);
+        if total_size > MAX_BODY_SIZE {
+            truncated = true;
+        }
         let _ = body.flow_control().release_capacity(chunk_len);
     }
 
     let data = Bytes::from(collected);
-    let size = data.len();
     Ok(CapturedBody {
         data,
-        size,
+        size: total_size,
         truncated,
     })
 }

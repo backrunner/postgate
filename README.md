@@ -25,6 +25,7 @@ It is built for daily development work: compact UI, fast capture views, local-fi
 
 - HTTP and HTTPS traffic capture with method, status, timing, headers, body metadata, TLS details, and matched rules.
 - Whistle-compatible rule groups for host mapping, redirects, status overrides, headers, body replacement, injection, delay, throttle, CORS, auth, cookies, debug, and plugin actions.
+- Optional HTTP/3 ingress on localhost behind the Rust `quic` feature, bridged into the same rule and capture pipeline as HTTP/1.1 and HTTP/2.
 - External local rule files via Whistle-style `@/path/to/rules.txt` or PostGate's `includeFile:///path/to/rules.txt`; files are watched and merged into the active rule set.
 - Local CA generation, certificate export, and system trust installation for HTTPS inspection.
 - Replay collections for saving, organizing, editing, and re-running requests.
@@ -113,9 +114,20 @@ PostGate is intended for local development. By default, proxy services should st
 
 Sensitive headers such as `Authorization` and `Cookie` should be treated carefully when exporting captures, replay collections, or profile data.
 
+## Protocol Compatibility
+
+Rule compatibility is tracked against Whistle v2.10.6 in [docs/whistle-compatibility.md](docs/whistle-compatibility.md). PostGate rejects or reports protocols it cannot faithfully apply instead of silently treating them as successful rules.
+
+The default desktop build does not include QUIC dependencies. Build or test the HTTP/3 ingress explicitly with:
+
+```bash
+cd apps/desktop/src-tauri
+cargo test --features quic
+```
+
 ## Roadmap
 
-- Optional QUIC and HTTP/3 support behind the existing `quic` feature gate.
+- MASQUE `CONNECT-UDP` support for standards-based UDP tunneling through the HTTP/3 ingress.
 - Team-oriented sharing for rules and replay collections.
 - Deeper plugin sandboxing and permission controls.
 - Mobile companion workflows for remote debugging.

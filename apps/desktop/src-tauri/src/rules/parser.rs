@@ -569,7 +569,10 @@ fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
         if rest.is_empty() {
             return Err(PostGateError::RuleParse("Empty exact pattern".into()));
         }
-        return Ok((negated, Pattern::Exact(rest.to_string())));
+        let exact = url::Url::parse(rest)
+            .map(|url| url.to_string())
+            .unwrap_or_else(|_| rest.to_string());
+        return Ok((negated, Pattern::Exact(exact)));
     }
 
     // Port pattern: :8080
@@ -583,7 +586,7 @@ fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
     if s.starts_with("//") && !s.starts_with("///") {
         let rest = &s[2..];
         let host_end = rest.find(&['/', '?', '#'][..]).unwrap_or(rest.len());
-        let host = rest[..host_end].to_string();
+        let host = rest[..host_end].to_ascii_lowercase();
 
         let path = if host_end < rest.len() {
             let path_part = &rest[host_end..];
@@ -667,16 +670,31 @@ fn parse_pattern(s: &str) -> Result<(bool, Pattern)> {
         return Ok((negated, Pattern::PathPrefix(s.to_string())));
     }
 
+    // Bare host with an explicit port (example.com:8443) is a no-schema URL
+    // pattern, not a domain literal containing a colon.
+    let has_explicit_domain_port = s
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| host.contains('.') && port.parse::<u16>().is_ok());
+    if matches!(is_host_value(s), Some((_, Some(_)))) || has_explicit_domain_port {
+        return Ok((
+            negated,
+            Pattern::NoSchema {
+                host: s.to_ascii_lowercase(),
+                path: None,
+            },
+        ));
+    }
+
     // Domain pattern (contains dots but no /)
     if s.contains('.') && !s.contains('/') {
-        return Ok((negated, Pattern::Domain(s.to_string())));
+        return Ok((negated, Pattern::Domain(s.to_ascii_lowercase())));
     }
 
     // Host+path pattern without protocol (e.g., vm.gtimg.cn/path/to/file.js)
     // Whistle treats bare host/path as no-schema patterns (match any protocol)
     if s.contains('.') && s.contains('/') {
         if let Some(slash_idx) = s.find('/') {
-            let host = s[..slash_idx].to_string();
+            let host = s[..slash_idx].to_ascii_lowercase();
             let path_part = &s[slash_idx..];
             // Strip query and hash from path
             let path_end = path_part.find(&['?', '#'][..]).unwrap_or(path_part.len());
@@ -841,7 +859,7 @@ fn parse_url_pattern(s: &str) -> Result<Pattern> {
 
     // Find host boundary: could be /, ?, or #
     let host_end = rest.find(&['/', '?', '#'][..]).unwrap_or(rest.len());
-    let host = rest[..host_end].to_string();
+    let host = rest[..host_end].to_ascii_lowercase();
 
     let path = if host_end < rest.len() {
         let path_part = &rest[host_end..];
@@ -1142,10 +1160,14 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 content: parse_body_content(value)?,
             },
 
-            "urlparams" | "params" | "reqmerge" => {
+            "urlparams" => {
                 let modifications = parse_url_param_modifications(value)?;
                 RuleAction::UrlParams { modifications }
             }
+
+            "params" | "reqmerge" => RuleAction::RequestMerge {
+                content: parse_body_content(value)?,
+            },
 
             "pathreplace" | "urlreplace" => {
                 let (pattern, replacement) = parse_replace_pair(value)?;
@@ -1209,6 +1231,10 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 content: parse_body_content(value)?,
             },
 
+            "resmerge" => RuleAction::ResponseMerge {
+                content: parse_body_content(value)?,
+            },
+
             "htmlbody" => RuleAction::HtmlBody {
                 content: value.to_string(),
             },
@@ -1250,6 +1276,10 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
                 } else {
                     Some(value.to_string())
                 },
+            },
+
+            "cache" => RuleAction::Cache {
+                policy: value.to_string(),
             },
 
             // === INJECTION ACTIONS ===
@@ -1492,13 +1522,14 @@ fn parse_single_action(s: &str) -> Result<Option<RuleAction>> {
             },
 
             "style" | "rule" | "pipe" | "pac" | "https2http-proxy" | "http2https-proxy"
-            | "internal-proxy" | "cache" | "rulesfile" | "rulefile" | "rulescript"
-            | "rulescripts" | "reqscript" | "reqrules" | "resscript" | "resrules"
-            | "framescript" | "resmerge" | "trailers" | "cipher" | "tlsoptions" | "snicallback"
-            | "xproxy" | "xhttp-proxy" => RuleAction::Unsupported {
-                protocol: protocol.to_string(),
-                value: value.to_string(),
-            },
+            | "internal-proxy" | "rulesfile" | "rulefile" | "rulescript" | "rulescripts"
+            | "reqscript" | "reqrules" | "resscript" | "resrules" | "framescript" | "trailers"
+            | "cipher" | "tlsoptions" | "snicallback" | "xproxy" | "xhttp-proxy" => {
+                RuleAction::Unsupported {
+                    protocol: protocol.to_string(),
+                    value: value.to_string(),
+                }
+            }
 
             _ => {
                 tracing::warn!("Unsupported or unknown action protocol: {}", protocol);
@@ -2051,6 +2082,24 @@ example.com host://127.0.0.1
     }
 
     #[test]
+    fn test_parse_merge_and_cache_protocols() {
+        let rules = parse_rules(
+            r#"api.com params://debug=true resMerge://({"nested":{"enabled":true}}) cache://60"#,
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(
+            rules[0].actions[0],
+            RuleAction::RequestMerge { .. }
+        ));
+        assert!(matches!(
+            rules[0].actions[1],
+            RuleAction::ResponseMerge { .. }
+        ));
+        assert!(matches!(rules[0].actions[2], RuleAction::Cache { .. }));
+    }
+
+    #[test]
     fn test_parse_additional_whistle_protocols() {
         let rules = parse_rules(
             "example.com reqType://application/json reqCharset://utf-8 reqWrite:///tmp/req.bin reqWriteRaw:///tmp/req.raw resWrite:///tmp/res.bin resWriteRaw:///tmp/res.raw responseFor://client",
@@ -2378,7 +2427,10 @@ example.com host://127.0.0.1
             .all(|rule| matches!(&rule.pattern, Pattern::Domain(d) if d == "example.com")));
         assert!(matches!(rules[0].actions[0], RuleAction::Host { .. }));
         assert!(matches!(rules[1].actions[0], RuleAction::Host { .. }));
-        assert!(matches!(rules[2].actions[0], RuleAction::UrlParams { .. }));
+        assert!(matches!(
+            rules[2].actions[0],
+            RuleAction::RequestMerge { .. }
+        ));
         assert!(matches!(
             rules[3].actions[0],
             RuleAction::ResponseHeaders { .. }

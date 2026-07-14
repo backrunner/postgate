@@ -5,7 +5,7 @@
 //! fetches those resources ahead of rule application and passes the bytes in
 //! via `ResolveCtx`.
 
-use crate::proxy::body::{collect_body, MAX_BODY_SIZE};
+use crate::proxy::body::{collect_body_limited, MAX_BODY_SIZE};
 use crate::proxy::upstream::SharedClient;
 use crate::rules::{ResolvedResource, ResolvedResources};
 use bytes::Bytes;
@@ -93,7 +93,7 @@ impl RemoteResourceCache {
 
         let captured = match tokio::time::timeout(
             REMOTE_RESOURCE_TIMEOUT,
-            collect_body(response.into_body(), MAX_BODY_SIZE),
+            collect_body_limited(response.into_body(), MAX_BODY_SIZE),
         )
         .await
         {

@@ -9,12 +9,19 @@ pub struct RuleEngine {
     /// All rule groups, indexed by ID
     groups: DashMap<String, RuleGroup>,
     /// Cached compiled rules for fast matching
-    compiled_rules: RwLock<Vec<CompiledRule>>,
+    compiled_rules: RwLock<CompiledRuleSet>,
+}
+
+#[derive(Default)]
+struct CompiledRuleSet {
+    rules: Vec<CompiledRule>,
+    host_index: HashMap<String, Vec<usize>>,
+    fallback: Vec<usize>,
 }
 
 /// A compiled rule optimized for fast matching
 struct CompiledRule {
-    rule: Rule,
+    rule: Arc<Rule>,
     group_enabled: bool,
     /// Shared reference to the owning group's inline value definitions.
     /// `Arc` so cloning into a `MatchedRule` is cheap.
@@ -24,7 +31,7 @@ struct CompiledRule {
 /// Result of matching a rule, includes the rule and match details
 #[derive(Debug, Clone)]
 pub struct MatchedRule {
-    pub rule: Rule,
+    pub rule: Arc<Rule>,
     /// The remaining path after the matched prefix (for whistle-compatible path forwarding)
     pub remaining_path: String,
     /// Inline `{name}` definitions from the matched rule's group, used by the
@@ -38,7 +45,7 @@ impl RuleEngine {
     pub fn new() -> Self {
         Self {
             groups: DashMap::new(),
-            compiled_rules: RwLock::new(Vec::new()),
+            compiled_rules: RwLock::new(CompiledRuleSet::default()),
         }
     }
 
@@ -84,22 +91,46 @@ impl RuleEngine {
         let mut compiled = Vec::new();
 
         let mut groups: Vec<_> = self.groups.iter().map(|r| r.value().clone()).collect();
-        groups.sort_by_key(|group| std::cmp::Reverse(group.priority));
+        groups.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.id.cmp(&right.id))
+        });
 
         for group in groups {
             let inline = Arc::new(group.inline_values.clone());
-            for rule in &group.rules {
+            let mut rules: Vec<_> = group.rules.iter().collect();
+            // Applicators execute in vector order and later actions override
+            // earlier ones, matching Whistle's bottom-to-top precedence.
+            // Stable sorting preserves source order for equal priorities.
+            rules.sort_by_key(|rule| rule.priority);
+            for rule in rules {
                 compiled.push(CompiledRule {
-                    rule: rule.clone(),
+                    rule: Arc::new((*rule).clone()),
                     group_enabled: group.enabled,
                     inline_values: Arc::clone(&inline),
                 });
             }
         }
 
-        compiled.sort_by_key(|compiled| std::cmp::Reverse(compiled.rule.priority));
+        let mut host_index: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut fallback = Vec::new();
+        for (index, compiled_rule) in compiled.iter().enumerate() {
+            let indexed_host = (!compiled_rule.rule.negated)
+                .then(|| indexed_pattern_host(&compiled_rule.rule.pattern))
+                .flatten();
+            if let Some(host) = indexed_host {
+                host_index.entry(host).or_default().push(index);
+            } else {
+                fallback.push(index);
+            }
+        }
 
-        *self.compiled_rules.write() = compiled;
+        *self.compiled_rules.write() = CompiledRuleSet {
+            rules: compiled,
+            host_index,
+            fallback,
+        };
     }
 
     /// Match a request against all rules
@@ -140,10 +171,26 @@ impl RuleEngine {
 
         // Whistle URL normalization: ensure trailing / after bare hostname
         let normalized_path = if path.is_empty() { "/" } else { path };
-        let url = format!("{}://{}{}", protocol, host, normalized_path);
+        let default_port = match protocol {
+            "https" | "wss" => 443,
+            _ => 80,
+        };
+        let authority_host = if host.contains(':') && host.parse::<std::net::IpAddr>().is_ok() {
+            format!("[{host}]")
+        } else {
+            host.to_string()
+        };
+        let authority = if port == default_port {
+            authority_host
+        } else {
+            format!("{authority_host}:{port}")
+        };
+        let url = format!("{}://{}{}", protocol, authority, normalized_path);
 
         // Strip port from host for domain matching (whistle isDomain behavior)
-        let host_no_port = if let Some(colon_idx) = host.rfind(':') {
+        let host_no_port = if host.parse::<std::net::IpAddr>().is_ok() {
+            host
+        } else if let Some(colon_idx) = host.rfind(':') {
             let maybe_port = &host[colon_idx + 1..];
             if maybe_port.chars().all(|c| c.is_ascii_digit()) {
                 &host[..colon_idx]
@@ -157,12 +204,22 @@ impl RuleEngine {
         tracing::debug!(
             "RuleEngine::match_request - url: {}, total_rules: {}",
             url,
-            compiled.len()
+            compiled.rules.len()
         );
 
-        compiled
-            .iter()
+        let mut candidate_indices = compiled.fallback.clone();
+        for candidate_host in host_candidate_keys(host_no_port) {
+            if let Some(indices) = compiled.host_index.get(&candidate_host) {
+                candidate_indices.extend_from_slice(indices);
+            }
+        }
+        candidate_indices.sort_unstable();
+        candidate_indices.dedup();
+
+        candidate_indices
+            .into_iter()
             .filter_map(|cr| {
+                let cr = &compiled.rules[cr];
                 if !cr.group_enabled || !cr.rule.enabled {
                     return None;
                 }
@@ -210,7 +267,7 @@ impl RuleEngine {
                 };
 
                 Some(MatchedRule {
-                    rule: cr.rule.clone(),
+                    rule: Arc::clone(&cr.rule),
                     remaining_path,
                     inline_values: Arc::clone(&cr.inline_values),
                 })
@@ -221,7 +278,7 @@ impl RuleEngine {
     /// Check if any enabled rule has a debug action
     pub fn has_active_debug_rules(&self) -> bool {
         let compiled = self.compiled_rules.read();
-        compiled.iter().any(|cr| {
+        compiled.rules.iter().any(|cr| {
             cr.group_enabled
                 && cr.rule.enabled
                 && cr
@@ -231,6 +288,53 @@ impl RuleEngine {
                     .any(|a| matches!(a, RuleAction::Debug { .. }))
         })
     }
+}
+
+fn indexed_pattern_host(pattern: &super::types::Pattern) -> Option<String> {
+    use super::types::Pattern;
+
+    match pattern {
+        Pattern::Domain(host) => Some(normalize_index_host(host)),
+        Pattern::Url { host, .. } | Pattern::NoSchema { host, .. }
+            if !host.contains(['*', '?']) =>
+        {
+            Some(normalize_index_host(host))
+        }
+        Pattern::Exact(url) => {
+            let parsed = url::Url::parse(url).ok()?;
+            Some(normalize_index_host(parsed.host_str()?))
+        }
+        _ => None,
+    }
+}
+
+fn normalize_index_host(host: &str) -> String {
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some((host, _)) = rest.split_once(']') {
+            return host.to_ascii_lowercase();
+        }
+    }
+    if let Some((host, port)) = host.rsplit_once(':') {
+        if port.chars().all(|character| character.is_ascii_digit()) {
+            return host.to_ascii_lowercase();
+        }
+    }
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn host_candidate_keys(host: &str) -> Vec<String> {
+    let host = normalize_index_host(host);
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return vec![host];
+    }
+
+    let mut candidates = vec![host.clone()];
+    for (index, character) in host.char_indices() {
+        if character == '.' && index + 1 < host.len() {
+            candidates.push(host[index + 1..].to_string());
+        }
+    }
+    candidates
 }
 
 impl Default for RuleEngine {
@@ -454,6 +558,145 @@ mod tests {
     }
 
     #[test]
+    fn test_url_pattern_preserves_non_default_port() {
+        use crate::rules::parser::parse_rules;
+
+        let engine = RuleEngine::new();
+        let rules = parse_rules("https://example.com:8443/api statusCode://204").unwrap();
+        engine.upsert_group(create_test_group("ports", rules));
+
+        assert_eq!(
+            engine
+                .match_request(
+                    "GET",
+                    "example.com",
+                    "/api/users",
+                    "https",
+                    8443,
+                    &HashMap::new(),
+                )
+                .len(),
+            1
+        );
+        assert!(engine
+            .match_request(
+                "GET",
+                "example.com",
+                "/api/users",
+                "https",
+                443,
+                &HashMap::new(),
+            )
+            .is_empty());
+
+        let bare_engine = RuleEngine::new();
+        let bare_rules = parse_rules("example.com:8443 statusCode://204").unwrap();
+        bare_engine.upsert_group(create_test_group("bare-ports", bare_rules));
+        assert_eq!(
+            bare_engine
+                .match_request("GET", "example.com", "/", "https", 8443, &HashMap::new(),)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_higher_priorities_are_applied_last() {
+        let engine = RuleEngine::new();
+
+        let mut low_rule = make_rule(
+            Pattern::Domain("example.com".to_string()),
+            vec![RuleAction::StatusCode { code: 201 }],
+        );
+        low_rule.priority = 1;
+        low_rule.raw_line = "low-rule".into();
+        let mut high_rule = make_rule(
+            Pattern::Domain("example.com".to_string()),
+            vec![RuleAction::StatusCode { code: 202 }],
+        );
+        high_rule.priority = 10;
+        high_rule.raw_line = "high-rule".into();
+
+        let mut low_group = create_test_group("a-low", vec![high_rule]);
+        low_group.priority = 1;
+        let mut high_group = create_test_group("z-high", vec![low_rule]);
+        high_group.priority = 10;
+        engine.upsert_group(low_group);
+        engine.upsert_group(high_group);
+
+        let matches =
+            engine.match_request("GET", "example.com", "/", "https", 443, &HashMap::new());
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].rule.raw_line, "high-rule");
+        assert_eq!(matches[1].rule.raw_line, "low-rule");
+    }
+
+    #[test]
+    fn test_domain_rules_use_host_index() {
+        let engine = RuleEngine::new();
+        let rules = (0..1_000)
+            .map(|index| {
+                make_rule(
+                    Pattern::Domain(format!("host-{index}.example")),
+                    vec![RuleAction::StatusCode { code: 200 }],
+                )
+            })
+            .collect();
+        engine.upsert_group(create_test_group("indexed", rules));
+
+        let compiled = engine.compiled_rules.read();
+        assert_eq!(compiled.host_index.len(), 1_000);
+        assert!(compiled.fallback.is_empty());
+        drop(compiled);
+
+        let matches = engine.match_request(
+            "GET",
+            "host-777.example",
+            "/api",
+            "https",
+            443,
+            &HashMap::new(),
+        );
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    #[ignore = "manual throughput benchmark"]
+    fn benchmark_indexed_rule_matching() {
+        let engine = RuleEngine::new();
+        let rules = (0..10_000)
+            .map(|index| {
+                make_rule(
+                    Pattern::Domain(format!("host-{index}.example")),
+                    vec![RuleAction::StatusCode { code: 200 }],
+                )
+            })
+            .collect();
+        engine.upsert_group(create_test_group("benchmark", rules));
+
+        let iterations = 100_000;
+        let started = std::time::Instant::now();
+        for _ in 0..iterations {
+            let matches = engine.match_request(
+                "GET",
+                "host-7777.example",
+                "/assets/app.js",
+                "https",
+                443,
+                &HashMap::new(),
+            );
+            assert_eq!(matches.len(), 1);
+        }
+        let elapsed = started.elapsed();
+        println!(
+            "indexed rule matching: {} requests in {:?} ({:.0} req/s)",
+            iterations,
+            elapsed,
+            iterations as f64 / elapsed.as_secs_f64()
+        );
+    }
+
+    #[test]
     fn test_client_ip_filter_matching() {
         let engine = RuleEngine::new();
 
@@ -520,7 +763,7 @@ https://v.qq.com/assets/ http://localhost:8080/assets/"#;
             &headers,
         );
         assert!(
-            matches.len() >= 1,
+            !matches.is_empty(),
             "Should match the v.qq.com rule with includeFilter for /x/cover/ path"
         );
 
@@ -548,6 +791,6 @@ https://v.qq.com/assets/ http://localhost:8080/assets/"#;
             443,
             &headers,
         );
-        assert!(matches.len() >= 1, "Should match the assets rule");
+        assert!(!matches.is_empty(), "Should match the assets rule");
     }
 }

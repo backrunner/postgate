@@ -1,9 +1,12 @@
+use crate::state::AppState;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
+use hyper::body::{Body, Frame, Incoming, SizeHint};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// Maximum body size to capture (10MB)
 pub const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -45,9 +48,21 @@ impl CapturedBody {
             truncated,
         }
     }
+
+    /// Return the bounded slice retained by capture/persistence. `data` may
+    /// contain the complete buffered payload because the proxy must never
+    /// truncate bytes merely to enforce a UI storage limit.
+    pub fn capture_bytes(&self) -> Bytes {
+        capture_bytes(&self.data)
+    }
 }
 
-/// Collect body from an Incoming stream with size limit
+pub fn capture_bytes(data: &Bytes) -> Bytes {
+    data.slice(..data.len().min(MAX_BODY_SIZE))
+}
+
+/// Collect a complete body for forwarding while recording whether it exceeds
+/// the capture limit. Callers must not use the limit to alter proxied bytes.
 pub async fn collect_body(body: Incoming, max_size: usize) -> Result<CapturedBody, hyper::Error> {
     let mut collected = BytesMut::new();
     let mut truncated = false;
@@ -60,15 +75,8 @@ pub async fn collect_body(body: Incoming, max_size: usize) -> Result<CapturedBod
         if let Some(chunk) = frame.data_ref() {
             total_size += chunk.len();
 
-            if collected.len() < max_size {
-                let remaining = max_size - collected.len();
-                if chunk.len() <= remaining {
-                    collected.extend_from_slice(chunk);
-                } else {
-                    collected.extend_from_slice(&chunk[..remaining]);
-                    truncated = true;
-                }
-            } else {
+            collected.extend_from_slice(chunk);
+            if total_size > max_size {
                 truncated = true;
             }
         }
@@ -79,6 +87,143 @@ pub async fn collect_body(body: Incoming, max_size: usize) -> Result<CapturedBod
         size: total_size,
         truncated,
     })
+}
+
+/// Drain an incoming body but retain at most `max_size` bytes. This is for
+/// auxiliary resources that are themselves bounded, never for client or
+/// upstream payloads that must be forwarded byte-for-byte.
+pub async fn collect_body_limited(
+    body: Incoming,
+    max_size: usize,
+) -> Result<CapturedBody, hyper::Error> {
+    let mut collected = BytesMut::new();
+    let mut total_size = 0usize;
+    let mut body = body;
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        if let Some(chunk) = frame.data_ref() {
+            total_size += chunk.len();
+            if collected.len() < max_size {
+                let remaining = max_size - collected.len();
+                collected.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            }
+        }
+    }
+
+    Ok(CapturedBody {
+        data: collected.freeze(),
+        size: total_size,
+        truncated: total_size > max_size,
+    })
+}
+
+/// Streams an unmodified client request upstream while retaining only the
+/// bounded capture prefix. This removes the full-body buffering cost from
+/// the common case where no request rule needs body bytes.
+pub struct RequestCapturingBody {
+    inner: Incoming,
+    request_id: String,
+    app_state: Arc<AppState>,
+    body_storage: Arc<BodyStorage>,
+    collected: BytesMut,
+    transferred: Arc<AtomicU64>,
+    capture: bool,
+    ended: bool,
+}
+
+impl RequestCapturingBody {
+    pub fn new(
+        inner: Incoming,
+        request_id: String,
+        app_state: Arc<AppState>,
+        body_storage: Arc<BodyStorage>,
+        transferred: Arc<AtomicU64>,
+        capture: bool,
+    ) -> Self {
+        Self {
+            inner,
+            request_id,
+            app_state,
+            body_storage,
+            collected: BytesMut::new(),
+            transferred,
+            capture,
+            ended: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        if !self.capture {
+            return;
+        }
+
+        let collected = std::mem::take(&mut self.collected).freeze();
+        let stored = CapturedBody {
+            data: collected.clone(),
+            size: self.transferred.load(Ordering::Relaxed) as usize,
+            truncated: self.transferred.load(Ordering::Relaxed) as usize > collected.len(),
+        };
+        let storage = self.body_storage.clone();
+        let request_id = self.request_id.clone();
+        tokio::spawn(async move {
+            storage.store_request_body(&request_id, stored).await;
+        });
+        self.app_state
+            .persist_body(self.request_id.clone(), collected, true);
+    }
+}
+
+impl Body for RequestCapturingBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Self::Data>, Self::Error>>> {
+        match Pin::new(&mut self.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    self.transferred
+                        .fetch_add(data.len() as u64, Ordering::Relaxed);
+                    if self.capture && self.collected.len() < MAX_BODY_SIZE {
+                        let remaining = MAX_BODY_SIZE - self.collected.len();
+                        self.collected
+                            .extend_from_slice(&data[..data.len().min(remaining)]);
+                    }
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.finish();
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                self.finish();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
+impl Drop for RequestCapturingBody {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 /// Body storage for captured requests.
@@ -132,6 +277,11 @@ impl BodyStorage {
     /// older entries to stay within both the entry and byte budgets.
     fn insert(&self, map: &DashMap<String, (u64, CapturedBody)>, id: &str, body: CapturedBody) {
         let seq = self.next_seq();
+        let body = CapturedBody {
+            data: body.capture_bytes(),
+            size: body.size,
+            truncated: body.truncated || body.data.len() > MAX_BODY_SIZE,
+        };
         let new_size = body.data.len();
 
         // If we're replacing an existing entry, credit its bytes back first
@@ -260,5 +410,86 @@ impl BodyStorage {
 impl Default for BodyStorage {
     fn default() -> Self {
         Self::with_limits(DEFAULT_MAX_ENTRIES, DEFAULT_BODY_BUDGET_BYTES)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::Full;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
+    use std::sync::Mutex;
+    use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn storage_caps_capture_without_changing_total_size() {
+        let storage = BodyStorage::with_limits(4, MAX_BODY_SIZE * 2);
+        let full = Bytes::from(vec![b'x'; MAX_BODY_SIZE + 32]);
+        storage
+            .store_request_body(
+                "large",
+                CapturedBody {
+                    data: full,
+                    size: MAX_BODY_SIZE + 32,
+                    truncated: true,
+                },
+            )
+            .await;
+
+        let stored = storage.get_request_body("large").await.unwrap();
+        assert_eq!(stored.data.len(), MAX_BODY_SIZE);
+        assert_eq!(stored.size, MAX_BODY_SIZE + 32);
+        assert!(stored.truncated);
+    }
+
+    #[tokio::test]
+    async fn collect_body_keeps_forwarding_bytes_beyond_capture_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = Arc::new(Mutex::new(Some(tx)));
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(move |request: Request<Incoming>| {
+                let tx = tx.clone();
+                async move {
+                    let body = collect_body(request.into_body(), 4).await.unwrap();
+                    if let Some(tx) = tx.lock().unwrap().take() {
+                        let _ = tx.send(body);
+                    }
+                    Ok::<_, Infallible>(Response::new(Full::new(Bytes::new())))
+                }
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(stream))
+                .await
+                .unwrap();
+        let connection = tokio::spawn(async move { connection.await.unwrap() });
+        let request = Request::post("/")
+            .body(Full::new(Bytes::from_static(b"abcdefgh")))
+            .unwrap();
+        let response = sender.send_request(request).await.unwrap();
+        let _ = response.into_body().collect().await.unwrap();
+
+        let collected = rx.await.unwrap();
+        assert_eq!(collected.data, Bytes::from_static(b"abcdefgh"));
+        assert_eq!(collected.size, 8);
+        assert!(collected.truncated);
+
+        drop(sender);
+        connection.await.unwrap();
+        server.await.unwrap();
     }
 }

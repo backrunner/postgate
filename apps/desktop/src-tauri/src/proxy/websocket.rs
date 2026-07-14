@@ -257,6 +257,7 @@ impl WebSocketProxy {
     }
 
     /// Forward WebSocket frames between connections with capture
+    #[allow(clippy::too_many_arguments)]
     async fn forward_frames<R, W>(
         mut read: R,
         mut write: W,

@@ -2,22 +2,22 @@ use crate::cert::CertificateAuthority;
 use crate::debug::ScriptInjector;
 use crate::error::Result;
 use crate::plugin::{PluginRequest, PluginRequestContext, PluginResponse};
-use crate::proxy::body::{collect_body, CapturedBody, MAX_BODY_SIZE};
+use crate::proxy::body::{collect_body, CapturedBody, RequestCapturingBody, MAX_BODY_SIZE};
 use crate::proxy::error_page::ProxyErrorKind;
 use crate::proxy::headers::{
     apply_headers_to_response_builder, build_forward_request_headers,
     build_forward_response_headers, flat_to_headermap, headermap_to_flat,
     sync_request_body_headers,
 };
-use crate::proxy::pool::ConnectionPool;
 use crate::proxy::sse;
 use crate::proxy::websocket;
 use crate::proxy::BodyStorage;
 use crate::rules::{
     apply_request_rules_with_values, apply_response_rules_with_values, feature, is_enabled,
     persist_request_writes, persist_response_writes, remote_resource_urls_for_request,
-    remote_resource_urls_for_response_context, MatchedRule, RequestWriteContext, ResolveCtx,
-    ResolvedResources, ResponseModification, ResponseWriteContext, RuleEngine,
+    remote_resource_urls_for_response_context, rules_may_short_circuit_request,
+    rules_require_request_body, MatchedRule, RequestWriteContext, ResolveCtx, ResolvedResources,
+    ResponseModification, ResponseWriteContext, RuleEngine,
 };
 use crate::state::{AppState, CapturedRequestData, CapturedRequestEvent, RequestEventType};
 use crate::values::RequestCtx;
@@ -31,6 +31,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use uuid::Uuid;
@@ -46,7 +47,6 @@ pub struct ProxyContext {
     pub rule_engine: Arc<RuleEngine>,
     pub body_storage: Arc<BodyStorage>,
     pub app_state: Arc<AppState>,
-    pub connection_pool: Arc<ConnectionPool>,
     pub enable_http2: bool,
     /// Shared hyper client used for ALL upstream forwarding.
     ///
@@ -164,32 +164,46 @@ async fn handle_request(
         .map(|r| r.rule.raw_line.clone())
         .collect();
 
-    // Collect request body first (needed for rule application)
+    // Buffer only when a matched action actually needs request bytes. The
+    // common pass-through case keeps the Incoming body intact and streams it
+    // through a bounded capture wrapper later.
     let (parts, body) = req.into_parts();
-    let request_body = match collect_body(body, MAX_BODY_SIZE).await {
-        Ok(b) => b,
-        Err(e) => {
-            emit_error_event(
-                &ctx,
-                &request_id,
-                timestamp,
-                &method,
-                &uri,
-                &host,
-                &path,
-                &request_headers,
-                start_time.elapsed().as_millis() as u64,
-                &e.to_string(),
-            );
-            return Ok(error_response(
-                502,
-                ProxyErrorKind::Request,
-                &format!("Failed to read request body: {}", e),
-            ));
-        }
+    let buffer_request_body = rules_require_request_body(&matched_rules)
+        || rules_may_short_circuit_request(&matched_rules);
+    let (request_body, streaming_body) = if buffer_request_body {
+        let request_body = match collect_body(body, MAX_BODY_SIZE).await {
+            Ok(body) => body,
+            Err(error) => {
+                emit_error_event(
+                    &ctx,
+                    &request_id,
+                    timestamp,
+                    &method,
+                    &uri,
+                    &host,
+                    &path,
+                    &request_headers,
+                    start_time.elapsed().as_millis() as u64,
+                    &error.to_string(),
+                );
+                return Ok(error_response(
+                    502,
+                    ProxyErrorKind::Request,
+                    &format!("Failed to read request body: {error}"),
+                ));
+            }
+        };
+        (Some(request_body), None)
+    } else {
+        (None, Some(body))
     };
 
-    let request_size = request_body.size as u64;
+    let request_size = Arc::new(AtomicU64::new(
+        request_body
+            .as_ref()
+            .map(|body| body.size as u64)
+            .unwrap_or(0),
+    ));
 
     // Ensure the in-memory values store is populated so `{name}` references
     // in rule actions resolve on the first request after startup.
@@ -228,7 +242,7 @@ async fn handle_request(
             &uri,
             &method,
             &request_headers,
-            Some(&request_body.data),
+            request_body.as_ref().map(|body| &body.data),
             &resolve_ctx,
         )
     };
@@ -260,15 +274,18 @@ async fn handle_request(
     let mut body_to_send = request_modification
         .body
         .clone()
-        .unwrap_or(request_body.data.clone());
+        .or_else(|| request_body.as_ref().map(|body| body.data.clone()))
+        .unwrap_or_default();
     if let Some(speed_kbps) = request_modification.speed_kbps {
         body_to_send = super::throttle::apply_throttle(body_to_send, Some(speed_kbps)).await;
     }
-    sync_request_body_headers(
-        &mut request_modification.headers,
-        &request_body.data,
-        &body_to_send,
-    );
+    if let Some(request_body) = &request_body {
+        sync_request_body_headers(
+            &mut request_modification.headers,
+            &request_body.data,
+            &body_to_send,
+        );
+    }
 
     // Build the target URI using ForwardTarget for whistle-compatible path forwarding.
     let base_target_uri = if let Some(target) = &request_modification.target_host {
@@ -331,12 +348,12 @@ async fn handle_request(
     // the UI, but we still want to surface Started for long-running requests.
     let capture = crate::rules::capture_enabled(&request_modification);
     let force_res_write = is_enabled(&request_modification, feature::FORCE_RES_WRITE);
-    if capture {
+    if let (true, Some(request_body)) = (capture, request_body.as_ref()) {
         ctx.body_storage
             .store_request_body(&request_id, request_body.clone())
             .await;
         ctx.app_state
-            .persist_body(request_id.clone(), request_body.data.clone(), true);
+            .persist_body(request_id.clone(), request_body.capture_bytes(), true);
     }
     if capture {
         ctx.app_state.emit_request_event(&CapturedRequestEvent {
@@ -407,7 +424,7 @@ async fn handle_request(
                 .store_response_body(&request_id, response_body.clone())
                 .await;
             ctx.app_state
-                .persist_body(request_id.clone(), response_body.data.clone(), false);
+                .persist_body(request_id.clone(), response_body.capture_bytes(), false);
         }
 
         // Emit completion event
@@ -429,7 +446,7 @@ async fn handle_request(
                     matched_rules: matched_rule_ids,
                     protocol: "http1".to_string(),
                     content_type: final_response.flat_headers.get("content-type").cloned(),
-                    request_size,
+                    request_size: request_size.load(Ordering::Relaxed),
                     response_size: Some(final_response.body.len() as u64),
                     ..Default::default()
                 },
@@ -541,7 +558,7 @@ async fn handle_request(
                         .await;
                     ctx.app_state.persist_body(
                         request_id.clone(),
-                        response_body.data.clone(),
+                        response_body.capture_bytes(),
                         false,
                     );
                 }
@@ -564,7 +581,7 @@ async fn handle_request(
                             matched_rules: matched_rule_ids,
                             protocol: "http1".to_string(),
                             content_type: final_response.flat_headers.get("content-type").cloned(),
-                            request_size,
+                            request_size: request_size.load(Ordering::Relaxed),
                             response_size: Some(final_response.body.len() as u64),
                             ..Default::default()
                         },
@@ -611,13 +628,21 @@ async fn handle_request(
         }
     }
 
-    let req = new_req
-        .body(
-            Full::new(body_to_send.clone())
-                .map_err(|_| unreachable!())
-                .boxed(),
+    let outgoing_body = match streaming_body {
+        Some(body) => RequestCapturingBody::new(
+            body,
+            request_id.clone(),
+            ctx.app_state.clone(),
+            ctx.body_storage.clone(),
+            request_size.clone(),
+            capture,
         )
-        .unwrap();
+        .boxed(),
+        None => Full::new(body_to_send.clone())
+            .map_err(|_| unreachable!())
+            .boxed(),
+    };
+    let req = new_req.body(outgoing_body).unwrap();
 
     // Forward request to upstream. If no matched rule needs the response body,
     // we stream it straight back to the client — that makes TTFB match the
@@ -730,7 +755,7 @@ async fn handle_request(
                         matched_rules: matched_rule_ids.clone(),
                         protocol: "sse".to_string(),
                         content_type,
-                        request_size,
+                        request_size: request_size.load(Ordering::Relaxed),
                         ..Default::default()
                     },
                 });
@@ -834,7 +859,7 @@ async fn handle_request(
                     matched_rules: matched_rule_ids.clone(),
                     protocol: "http1".to_string(),
                     content_type: response_content_type,
-                    request_size,
+                    request_size: request_size.load(Ordering::Relaxed),
                     start_time,
                     persistence_enabled: ctx.app_state.is_persistence_enabled(),
                     tls_version: None,
@@ -1066,7 +1091,7 @@ async fn handle_request(
                     .store_response_body(&request_id, stored_body.clone())
                     .await;
                 ctx.app_state
-                    .persist_body(request_id.clone(), stored_body.data.clone(), false);
+                    .persist_body(request_id.clone(), stored_body.capture_bytes(), false);
             }
 
             let final_duration = start_time.elapsed().as_millis() as u64;
@@ -1090,7 +1115,7 @@ async fn handle_request(
                         matched_rules: matched_rule_ids,
                         protocol: "http1".to_string(),
                         content_type: final_headers.get("content-type").cloned(),
-                        request_size,
+                        request_size: request_size.load(Ordering::Relaxed),
                         response_size: Some(final_size),
                         ..Default::default()
                     },

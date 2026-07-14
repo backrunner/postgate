@@ -42,6 +42,7 @@ impl PostGateMcpServer {
             enable_http2: input.enable_http2,
             enable_quic: input.enable_quic,
             quic_port: input.quic_port,
+            debug_port: defaults.debug_port,
             max_connections_per_host: input
                 .max_connections_per_host
                 .unwrap_or(defaults.max_connections_per_host),

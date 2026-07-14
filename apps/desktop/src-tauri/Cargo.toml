@@ -5,6 +5,7 @@ description = "A Tauri 2.0 based MITM proxy tool for local frontend development"
 authors = ["PostGate Team"]
 edition = "2021"
 rust-version = "1.77"
+default-run = "postgate"
 
 [lib]
 name = "postgate_lib"
@@ -50,6 +51,9 @@ h2 = "0.4"
 
 # QUIC/HTTP/3 (optional, feature-gated)
 quinn = { version = "0.11", optional = true }
+h3 = { version = "0.0.8", features = ["tracing"], optional = true }
+h3-quinn = { version = "0.0.10", features = ["tracing"], optional = true }
+tower-service = { version = "0.3", optional = true }
 
 # Concurrent Data Structures
 dashmap = "6"
@@ -72,12 +76,13 @@ url = "2"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 mime_guess = "2"
+httpdate = "1"
 urlencoding = "2"
 if-addrs = "0.15"
 tar = "0.4"
 flate2 = "1"
 tempfile = "3"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "brotli", "deflate", "gzip", "zstd"] }
 
 # JavaScript Runtime (embedded V8 via Deno Core)
 deno_core = "0.406"
@@ -100,13 +105,13 @@ tokio-util = "0.7"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-quic = ["quinn"]
+quic = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:tower-service"]
 
 [profile.release]
 panic = "abort"
 codegen-units = 1
 lto = true
-opt-level = "s"
+opt-level = 3
 strip = true
 
 [dev-dependencies]

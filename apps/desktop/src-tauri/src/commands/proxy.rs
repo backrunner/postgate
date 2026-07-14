@@ -40,6 +40,22 @@ pub async fn start_proxy(
         }
     }
 
+    // The proxy can start before the Rules or DevTools pages are ever opened.
+    // Start the debug server from backend state so an active debug:// rule is
+    // functional from the first matching response, not only after navigation.
+    if state.rule_engine.has_active_debug_rules() {
+        let debug_status = state
+            .get_debug_status()
+            .await
+            .map_err(crate::error::PostGateError::InvalidState)?;
+        if !debug_status.is_running {
+            state
+                .start_debug_server(config.debug_port)
+                .await
+                .map_err(crate::error::PostGateError::InvalidState)?;
+        }
+    }
+
     // Check if proxy is already running (guard against concurrent starts)
     {
         let proxy_guard = state.proxy.read();

@@ -51,7 +51,7 @@
       "open": true
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM5NEUyMDE0OTEwQjgyOTAKUldTUWdndVJGQ0JPeWRmOFh2SWJEZmZiSVNTSXpuNVQzUWZtSy84MnA4WXd1aTlaTlprUXo3VmoK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwMzNCQjFDQjk1RjEzODAKUldTQUUxKzVITHN6TU52bEIrVzVjNUtFY3cxVFdaQTBzTG5XdG96ckVGd3EzQVQ0K3Bua2pxZWwK",
       "endpoints": [
         "https://github.com/backrunner/postgate/releases/latest/download/latest.json"
       ],

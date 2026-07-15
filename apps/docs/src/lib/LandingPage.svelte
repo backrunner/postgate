@@ -160,18 +160,6 @@
 
   <main>
     <section class="hero">
-      <div class="traffic-scene" aria-hidden="true">
-        <div class="scene-axis browser"><span>CLIENT</span></div>
-        <div class="scene-axis gate"><img src="/postgate.png" alt="" /><span>POSTGATE</span></div>
-        <div class="scene-axis upstream"><span>UPSTREAM</span></div>
-        <div class="route-line line-a"></div>
-        <div class="route-line line-b"></div>
-        <div class="route-line line-c"></div>
-        <div class="packet packet-a"><span>GET</span><b>/api/cart</b><em>200</em></div>
-        <div class="packet packet-b"><span>POST</span><b>/checkout</b><em>201</em></div>
-        <div class="packet packet-c"><span>GET</span><b>/app.js</b><em>FILE</em></div>
-      </div>
-
       <div class="hero-copy">
         <h1>PostGate</h1>
         <p class="hero-lede">{copy.lede}</p>
@@ -184,6 +172,18 @@
           </a>
           <a class="secondary-action" href="#download">{copy.downloadDesktop}</a>
         </div>
+      </div>
+
+      <div class="traffic-scene" aria-hidden="true">
+        <div class="scene-axis browser"><span>CLIENT</span></div>
+        <div class="scene-axis gate"><img src="/postgate.png" alt="" /><span>POSTGATE</span></div>
+        <div class="scene-axis upstream"><span>UPSTREAM</span></div>
+        <div class="route-line line-a"></div>
+        <div class="route-line line-b"></div>
+        <div class="route-line line-c"></div>
+        <div class="packet packet-a"><span>GET</span><b>/api/cart</b><em>200</em></div>
+        <div class="packet packet-b"><span>POST</span><b>/checkout</b><em>201</em></div>
+        <div class="packet packet-c"><span>GET</span><b>/app.js</b><em>FILE</em></div>
       </div>
     </section>
 

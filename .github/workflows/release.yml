@@ -182,7 +182,21 @@ jobs:
           p12-file-base64: ${{ env.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
-      - name: Build and upload release assets
+      - name: Build and upload release assets (unsigned app)
+        if: env.APPLE_CERTIFICATE == ''
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.args }} --bundles ${{ matrix.bundles }} --features quic
+          retryAttempts: 3
+
+      - name: Build and upload release assets (signed app)
+        if: env.APPLE_CERTIFICATE != ''
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

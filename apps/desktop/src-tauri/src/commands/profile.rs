@@ -142,6 +142,8 @@ pub struct ProxySettings {
 pub struct UpdateSettings {
     pub auto_check: bool,
     pub auto_download: bool,
+    #[serde(default)]
+    pub channel: Option<crate::commands::updater::ReleaseChannel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

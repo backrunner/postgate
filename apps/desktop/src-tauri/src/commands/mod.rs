@@ -6,5 +6,6 @@ pub mod profile;
 pub mod proxy;
 pub mod replay;
 pub mod rules;
+pub mod updater;
 pub mod values;
 pub mod window;

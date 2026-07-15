@@ -47,6 +47,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(commands::updater::ChannelUpdaterState::default())
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -158,6 +159,10 @@ pub fn run() {
             commands::profile::save_sync_settings,
             commands::profile::push_sync_profile,
             commands::profile::pull_sync_profile,
+            commands::updater::check_for_update,
+            commands::updater::download_update,
+            commands::updater::install_update,
+            commands::updater::clear_pending_update,
             commands::mcp::get_mcp_status,
             commands::mcp::start_mcp_server,
             commands::mcp::stop_mcp_server,

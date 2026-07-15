@@ -33,7 +33,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useProxyStore } from "@/stores/proxy";
 import { useThemeStore } from "@/stores/theme";
-import { useUpdaterStore } from "@/stores/updater";
+import { useUpdaterStore, type UpdateChannel } from "@/stores/updater";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -96,6 +96,7 @@ interface AppSettingsBackup {
   updates?: {
     autoCheck: boolean;
     autoDownload: boolean;
+    channel?: UpdateChannel;
   };
 }
 
@@ -179,9 +180,11 @@ export function SettingsPage() {
     lastChecked,
     autoCheck,
     autoDownload,
+    channel,
     checkForUpdates,
     downloadAndInstall,
     installUpdate,
+    setChannel,
     setAutoCheck,
     setAutoDownload,
   } = useUpdaterStore();
@@ -244,6 +247,7 @@ export function SettingsPage() {
     updates: {
       autoCheck,
       autoDownload,
+      channel,
     },
   });
 
@@ -306,6 +310,9 @@ export function SettingsPage() {
     if (settings.updates) {
       setAutoCheck(settings.updates.autoCheck);
       setAutoDownload(settings.updates.autoDownload);
+      if (settings.updates.channel) {
+        await setChannel(settings.updates.channel);
+      }
     }
     if (settings.columns) {
       const nextColumns = Array.isArray(settings.columns)
@@ -540,6 +547,9 @@ export function SettingsPage() {
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium">PostGate Desktop</span>
                       <Badge variant="secondary" className="font-mono text-xs">v{currentVersion}</Badge>
+                      <Badge variant="outline" className="text-[10px] uppercase">
+                        {channel}
+                      </Badge>
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Last checked: {formatLastChecked()}
@@ -629,6 +639,38 @@ export function SettingsPage() {
               )}
 
               <Separator />
+
+              <SettingRow
+                label="Update Channel"
+                description={channel === "stable"
+                  ? "Receive production-ready releases only"
+                  : "Receive preview builds before stable releases"}
+              >
+                <div
+                  role="radiogroup"
+                  aria-label="Update channel"
+                  className="inline-flex h-8 items-center rounded-md border bg-muted/30 p-0.5"
+                >
+                  {(["stable", "beta"] as const).map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={channel === value}
+                      disabled={isChecking || isDownloading || isInstalling}
+                      onClick={() => void setChannel(value)}
+                      className={cn(
+                        "h-6 rounded px-2.5 text-xs font-medium capitalize text-muted-foreground transition-colors",
+                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                        "disabled:pointer-events-none disabled:opacity-50",
+                        channel === value && "bg-background text-foreground shadow-sm",
+                      )}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+              </SettingRow>
 
               <SettingRow
                 label="Auto Check"

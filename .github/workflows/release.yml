@@ -250,13 +250,36 @@ jobs:
               },
             );
             const manifest = JSON.parse(Buffer.from(response.data).toString('utf8'));
+            const assetsById = new Map(
+              assets.map((asset) => [String(asset.id), asset]),
+            );
+            const downloadBase = [
+              'https://github.com',
+              context.repo.owner,
+              context.repo.repo,
+              'releases/download',
+              `v${process.env.VERSION}`,
+            ].join('/');
+
+            for (const [platform, entry] of Object.entries(manifest.platforms ?? {})) {
+              const assetId = entry.url?.match(/\/releases\/assets\/(\d+)(?:[?#].*)?$/)?.[1];
+              if (!assetId) continue;
+
+              const asset = assetsById.get(assetId);
+              if (!asset) {
+                core.setFailed(`Updater platform ${platform} references unknown asset ${assetId}`);
+                return;
+              }
+              entry.url = `${downloadBase}/${encodeURIComponent(asset.name)}`;
+            }
+
             const requiredPlatforms = [
               'darwin-aarch64',
               'darwin-x86_64',
             ];
             const missing = requiredPlatforms.filter((platform) => {
               const entry = manifest.platforms?.[platform];
-              return !entry?.url || !entry?.signature;
+              return !entry?.url?.startsWith(`${downloadBase}/`) || !entry?.signature;
             });
 
             if (manifest.version !== process.env.VERSION || missing.length > 0) {
@@ -265,6 +288,24 @@ jobs:
               );
               return;
             }
+
+            const manifestData = Buffer.from(JSON.stringify(manifest, null, 2) + '\n');
+            await github.rest.repos.deleteReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              asset_id: updaterAsset.id,
+            });
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              name: 'latest.json',
+              data: manifestData,
+              headers: {
+                'content-type': 'application/json',
+                'content-length': manifestData.length,
+              },
+            });
 
             await github.rest.repos.updateRelease({
               owner: context.repo.owner,
@@ -375,7 +416,6 @@ jobs:
               });
             }
 
-            const manifestData = Buffer.from(JSON.stringify(manifest, null, 2) + '\n');
             await github.rest.repos.uploadReleaseAsset({
               owner: context.repo.owner,
               repo: context.repo.repo,

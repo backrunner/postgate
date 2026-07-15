@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { ArrowRight, BookOpen, Bug, GitFork, Plug, Radar, Repeat2, ShieldCheck, SlidersHorizontal } from 'lucide-svelte';
+  import { FontAwesomeIcon } from '@fortawesome/svelte-fontawesome';
+  import { faGithub } from '@fortawesome/free-brands-svg-icons/faGithub';
+  import { ArrowRight, BookOpen, Bug, Radar, Repeat2, SlidersHorizontal } from 'lucide-svelte';
   import { ThemeToggle } from 'svedocs/theme';
   import ReleaseDownload from '$lib/ReleaseDownload.svelte';
 
@@ -17,14 +19,10 @@
       localeLabel: '中文',
       localeHref: '/zh',
       githubAria: 'PostGate on GitHub',
-      kicker: 'Local traffic control',
       lede: 'See the request. Change the outcome.',
       detail: 'A desktop MITM proxy for frontend engineers who need precise capture, programmable rules, repeatable replay, and browser-level debugging.',
       getStarted: 'Get started',
       downloadDesktop: 'Download desktop',
-      localFirst: 'Local-first',
-      pluginReady: 'Plugin-ready',
-      workflowIndex: '01 / Workflow',
       workflowTitle: 'From first capture to verified fix.',
       workflowIntro: 'Capture, rewrite, replay, and debugging stay together in one local workspace.',
       workflows: [
@@ -33,7 +31,6 @@
         ['Replay', 'Save requests in collections, edit them precisely, and run them again.'],
         ['Debug', 'Inject a CDP bridge and collect console output, errors, Fetch, and XHR activity.']
       ],
-      signalIndex: '02 / Signal',
       signalTitle: 'Stay oriented in real traffic.',
       signalIntro: 'Dense request streams remain easy to scan. Status, protocol, timing, and rule matches stay distinct.',
       exploreCapture: 'Explore capture',
@@ -42,14 +39,12 @@
       request: 'Request',
       result: 'Result',
       time: 'Time',
-      rulesIndex: '03 / Rules',
       rulesTitle: 'Small rules. Immediate outcomes.',
       rulesIntro: 'Use Whistle-compatible patterns and actions to control upstream routing, requests, responses, local files, timing, browser injection, and plugins.',
       rulesGuide: 'Read the rules guide',
       ruleExampleAria: 'PostGate rule example',
       ruleCommentRoute: '# route the API to a local service',
       ruleCommentFile: '# replace a bundle and enable browser debug',
-      closingKicker: 'Start with one captured request.',
       closingTitle: 'Make local traffic explain itself.',
       openDocs: 'Open the docs',
       viewSource: 'View source',
@@ -67,14 +62,10 @@
       localeLabel: 'EN',
       localeHref: '/',
       githubAria: '在 GitHub 上查看 PostGate',
-      kicker: '本地流量调试',
       lede: '看清请求，改变结果。',
       detail: '面向前端工程师的桌面中间人代理，集流量捕获、可编程规则、请求重放和浏览器调试于一体。',
       getStarted: '快速开始',
       downloadDesktop: '下载桌面版',
-      localFirst: '本地优先',
-      pluginReady: '支持插件',
-      workflowIndex: '01 / 工作流',
       workflowTitle: '从发现问题到验证修复，一条工作流完成。',
       workflowIntro: '捕获、改写、重放和调试始终集中在同一个本地工作区。',
       workflows: [
@@ -83,7 +74,6 @@
         ['重放', '将请求保存到集合中，精确修改后再次执行。'],
         ['调试', '注入 CDP 调试桥，收集 Console、页面错误、Fetch 和 XHR 活动。']
       ],
-      signalIndex: '02 / 流量',
       signalTitle: '流量再多，也能快速读懂。',
       signalIntro: '即使请求密集，状态、协议、耗时和规则命中结果依然能够快速区分。',
       exploreCapture: '了解流量捕获',
@@ -92,14 +82,12 @@
       request: '请求',
       result: '结果',
       time: '耗时',
-      rulesIndex: '03 / 规则',
       rulesTitle: '几行规则，立即生效。',
       rulesIntro: '使用 Whistle 兼容的匹配条件和操作，控制路由、请求、响应、文件、耗时、浏览器注入和插件。',
       rulesGuide: '阅读规则指南',
       ruleExampleAria: 'PostGate 规则示例',
       ruleCommentRoute: '# 将 API 路由到本地服务',
       ruleCommentFile: '# 替换前端文件并启用浏览器调试',
-      closingKicker: '从捕获一个请求开始。',
       closingTitle: '让每一段本地流量都有迹可循。',
       openDocs: '打开文档',
       viewSource: '查看源码',
@@ -160,7 +148,7 @@
     <div class="nav-actions">
       <a class="locale-link" href={copy.localeHref} lang={locale === 'zh' ? 'en' : 'zh-CN'}>{copy.localeLabel}</a>
       <a class="icon-link" href="https://github.com/backrunner/postgate" target="_blank" rel="noreferrer" aria-label={copy.githubAria} title="GitHub">
-        <GitFork size={18} />
+        <FontAwesomeIcon icon={faGithub} fixedWidth style="width: 18px; height: 18px;" />
       </a>
       <ThemeToggle defaultMode="system" />
     </div>
@@ -181,7 +169,6 @@
       </div>
 
       <div class="hero-copy">
-        <div class="hero-kicker"><span></span>{copy.kicker}</div>
         <h1>PostGate</h1>
         <p class="hero-lede">{copy.lede}</p>
         <p class="hero-detail">{copy.detail}</p>
@@ -193,11 +180,6 @@
           </a>
           <a class="secondary-action" href="#download">{copy.downloadDesktop}</a>
         </div>
-        <div class="hero-proof" aria-label="PostGate capabilities">
-          <span><ShieldCheck size={15} /> {copy.localFirst}</span>
-          <span><Plug size={15} /> {copy.pluginReady}</span>
-          <span><Radar size={15} /> HTTP/1.1 + HTTP/2</span>
-        </div>
       </div>
     </section>
 
@@ -207,14 +189,12 @@
 
     <section class="workflow-section">
       <div class="section-intro">
-        <p class="section-index">{copy.workflowIndex}</p>
         <h2>{copy.workflowTitle}</h2>
         <p>{copy.workflowIntro}</p>
       </div>
       <div class="workflow-grid">
-        {#each workflows as workflow, index}
+        {#each workflows as workflow}
           <article>
-            <span class="workflow-number">0{index + 1}</span>
             <svelte:component this={workflow.icon} size={22} color="var(--pg-primary)" />
             <h3>{workflow.label}</h3>
             <p>{workflow.copy}</p>
@@ -225,7 +205,6 @@
 
     <section class="capture-section">
       <div class="capture-copy">
-        <p class="section-index">{copy.signalIndex}</p>
         <h2>{copy.signalTitle}</h2>
         <p>{copy.signalIntro}</p>
         <a href={captureHref}>{copy.exploreCapture} <ArrowRight size={16} /></a>
@@ -251,7 +230,6 @@ cdn.example.com/app.js <mark>file:///project/dist/app.js</mark>
 example.com <mark>debug://</mark></code></pre>
       </div>
       <div class="rules-copy">
-        <p class="section-index">{copy.rulesIndex}</p>
         <h2>{copy.rulesTitle}</h2>
         <p>{copy.rulesIntro}</p>
         <a href={rulesHref}>{copy.rulesGuide} <ArrowRight size={16} /></a>
@@ -260,7 +238,6 @@ example.com <mark>debug://</mark></code></pre>
 
     <section class="closing-section">
       <img src="/postgate.png" width="72" height="72" alt="PostGate" />
-      <p>{copy.closingKicker}</p>
       <h2>{copy.closingTitle}</h2>
       <div>
         <a class="primary-action" href={docsHref}>{copy.openDocs} <ArrowRight size={17} /></a>
@@ -309,7 +286,6 @@ example.com <mark>debug://</mark></code></pre>
   .landing-nav nav,
   .nav-actions,
   .hero-actions,
-  .hero-proof,
   .primary-action,
   .secondary-action,
   .icon-link,
@@ -385,25 +361,8 @@ example.com <mark>debug://</mark></code></pre>
     width: min(38rem, 58%);
   }
 
-  .hero-kicker {
-    display: flex;
-    align-items: center;
-    gap: .55rem;
-    color: var(--pg-muted);
-    font: 700 .76rem/1 var(--font-mono);
-    text-transform: uppercase;
-  }
-
-  .hero-kicker span {
-    width: .5rem;
-    height: .5rem;
-    border-radius: 50%;
-    background: var(--pg-success);
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--pg-success) 14%, transparent);
-  }
-
   h1 {
-    margin: 1.25rem 0 0;
+    margin: 0;
     font: 700 4.5rem/.95 var(--sd-font-display);
     letter-spacing: 0;
   }
@@ -450,16 +409,6 @@ example.com <mark>debug://</mark></code></pre>
   .primary-action:hover { opacity: .88; }
   .secondary-action:hover { background: var(--pg-surface); color: var(--pg-ink); }
   .primary-action:active, .secondary-action:active, .icon-link:active { transform: scale(.97); }
-
-  .hero-proof {
-    flex-wrap: wrap;
-    gap: 1rem;
-    margin-top: 2rem;
-    color: var(--pg-muted);
-    font-size: .75rem;
-  }
-
-  .hero-proof span { display: inline-flex; align-items: center; gap: .35rem; }
 
   .traffic-scene {
     position: absolute;
@@ -539,6 +488,7 @@ example.com <mark>debug://</mark></code></pre>
   .release-band {
     position: relative;
     z-index: 3;
+    scroll-margin-top: 5rem;
     padding: 2.5rem 0 5.5rem;
     background: var(--pg-band);
     border-top: 1px solid var(--pg-line);
@@ -557,19 +507,9 @@ example.com <mark>debug://</mark></code></pre>
   .workflow-section { padding: 7rem 0; }
 
   .section-intro {
-    display: grid;
-    grid-template-columns: 10rem minmax(18rem, 1fr) minmax(16rem, .8fr);
-    gap: 2rem;
-    align-items: end;
+    max-width: 48rem;
     padding-bottom: 3rem;
     border-bottom: 1px solid var(--pg-line);
-  }
-
-  .section-index {
-    margin: 0;
-    color: var(--pg-primary);
-    font: 700 .72rem/1 var(--font-mono);
-    text-transform: uppercase;
   }
 
   .section-intro h2,
@@ -582,12 +522,14 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   .section-intro > p:last-child,
-  .capture-copy > p:not(.section-index),
-  .rules-copy > p:not(.section-index) {
+  .capture-copy > p,
+  .rules-copy > p {
     margin: 0;
     color: var(--pg-muted);
     line-height: 1.7;
   }
+
+  .section-intro > p:last-child { max-width: 40rem; margin-top: 1rem; }
 
   .workflow-grid {
     display: grid;
@@ -602,7 +544,6 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   .workflow-grid article:first-child { border-left: 1px solid var(--pg-line); }
-  .workflow-number { position: absolute; top: 2rem; right: 1.5rem; color: var(--pg-faint); font: .7rem/1 var(--font-mono); }
   .workflow-grid h3 { margin: 2.2rem 0 .7rem; font-size: 1.15rem; letter-spacing: 0; }
   .workflow-grid p { margin: 0; color: var(--pg-muted); font-size: .88rem; line-height: 1.65; }
 
@@ -617,8 +558,8 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   .capture-copy h2,
-  .rules-copy h2 { margin-top: 1.1rem; }
-  .capture-copy > p:not(.section-index), .rules-copy > p:not(.section-index) { margin-top: 1.2rem; }
+  .rules-copy h2 { margin-top: 0; }
+  .capture-copy > p, .rules-copy > p { margin-top: 1.2rem; }
   .capture-copy a, .rules-copy a { width: max-content; gap: .4rem; margin-top: 1.5rem; color: var(--pg-link); font-size: .84rem; font-weight: 650; text-decoration: none; }
 
   .request-table { border-top: 1px solid var(--pg-line); border-bottom: 1px solid var(--pg-line); }
@@ -664,8 +605,7 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   .closing-section img { margin: 0 auto; border-radius: 8px; }
-  .closing-section > p { margin: 1.4rem 0 .7rem; color: var(--pg-primary); font: 700 .76rem/1 var(--font-mono); text-transform: uppercase; }
-  .closing-section h2 { max-width: 40rem; margin: 0 auto; }
+  .closing-section h2 { max-width: 40rem; margin: 1.4rem auto 0; }
   .closing-section > div { display: flex; justify-content: center; gap: .65rem; margin-top: 2rem; }
 
   .landing-footer {
@@ -685,8 +625,6 @@ example.com <mark>debug://</mark></code></pre>
     .hero-copy { width: min(38rem, 76%); }
     h1 { font-size: 3.5rem; }
     .hero-lede { font-size: 1.7rem; }
-    .section-intro { grid-template-columns: 1fr 2fr; }
-    .section-intro > p:last-child { grid-column: 2; }
     .workflow-grid { grid-template-columns: repeat(2, 1fr); }
     .workflow-grid article:nth-child(3) { border-left: 1px solid var(--pg-line); border-top: 1px solid var(--pg-line); }
     .workflow-grid article:nth-child(4) { border-top: 1px solid var(--pg-line); }
@@ -702,10 +640,8 @@ example.com <mark>debug://</mark></code></pre>
     h1 { font-size: 2.8rem; }
     .hero-lede { font-size: 1.45rem; }
     .hero-detail { max-width: 30rem; font-size: .95rem; }
-    .hero-proof { gap: .7rem; }
     .workflow-section, .capture-section, .rules-section, .closing-section { padding: 5rem 0; }
-    .section-intro, .capture-section, .rules-section { grid-template-columns: 1fr; gap: 2rem; }
-    .section-intro > p:last-child { grid-column: auto; }
+    .capture-section, .rules-section { grid-template-columns: 1fr; gap: 2rem; }
     .section-intro h2, .capture-copy h2, .rules-copy h2, .closing-section h2 { font-size: 2rem; }
     .rules-copy { grid-row: 1; }
     .landing-footer { align-items: flex-start; flex-direction: column; justify-content: center; gap: .6rem; padding: 1.5rem 0; }

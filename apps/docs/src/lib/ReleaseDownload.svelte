@@ -2,8 +2,9 @@
   import { onMount } from 'svelte';
   import { FontAwesomeIcon } from '@fortawesome/svelte-fontawesome';
   import { faApple } from '@fortawesome/free-brands-svg-icons/faApple';
+  import { faGithub } from '@fortawesome/free-brands-svg-icons/faGithub';
   import { faWindows } from '@fortawesome/free-brands-svg-icons/faWindows';
-  import { Clock3, Download, GitFork, LoaderCircle } from 'lucide-svelte';
+  import { Clock3, Download, LoaderCircle } from 'lucide-svelte';
 
   interface ReleaseAsset {
     name: string;
@@ -19,7 +20,8 @@
     assets: ReleaseAsset[];
   }
 
-  type Channel = 'mac-arm' | 'mac-intel' | 'windows';
+  type MacChannel = 'mac-arm' | 'mac-intel';
+  type Platform = 'macos' | 'windows';
 
   export let locale: 'en' | 'zh' = 'en';
 
@@ -34,10 +36,13 @@
       error: 'We could not check GitHub right now. Open Releases to check manually.',
       loading: 'Checking GitHub for the newest signed macOS build.',
       notes: 'Release notes',
-      pickerAria: 'Choose a macOS build or view Windows availability',
+      platform: 'Platform',
+      architecture: 'Architecture',
+      availability: 'Availability',
+      platformAria: 'Choose a download platform',
+      macBuildsAria: 'Choose a macOS architecture',
       download: 'Download',
       viewReleases: 'View releases',
-      releases: 'GitHub Releases',
       appleSilicon: 'Apple silicon',
       comingSoon: 'Coming soon',
       windowsPreview: 'Windows builds are in preparation.'
@@ -52,10 +57,13 @@
       error: '暂时无法访问 GitHub，请前往 Releases 页面重试。',
       loading: '正在从 GitHub 获取最新 macOS 版本。',
       notes: '版本说明',
-      pickerAria: '选择 macOS 版本或查看 Windows 支持状态',
+      platform: '平台',
+      architecture: '架构',
+      availability: '可用状态',
+      platformAria: '选择下载平台',
+      macBuildsAria: '选择 macOS 架构',
       download: '下载',
       viewReleases: '查看 Releases',
-      releases: 'GitHub Releases',
       appleSilicon: 'Apple 芯片',
       comingSoon: '敬请期待',
       windowsPreview: 'Windows 版本正在准备中。'
@@ -63,23 +71,19 @@
   } as const;
 
   $: copy = messages[locale];
-  $: channels = [
-    { id: 'mac-arm' as const, label: 'macOS', detail: copy.appleSilicon },
-    { id: 'mac-intel' as const, label: 'macOS', detail: 'Intel' },
-    { id: 'windows' as const, label: 'Windows', detail: copy.comingSoon }
-  ] satisfies Array<{ id: Channel; label: string; detail: string }>;
 
   let state: 'loading' | 'ready' | 'empty' | 'error' = 'loading';
   let release: GithubRelease | null = null;
-  let selected: Channel = 'mac-arm';
+  let selectedPlatform: Platform = 'macos';
+  let selectedMac: MacChannel = 'mac-arm';
 
-  $: asset = release ? selectAsset(release.assets, selected) : undefined;
+  $: asset = release ? selectAsset(release.assets, selectedMac) : undefined;
   $: releaseHref = release?.html_url ?? 'https://github.com/backrunner/postgate/releases';
   $: downloadHref = asset?.browser_download_url ?? releaseHref;
 
   onMount(() => {
     const platform = navigator.platform.toLowerCase();
-    if (platform.includes('win')) selected = 'windows';
+    if (platform.includes('win')) selectedPlatform = 'windows';
     void loadLatestRelease();
   });
 
@@ -101,7 +105,7 @@
     }
   }
 
-  function selectAsset(assets: ReleaseAsset[], channel: Channel): ReleaseAsset | undefined {
+  function selectAsset(assets: ReleaseAsset[], channel: MacChannel): ReleaseAsset | undefined {
     const candidates = assets.filter((candidate) => {
       const name = candidate.name.toLowerCase();
       return !name.endsWith('.sig') && name !== 'latest.json';
@@ -112,12 +116,9 @@
         candidate.name.toLowerCase().endsWith('.dmg') && /(aarch64|arm64)/i.test(candidate.name)
       );
     }
-    if (channel === 'mac-intel') {
-      return candidates.find((candidate) =>
-        candidate.name.toLowerCase().endsWith('.dmg') && /(x64|x86_64)/i.test(candidate.name)
-      );
-    }
-    return undefined;
+    return candidates.find((candidate) =>
+      candidate.name.toLowerCase().endsWith('.dmg') && /(x64|x86_64)/i.test(candidate.name)
+    );
   }
 
   function formatSize(bytes: number): string {
@@ -150,46 +151,78 @@
       </p>
     </div>
     <a class="github-link" href={releaseHref} target="_blank" rel="noreferrer">
-      <GitFork size={17} />
+      <FontAwesomeIcon icon={faGithub} fixedWidth style="width: 17px; height: 17px;" />
       {copy.notes}
     </a>
   </div>
 
   <div class="release-actions">
-    <div class="channel-picker" aria-label={copy.pickerAria}>
-      {#each channels as channel}
-        <button
-          type="button"
-          class:active={selected === channel.id}
-          class:upcoming={channel.id === 'windows'}
-          aria-pressed={selected === channel.id}
-          on:click={() => selected = channel.id}
-        >
-          {#if channel.id === 'windows'}
-            <FontAwesomeIcon icon={faWindows} fixedWidth style="width: 17px; height: 17px; color: #0078d4;" />
-          {:else}
+    <div class="release-options">
+      <div class="control-row">
+        <span class="control-label">{copy.platform}</span>
+        <div class="platform-switch" role="group" aria-label={copy.platformAria}>
+          <button
+            type="button"
+            class:active={selectedPlatform === 'macos'}
+            aria-pressed={selectedPlatform === 'macos'}
+            on:click={() => selectedPlatform = 'macos'}
+          >
             <FontAwesomeIcon icon={faApple} fixedWidth style="width: 17px; height: 17px;" />
-          {/if}
-          <span><strong>{channel.label}</strong><small>{channel.detail}</small></span>
-        </button>
-      {/each}
+            <span>macOS</span>
+          </button>
+          <button
+            type="button"
+            class:active={selectedPlatform === 'windows'}
+            aria-pressed={selectedPlatform === 'windows'}
+            on:click={() => selectedPlatform = 'windows'}
+          >
+            <FontAwesomeIcon icon={faWindows} fixedWidth style="width: 17px; height: 17px;" />
+            <span>Windows</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="control-row build-row">
+        {#if selectedPlatform === 'macos'}
+          <span class="control-label">{copy.architecture}</span>
+          <div class="architecture-switch" role="group" aria-label={copy.macBuildsAria}>
+            <button
+              type="button"
+              class:active={selectedMac === 'mac-arm'}
+              aria-pressed={selectedMac === 'mac-arm'}
+              on:click={() => selectedMac = 'mac-arm'}
+            >{copy.appleSilicon}</button>
+            <button
+              type="button"
+              class:active={selectedMac === 'mac-intel'}
+              aria-pressed={selectedMac === 'mac-intel'}
+              on:click={() => selectedMac = 'mac-intel'}
+            >Intel</button>
+          </div>
+        {:else}
+          <span class="control-label">{copy.availability}</span>
+          <p class="availability-copy"><Clock3 size={15} />{copy.windowsPreview}</p>
+        {/if}
+      </div>
     </div>
 
-    {#if selected === 'windows'}
+    {#if selectedPlatform === 'windows'}
       <div class="download-button unavailable" role="status">
         <Clock3 size={18} />
-        <span>
-          <strong>{copy.comingSoon}</strong>
-          <small>{copy.windowsPreview}</small>
-        </span>
+        <strong>{copy.comingSoon}</strong>
       </div>
-    {:else}
-      <a class="download-button" href={downloadHref} target="_blank" rel="noreferrer">
+    {:else if asset}
+      <a class="download-button asset-download" href={downloadHref} target="_blank" rel="noreferrer">
         <Download size={18} />
         <span>
-          <strong>{asset ? copy.download : copy.viewReleases}</strong>
-          <small>{asset ? `${asset.name} · ${formatSize(asset.size)}` : copy.releases}</small>
+          <strong>{copy.download}</strong>
+          <small>{asset.name} · {formatSize(asset.size)}</small>
         </span>
+      </a>
+    {:else}
+      <a class="download-button releases-only" href={releaseHref} target="_blank" rel="noreferrer" aria-label={copy.viewReleases}>
+        <FontAwesomeIcon icon={faGithub} fixedWidth style="width: 18px; height: 18px;" />
+        <strong>{copy.viewReleases}</strong>
       </a>
     {/if}
   </div>
@@ -212,7 +245,9 @@
   .version-line,
   .github-link,
   .download-button,
-  .channel-picker button {
+  .platform-switch button,
+  .architecture-switch button,
+  .availability-copy {
     display: flex;
     align-items: center;
   }
@@ -276,54 +311,71 @@
     border-top: 1px solid var(--pg-line);
   }
 
-  .channel-picker {
+  .release-options {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: .6rem;
     flex: 1;
-    max-width: 34rem;
+    max-width: 31rem;
+  }
+
+  .control-row {
+    display: grid;
+    grid-template-columns: 5.5rem minmax(0, 1fr);
+    align-items: center;
+    gap: .85rem;
+    min-height: 2.65rem;
+  }
+
+  .control-label {
+    color: var(--pg-muted);
+    font: 600 .68rem/1 var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0;
+  }
+
+  .platform-switch,
+  .architecture-switch {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: .25rem;
     border: 1px solid var(--pg-line);
     border-radius: 7px;
     background: color-mix(in srgb, var(--pg-surface) 75%, transparent);
   }
 
-  .channel-picker button {
+  .platform-switch button,
+  .architecture-switch button {
     min-width: 0;
+    min-height: 2.15rem;
+    justify-content: center;
     gap: .5rem;
-    padding: .65rem .75rem;
+    padding: .45rem .75rem;
     border: 0;
     border-radius: 5px;
     background: transparent;
     color: var(--pg-muted);
-    font: inherit;
-    text-align: left;
+    font: 600 .78rem/1 var(--sd-font-sans);
     cursor: pointer;
-    transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 100ms ease-out;
+    transition: background 160ms ease, color 160ms ease, transform 100ms ease-out;
   }
 
-  .channel-picker button:active,
+  .platform-switch button:active,
+  .architecture-switch button:active,
   .download-button:not(.unavailable):active,
   .github-link:active {
     transform: scale(.98);
   }
 
-  .channel-picker button.active {
-    background: var(--pg-surface);
-    color: var(--pg-ink);
-    box-shadow: 0 1px 8px color-mix(in srgb, var(--pg-shadow) 45%, transparent);
+  .platform-switch button.active,
+  .architecture-switch button.active {
+    background: var(--pg-ink);
+    color: var(--pg-bg);
   }
 
-  .channel-picker button.upcoming small {
-    color: var(--pg-warning);
-  }
-
-  .channel-picker span,
   .download-button span {
     min-width: 0;
   }
 
-  .channel-picker strong,
-  .channel-picker small,
   .download-button strong,
   .download-button small {
     display: block;
@@ -333,16 +385,22 @@
     letter-spacing: 0;
   }
 
-  .channel-picker strong,
   .download-button strong {
     font-size: .8rem;
   }
 
-  .channel-picker small,
   .download-button small {
     margin-top: .1rem;
     color: var(--pg-muted);
     font-size: .66rem;
+  }
+
+  .availability-copy {
+    min-height: 2.65rem;
+    gap: .55rem;
+    margin: 0;
+    color: var(--pg-muted);
+    font-size: .78rem;
   }
 
   .download-button {
@@ -358,7 +416,7 @@
     transition: opacity 160ms ease, transform 100ms ease-out;
   }
 
-  .download-button:not(.unavailable):hover {
+  .asset-download:hover {
     opacity: .88;
   }
 
@@ -369,8 +427,14 @@
     cursor: default;
   }
 
-  .download-button.unavailable small {
-    color: var(--pg-muted);
+  .download-button.releases-only {
+    border: 1px solid var(--pg-line);
+    background: transparent;
+    color: var(--pg-ink);
+  }
+
+  .download-button.releases-only:hover {
+    background: var(--pg-surface);
   }
 
   .download-button small {
@@ -393,7 +457,7 @@
       flex-direction: column;
     }
 
-    .channel-picker {
+    .release-options {
       max-width: none;
     }
 
@@ -412,14 +476,16 @@
       padding: 1rem;
     }
 
-    .channel-picker {
+    .control-row {
       grid-template-columns: 1fr;
+      gap: .4rem;
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
     .spin { animation: none; }
-    .channel-picker button,
+    .platform-switch button,
+    .architecture-switch button,
     .download-button,
     .github-link { transition: none; }
   }

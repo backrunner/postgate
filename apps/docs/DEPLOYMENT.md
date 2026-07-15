@@ -1,20 +1,20 @@
-# Cloudflare deployment
+# Cloudflare Workers deployment
 
-The PostGate documentation site is a static svedocs build deployed directly to Cloudflare Pages. GitHub Actions is not part of the deployment path.
+The PostGate documentation site is a static svedocs build deployed as Cloudflare Worker static assets. GitHub Actions is not part of the deployment path.
 
 ## First deployment
 
 ```bash
 pnpm --filter @postgate/docs cloudflare:whoami
-pnpm --filter @postgate/docs cloudflare:create
+pnpm --filter @postgate/docs deploy:check
 pnpm --filter @postgate/docs deploy
 ```
 
-The project name is `postgate-docs`, the production branch is `main`, and `wrangler.jsonc` pins deployment to the Cloudflare account named `Alkinum`.
+The Worker name is `postgate-docs`, and `wrangler.jsonc` pins deployment to the Cloudflare account named `Alkinum`.
 
 ## Custom domain
 
-After the first deployment, add `postgate.alkinum.io` under **Workers & Pages → postgate-docs → Custom domains** in the Cloudflare dashboard. Because `alkinum.io` is already managed by Cloudflare, Pages creates and manages the required DNS record and certificate.
+Wrangler binds `postgate.alkinum.io` as a Worker custom domain during deployment. `workers_dev` and preview URLs are disabled, so the documentation site is served only from the custom domain.
 
 Verify these URLs after the certificate becomes active:
 
@@ -26,9 +26,9 @@ Verify these URLs after the certificate becomes active:
 
 ## Later deployments
 
-Run `pnpm --filter @postgate/docs deploy` from a clean, reviewed revision. The command checks and builds the static site before Wrangler uploads it to the production branch.
+Run `pnpm --filter @postgate/docs deploy` from a clean, reviewed revision. The command checks and builds the static site before Wrangler deploys it to the configured custom domain.
 
-Use `pnpm --filter @postgate/docs deploy:preview` for a non-production preview deployment.
+Run `pnpm --filter @postgate/docs deploy:check` to validate a deployment locally without uploading it.
 
 ## GitHub release downloads
 

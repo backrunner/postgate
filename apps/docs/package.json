@@ -11,9 +11,8 @@
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
     "lint": "svedocs check",
     "cloudflare:whoami": "wrangler whoami",
-    "cloudflare:create": "wrangler pages project create postgate-docs --production-branch main",
-    "deploy": "pnpm check && pnpm build && wrangler pages deploy build --project-name postgate-docs --branch main",
-    "deploy:preview": "pnpm check && pnpm build && wrangler pages deploy build --project-name postgate-docs --branch preview"
+    "deploy:check": "pnpm check && pnpm build && wrangler deploy --dry-run",
+    "deploy": "pnpm check && pnpm build && wrangler deploy"
   },
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "7.1.0",

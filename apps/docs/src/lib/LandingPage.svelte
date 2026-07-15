@@ -48,7 +48,9 @@
       closingTitle: 'Make local traffic explain itself.',
       openDocs: 'Open the docs',
       viewSource: 'View source',
-      footer: 'Local-first tooling for frontend development. MIT licensed.',
+      madeBy: 'Made by',
+      madeBySuffix: '.',
+      mitLicensed: 'MIT licensed.',
       documentation: 'Documentation'
     },
     zh: {
@@ -91,7 +93,9 @@
       closingTitle: '让每一段本地流量都有迹可循。',
       openDocs: '打开文档',
       viewSource: '查看源码',
-      footer: '面向前端开发的本地流量工具。MIT 许可。',
+      madeBy: '由',
+      madeBySuffix: ' 打造。',
+      mitLicensed: 'MIT 许可。',
       documentation: '文档'
     }
   } as const;
@@ -248,7 +252,9 @@ example.com <mark>debug://</mark></code></pre>
 
   <footer class="landing-footer">
     <a class="brand" href={locale === 'zh' ? '/zh' : '/'}><img src="/postgate.png" alt="" width="26" height="26" /><span>PostGate</span></a>
-    <p>{copy.footer}</p>
+    <p class="footer-credit">
+      {copy.madeBy} <a href="https://alkinum.io" target="_blank" rel="noreferrer">Alkinum</a>{copy.madeBySuffix} {copy.mitLicensed}
+    </p>
     <div><a href={docsHref}>{copy.documentation}</a><a href="https://github.com/backrunner/postgate">GitHub</a></div>
   </footer>
 </div>
@@ -347,8 +353,10 @@ example.com <mark>debug://</mark></code></pre>
 
   .hero {
     position: relative;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, .95fr) minmax(32rem, 1.05fr);
     align-items: center;
+    gap: clamp(2rem, 5vw, 5rem);
     min-height: calc(100svh - 5rem);
     padding: 7rem max(1rem, calc((100% - 1120px) / 2)) 4rem;
     overflow: hidden;
@@ -358,7 +366,8 @@ example.com <mark>debug://</mark></code></pre>
   .hero-copy {
     position: relative;
     z-index: 2;
-    width: min(38rem, 58%);
+    width: 100%;
+    max-width: 38rem;
   }
 
   h1 {
@@ -411,16 +420,17 @@ example.com <mark>debug://</mark></code></pre>
   .primary-action:active, .secondary-action:active, .icon-link:active { transform: scale(.97); }
 
   .traffic-scene {
-    position: absolute;
-    inset: 0 0 0 38%;
+    position: relative;
+    width: 100%;
+    height: min(38rem, calc(100svh - 11rem));
     overflow: hidden;
     opacity: .96;
   }
 
   .scene-axis {
     position: absolute;
-    top: 6rem;
-    bottom: 3rem;
+    top: 1.5rem;
+    bottom: 1.5rem;
     width: 1px;
     background: var(--pg-line);
   }
@@ -433,15 +443,16 @@ example.com <mark>debug://</mark></code></pre>
     font: 700 .64rem/1 var(--font-mono);
   }
 
-  .scene-axis.browser { left: 16%; }
-  .scene-axis.gate { left: 53%; background: color-mix(in srgb, var(--pg-primary) 50%, var(--pg-line)); }
-  .scene-axis.upstream { left: 88%; }
+  .scene-axis.browser { left: 8%; }
+  .scene-axis.gate { left: 58%; background: color-mix(in srgb, var(--pg-primary) 50%, var(--pg-line)); }
+  .scene-axis.upstream { left: 92%; }
+  .scene-axis.upstream span { right: .7rem; left: auto; }
   .scene-axis.gate img { position: absolute; top: 45%; left: -1.4rem; width: 2.8rem; height: 2.8rem; border-radius: 8px; box-shadow: 0 12px 30px var(--pg-shadow); }
 
   .route-line {
     position: absolute;
-    left: 16%;
-    right: 12%;
+    left: 8%;
+    right: 8%;
     height: 1px;
     background: var(--pg-line);
   }
@@ -452,11 +463,11 @@ example.com <mark>debug://</mark></code></pre>
 
   .packet {
     position: absolute;
-    left: 16%;
+    left: 8%;
     display: grid;
-    grid-template-columns: 3rem 1fr 3.2rem;
+    grid-template-columns: 2.8rem 1fr 2.8rem;
     align-items: center;
-    width: 15rem;
+    width: min(15rem, 55%);
     height: 2.4rem;
     padding: 0 .7rem;
     border: 1px solid var(--pg-glass-line);
@@ -470,7 +481,7 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   .packet b { overflow: hidden; color: var(--pg-ink); text-overflow: ellipsis; white-space: nowrap; }
-  .packet span,
+  .packet span { color: var(--pg-success); text-align: left; }
   .packet em { color: var(--pg-success); font-style: normal; text-align: right; }
   .packet-b span { color: var(--pg-info); }
   .packet-c em { color: var(--pg-info); }
@@ -482,7 +493,7 @@ example.com <mark>debug://</mark></code></pre>
     0% { transform: translateX(-1rem); opacity: 0; }
     8% { opacity: 1; }
     88% { opacity: 1; }
-    100% { transform: translateX(29rem); opacity: 0; }
+    100% { transform: translateX(clamp(8rem, 14vw, 12rem)); opacity: 0; }
   }
 
   .release-band {
@@ -619,10 +630,13 @@ example.com <mark>debug://</mark></code></pre>
   .landing-footer p { margin: 0; }
   .landing-footer div { gap: 1rem; }
   .landing-footer div a { color: var(--pg-muted); text-decoration: none; }
+  .footer-credit a { color: var(--pg-link); text-decoration: none; }
+  .footer-credit a:hover { text-decoration: underline; text-underline-offset: .18em; }
 
   @media (max-width: 920px) {
-    .traffic-scene { left: 28%; opacity: .45; }
-    .hero-copy { width: min(38rem, 76%); }
+    .hero { grid-template-columns: minmax(0, 1fr) minmax(25rem, 1.1fr); gap: 2rem; }
+    .traffic-scene { opacity: .72; }
+    .hero-copy { width: 100%; }
     h1 { font-size: 3.5rem; }
     .hero-lede { font-size: 1.7rem; }
     .workflow-grid { grid-template-columns: repeat(2, 1fr); }
@@ -634,9 +648,11 @@ example.com <mark>debug://</mark></code></pre>
   @media (max-width: 720px) {
     .landing-nav { top: .5rem; grid-template-columns: 1fr auto; width: calc(100% - 1rem); }
     .landing-nav nav { display: none; }
-    .hero { min-height: calc(100svh - 4rem); padding-top: 6rem; }
+    .hero { display: flex; min-height: calc(100svh - 4rem); padding-top: 6rem; }
     .hero-copy { width: 100%; }
-    .traffic-scene { inset: 0 0 0 25%; opacity: .2; }
+    .traffic-scene { position: absolute; inset: 0; width: auto; height: auto; opacity: .08; }
+    .scene-axis { top: 6rem; bottom: 3rem; }
+    .packet { display: none; }
     h1 { font-size: 2.8rem; }
     .hero-lede { font-size: 1.45rem; }
     .hero-detail { max-width: 30rem; font-size: .95rem; }
@@ -659,10 +675,7 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .packet { animation: none; opacity: .85; }
-    .packet-a { transform: translateX(2rem); }
-    .packet-b { transform: translateX(10rem); }
-    .packet-c { transform: translateX(18rem); }
+    .packet { animation: none; opacity: .85; transform: translateX(0); }
     .primary-action, .secondary-action, .icon-link, .landing-nav nav a { transition: none; }
   }
 

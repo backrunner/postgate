@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Apple, Download, GitFork, Laptop, LoaderCircle, Monitor } from 'lucide-svelte';
+  import { FontAwesomeIcon } from '@fortawesome/svelte-fontawesome';
+  import { faApple } from '@fortawesome/free-brands-svg-icons/faApple';
+  import { faWindows } from '@fortawesome/free-brands-svg-icons/faWindows';
+  import { Clock3, Download, GitFork, LoaderCircle } from 'lucide-svelte';
 
   interface ReleaseAsset {
     name: string;
@@ -16,7 +19,7 @@
     assets: ReleaseAsset[];
   }
 
-  type Channel = 'mac-arm' | 'mac-intel' | 'windows' | 'linux';
+  type Channel = 'mac-arm' | 'mac-intel' | 'windows';
 
   export let locale: 'en' | 'zh' = 'en';
 
@@ -26,32 +29,36 @@
       latest: 'Latest release',
       checkingAria: 'Checking latest release',
       available: 'available',
-      ready: 'Signed desktop builds, published directly from GitHub Releases.',
-      empty: 'The first signed release is being prepared.',
+      ready: 'Signed macOS builds, published directly from GitHub Releases.',
+      empty: 'The first signed macOS release is being prepared.',
       error: 'GitHub is unavailable right now. Open Releases to try again.',
-      loading: 'Checking GitHub for the newest signed build.',
+      loading: 'Checking GitHub for the newest signed macOS build.',
       notes: 'Release notes',
       pickerAria: 'Select download platform',
       download: 'Download',
       viewReleases: 'View releases',
       releases: 'GitHub Releases',
-      appleSilicon: 'Apple silicon'
+      appleSilicon: 'Apple silicon',
+      comingSoon: 'Coming soon',
+      windowsPreview: 'Windows builds are in preparation.'
     },
     zh: {
       stable: '稳定版',
       latest: '最新版本',
       checkingAria: '正在检查最新版本',
       available: '可下载',
-      ready: '签名桌面安装包，由 GitHub Releases 直接提供。',
-      empty: '首个签名版本正在准备中。',
+      ready: '签名 macOS 安装包，由 GitHub Releases 直接提供。',
+      empty: '首个签名 macOS 版本正在准备中。',
       error: '暂时无法访问 GitHub，请前往 Releases 页面重试。',
-      loading: '正在从 GitHub 检查最新签名版本。',
+      loading: '正在从 GitHub 检查最新签名 macOS 版本。',
       notes: '版本说明',
       pickerAria: '选择下载平台',
       download: '下载',
       viewReleases: '查看 Releases',
       releases: 'GitHub Releases',
-      appleSilicon: 'Apple 芯片'
+      appleSilicon: 'Apple 芯片',
+      comingSoon: '敬请期待',
+      windowsPreview: 'Windows 版本正在准备中。'
     }
   } as const;
 
@@ -59,8 +66,7 @@
   $: channels = [
     { id: 'mac-arm' as const, label: 'macOS', detail: copy.appleSilicon },
     { id: 'mac-intel' as const, label: 'macOS', detail: 'Intel' },
-    { id: 'windows' as const, label: 'Windows', detail: 'x64' },
-    { id: 'linux' as const, label: 'Linux', detail: 'x64' }
+    { id: 'windows' as const, label: 'Windows', detail: copy.comingSoon }
   ] satisfies Array<{ id: Channel; label: string; detail: string }>;
 
   let state: 'loading' | 'ready' | 'empty' | 'error' = 'loading';
@@ -74,7 +80,6 @@
   onMount(() => {
     const platform = navigator.platform.toLowerCase();
     if (platform.includes('win')) selected = 'windows';
-    if (platform.includes('linux')) selected = 'linux';
     void loadLatestRelease();
   });
 
@@ -112,12 +117,7 @@
         candidate.name.toLowerCase().endsWith('.dmg') && /(x64|x86_64)/i.test(candidate.name)
       );
     }
-    if (channel === 'windows') {
-      return candidates.find((candidate) => /setup\.exe$/i.test(candidate.name))
-        ?? candidates.find((candidate) => candidate.name.toLowerCase().endsWith('.msi'));
-    }
-    return candidates.find((candidate) => candidate.name.toLowerCase().endsWith('.appimage'))
-      ?? candidates.find((candidate) => candidate.name.toLowerCase().endsWith('.deb'));
+    return undefined;
   }
 
   function formatSize(bytes: number): string {
@@ -161,28 +161,37 @@
         <button
           type="button"
           class:active={selected === channel.id}
+          class:upcoming={channel.id === 'windows'}
           aria-pressed={selected === channel.id}
           on:click={() => selected = channel.id}
         >
-          {#if channel.id === 'mac-arm' || channel.id === 'mac-intel'}
-            <Apple size={17} />
-          {:else if channel.id === 'windows'}
-            <Monitor size={17} />
+          {#if channel.id === 'windows'}
+            <FontAwesomeIcon icon={faWindows} fixedWidth style="width: 17px; height: 17px; color: #0078d4;" />
           {:else}
-            <Laptop size={17} />
+            <FontAwesomeIcon icon={faApple} fixedWidth style="width: 17px; height: 17px;" />
           {/if}
           <span><strong>{channel.label}</strong><small>{channel.detail}</small></span>
         </button>
       {/each}
     </div>
 
-    <a class="download-button" href={downloadHref} target="_blank" rel="noreferrer">
-      <Download size={18} />
-      <span>
-        <strong>{asset ? copy.download : copy.viewReleases}</strong>
-        <small>{asset ? `${asset.name} · ${formatSize(asset.size)}` : copy.releases}</small>
-      </span>
-    </a>
+    {#if selected === 'windows'}
+      <div class="download-button unavailable" role="status">
+        <Clock3 size={18} />
+        <span>
+          <strong>{copy.comingSoon}</strong>
+          <small>{copy.windowsPreview}</small>
+        </span>
+      </div>
+    {:else}
+      <a class="download-button" href={downloadHref} target="_blank" rel="noreferrer">
+        <Download size={18} />
+        <span>
+          <strong>{asset ? copy.download : copy.viewReleases}</strong>
+          <small>{asset ? `${asset.name} · ${formatSize(asset.size)}` : copy.releases}</small>
+        </span>
+      </a>
+    {/if}
   </div>
 </div>
 
@@ -216,7 +225,7 @@
 
   .eyebrow {
     margin: 0 0 .35rem;
-    color: var(--pg-green);
+    color: var(--pg-primary);
     font: 700 .72rem/1 var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0;
@@ -244,8 +253,8 @@
     width: .45rem;
     height: .45rem;
     border-radius: 50%;
-    background: var(--pg-green);
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--pg-green) 15%, transparent);
+    background: var(--pg-success);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--pg-success) 15%, transparent);
   }
 
   .release-copy {
@@ -256,7 +265,7 @@
 
   .github-link {
     gap: .45rem;
-    color: var(--pg-ink);
+    color: var(--pg-link);
     font-size: .84rem;
     text-decoration: none;
   }
@@ -269,9 +278,9 @@
 
   .channel-picker {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     flex: 1;
-    max-width: 42rem;
+    max-width: 34rem;
     padding: .25rem;
     border: 1px solid var(--pg-line);
     border-radius: 7px;
@@ -293,7 +302,7 @@
   }
 
   .channel-picker button:active,
-  .download-button:active,
+  .download-button:not(.unavailable):active,
   .github-link:active {
     transform: scale(.98);
   }
@@ -302,6 +311,10 @@
     background: var(--pg-surface);
     color: var(--pg-ink);
     box-shadow: 0 1px 8px color-mix(in srgb, var(--pg-shadow) 45%, transparent);
+  }
+
+  .channel-picker button.upcoming small {
+    color: var(--pg-warning);
   }
 
   .channel-picker span,
@@ -345,8 +358,19 @@
     transition: opacity 160ms ease, transform 100ms ease-out;
   }
 
-  .download-button:hover {
+  .download-button:not(.unavailable):hover {
     opacity: .88;
+  }
+
+  .download-button.unavailable {
+    border: 1px solid var(--pg-line);
+    background: color-mix(in srgb, var(--pg-surface) 72%, transparent);
+    color: var(--pg-muted);
+    cursor: default;
+  }
+
+  .download-button.unavailable small {
+    color: var(--pg-muted);
   }
 
   .download-button small {
@@ -389,7 +413,7 @@
     }
 
     .channel-picker {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: 1fr;
     }
   }
 

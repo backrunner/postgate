@@ -7,17 +7,16 @@ order: 2
 
 # Installation and proxy setup
 
-PostGate publishes signed desktop packages through [GitHub Releases](https://github.com/backrunner/postgate/releases). The landing page checks GitHub for the newest stable release and selects the matching asset for your platform.
+PostGate publishes signed macOS packages through [GitHub Releases](https://github.com/backrunner/postgate/releases). The landing page checks GitHub for the newest stable release and lets you choose the Apple silicon or Intel build.
 
 ## Supported packages
 
-| Platform | Package | Architecture |
-| --- | --- | --- |
-| macOS | `.dmg` | Apple silicon and Intel |
-| Windows | setup `.exe` or `.msi` | x64 |
-| Linux | `.AppImage` or `.deb` | x64 |
+| Platform | Package | Architecture | Availability |
+| --- | --- | --- | --- |
+| macOS | `.dmg` | Apple silicon and Intel | Available |
+| Windows | — | x64 planned | Coming soon |
 
-Release builds include HTTP/3 support, although QUIC remains experimental and disabled by default.
+The macOS release builds include HTTP/3 support, although QUIC remains experimental and disabled by default. Windows remains visible on the download page so its availability is explicit, but it does not link to an installer yet.
 
 ## Connect a browser
 

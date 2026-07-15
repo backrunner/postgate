@@ -1,0 +1,7 @@
+interface:
+  display_name: "PostGate Design Tokens"
+  short_description: "PostGate color and component token guidance"
+  default_prompt: "Use $postgate-design-tokens to align this interface with PostGate's application design system."
+  icon_small: "./assets/postgate-icon.png"
+  icon_large: "./assets/postgate-icon.png"
+  brand_color: "#18181B"

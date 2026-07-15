@@ -22,9 +22,9 @@ PostGate checks the signed update manifest published with the latest GitHub Rele
 - optional background download
 - download, install, and restart progress
 
-The release workflow builds macOS, Windows, and Linux packages, signs updater artifacts, validates `latest.json`, and publishes the draft only after every platform succeeds. PostGate verifies updater signatures before installation.
+The release workflow currently builds Apple silicon and Intel macOS packages, signs their updater artifacts, validates both Darwin entries in `latest.json`, and publishes the draft only after both builds succeed. PostGate verifies updater signatures before installation.
 
-The website download area checks GitHub separately and links directly to the installer for each platform. If no release exists or GitHub is unavailable, the download button opens the repository's Releases page instead.
+The website download area checks GitHub separately and links directly to the selected macOS installer. Windows is marked **Coming soon** and has no download action. If no macOS release exists or GitHub is unavailable, the macOS action opens the repository's Releases page instead.
 
 ## Profile transfer
 

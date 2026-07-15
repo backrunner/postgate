@@ -11,11 +11,10 @@ PostGate is a local desktop proxy for inspecting and changing HTTP and HTTPS tra
 
 ## Install PostGate
 
-Download the build for your platform from the [PostGate home page](/). The download section links directly to the assets in the latest GitHub Release.
+Download PostGate for macOS from the [PostGate home page](/). The download section links directly to the matching asset in the latest GitHub Release.
 
 - macOS: open the `.dmg` and move PostGate to Applications.
-- Windows: run the setup `.exe` or use the `.msi` package.
-- Linux: run the `.AppImage` or install the `.deb` package.
+- Windows: the native build is in preparation and marked **Coming soon** on the download page.
 
 PostGate listens only on localhost by default. The default proxy address is `127.0.0.1:8899`.
 

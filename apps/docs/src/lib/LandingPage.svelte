@@ -148,7 +148,7 @@
 <div class="landing">
   <header class="landing-nav">
     <a class="brand" href={locale === 'zh' ? '/zh' : '/'} aria-label={copy.homeAria}>
-      <img src="/postgate.svg" alt="" width="30" height="30" />
+      <img src="/postgate.png" alt="" width="30" height="30" />
       <span>PostGate</span>
     </a>
     <nav aria-label="Primary navigation">
@@ -170,7 +170,7 @@
     <section class="hero">
       <div class="traffic-scene" aria-hidden="true">
         <div class="scene-axis browser"><span>CLIENT</span></div>
-        <div class="scene-axis gate"><img src="/postgate.svg" alt="" /><span>POSTGATE</span></div>
+        <div class="scene-axis gate"><img src="/postgate.png" alt="" /><span>POSTGATE</span></div>
         <div class="scene-axis upstream"><span>UPSTREAM</span></div>
         <div class="route-line line-a"></div>
         <div class="route-line line-b"></div>
@@ -215,7 +215,7 @@
         {#each workflows as workflow, index}
           <article>
             <span class="workflow-number">0{index + 1}</span>
-            <svelte:component this={workflow.icon} size={22} color="var(--pg-green)" />
+            <svelte:component this={workflow.icon} size={22} color="var(--pg-primary)" />
             <h3>{workflow.label}</h3>
             <p>{workflow.copy}</p>
           </article>
@@ -234,7 +234,7 @@
         <div class="table-head"><span>{copy.method}</span><span>{copy.request}</span><span>{copy.result}</span><span>{copy.time}</span></div>
         {#each requestRows as row}
           <div class="request-row">
-            <code>{row.method}</code><strong>{row.path}</strong><span data-result={row.status}>{row.status}</span><time>{row.time}</time>
+            <code data-method={row.method}>{row.method}</code><strong>{row.path}</strong><span data-result={row.status}>{row.status}</span><time>{row.time}</time>
           </div>
         {/each}
       </div>
@@ -259,7 +259,7 @@ example.com <mark>debug://</mark></code></pre>
     </section>
 
     <section class="closing-section">
-      <img src="/postgate.svg" width="72" height="72" alt="PostGate" />
+      <img src="/postgate.png" width="72" height="72" alt="PostGate" />
       <p>{copy.closingKicker}</p>
       <h2>{copy.closingTitle}</h2>
       <div>
@@ -270,7 +270,7 @@ example.com <mark>debug://</mark></code></pre>
   </main>
 
   <footer class="landing-footer">
-    <a class="brand" href={locale === 'zh' ? '/zh' : '/'}><img src="/postgate.svg" alt="" width="26" height="26" /><span>PostGate</span></a>
+    <a class="brand" href={locale === 'zh' ? '/zh' : '/'}><img src="/postgate.png" alt="" width="26" height="26" /><span>PostGate</span></a>
     <p>{copy.footer}</p>
     <div><a href={docsHref}>{copy.documentation}</a><a href="https://github.com/backrunner/postgate">GitHub</a></div>
   </footer>
@@ -398,8 +398,8 @@ example.com <mark>debug://</mark></code></pre>
     width: .5rem;
     height: .5rem;
     border-radius: 50%;
-    background: var(--pg-green);
-    box-shadow: 0 0 0 5px color-mix(in srgb, var(--pg-green) 14%, transparent);
+    background: var(--pg-success);
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--pg-success) 14%, transparent);
   }
 
   h1 {
@@ -485,7 +485,7 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   .scene-axis.browser { left: 16%; }
-  .scene-axis.gate { left: 53%; background: color-mix(in srgb, var(--pg-green) 50%, var(--pg-line)); }
+  .scene-axis.gate { left: 53%; background: color-mix(in srgb, var(--pg-primary) 50%, var(--pg-line)); }
   .scene-axis.upstream { left: 88%; }
   .scene-axis.gate img { position: absolute; top: 45%; left: -1.4rem; width: 2.8rem; height: 2.8rem; border-radius: 8px; box-shadow: 0 12px 30px var(--pg-shadow); }
 
@@ -521,7 +521,10 @@ example.com <mark>debug://</mark></code></pre>
   }
 
   .packet b { overflow: hidden; color: var(--pg-ink); text-overflow: ellipsis; white-space: nowrap; }
-  .packet em { color: var(--pg-green); font-style: normal; text-align: right; }
+  .packet span,
+  .packet em { color: var(--pg-success); font-style: normal; text-align: right; }
+  .packet-b span { color: var(--pg-info); }
+  .packet-c em { color: var(--pg-info); }
   .packet-a { top: calc(34% - 1.2rem); }
   .packet-b { top: calc(51% - 1.2rem); animation-delay: -2.2s; }
   .packet-c { top: calc(68% - 1.2rem); animation-delay: -4.6s; }
@@ -564,7 +567,7 @@ example.com <mark>debug://</mark></code></pre>
 
   .section-index {
     margin: 0;
-    color: var(--pg-green);
+    color: var(--pg-primary);
     font: 700 .72rem/1 var(--font-mono);
     text-transform: uppercase;
   }
@@ -616,17 +619,22 @@ example.com <mark>debug://</mark></code></pre>
   .capture-copy h2,
   .rules-copy h2 { margin-top: 1.1rem; }
   .capture-copy > p:not(.section-index), .rules-copy > p:not(.section-index) { margin-top: 1.2rem; }
-  .capture-copy a, .rules-copy a { width: max-content; gap: .4rem; margin-top: 1.5rem; color: var(--pg-ink); font-size: .84rem; font-weight: 650; text-decoration: none; }
+  .capture-copy a, .rules-copy a { width: max-content; gap: .4rem; margin-top: 1.5rem; color: var(--pg-link); font-size: .84rem; font-weight: 650; text-decoration: none; }
 
   .request-table { border-top: 1px solid var(--pg-line); border-bottom: 1px solid var(--pg-line); }
   .table-head, .request-row { display: grid; grid-template-columns: 5rem 1fr 5rem 4rem; align-items: center; gap: 1rem; }
   .table-head { min-height: 2.4rem; color: var(--pg-faint); font: 700 .64rem/1 var(--font-mono); text-transform: uppercase; }
   .request-row { min-height: 3.6rem; border-top: 1px solid var(--pg-line); font-size: .82rem; }
-  .request-row code { color: var(--pg-cyan); }
+  .request-row code { color: var(--pg-muted); }
+  .request-row code[data-method='GET'] { color: var(--pg-success); }
+  .request-row code[data-method='POST'] { color: var(--pg-info); }
+  .request-row code[data-method='PUT'],
+  .request-row code[data-method='PATCH'] { color: var(--pg-warning); }
+  .request-row code[data-method='DELETE'] { color: var(--pg-destructive); }
   .request-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .request-row span { color: var(--pg-green); font: 700 .7rem/1 var(--font-mono); }
-  .request-row span[data-result='LOCAL'] { color: var(--pg-cyan); }
-  .request-row span[data-result='DEBUG'] { color: var(--pg-amber); }
+  .request-row span { color: var(--pg-success); font: 700 .7rem/1 var(--font-mono); }
+  .request-row span[data-result='LOCAL'] { color: var(--pg-info); }
+  .request-row span[data-result='DEBUG'] { color: var(--pg-warning); }
   .request-row time { color: var(--pg-muted); font: .72rem/1 var(--font-mono); text-align: right; }
 
   .rules-section { grid-template-columns: 1.25fr .75fr; }
@@ -646,8 +654,8 @@ example.com <mark>debug://</mark></code></pre>
   .editor-bar span:nth-child(3) { background: #54b66e; }
   .editor-bar b { margin-left: .5rem; color: var(--pg-muted); font: 500 .7rem/1 var(--font-mono); }
   .rule-editor pre { margin: 0; padding: 1.5rem; overflow: auto; color: var(--pg-ink); font: .78rem/1.8 var(--font-mono); }
-  .rule-editor i { color: var(--pg-faint); font-style: normal; }
-  .rule-editor mark { background: transparent; color: var(--pg-green); }
+  .rule-editor i { color: var(--pg-editor-comment); font-style: normal; }
+  .rule-editor mark { background: transparent; color: var(--pg-editor-action); }
 
   .closing-section {
     padding: 7rem 0;
@@ -655,8 +663,8 @@ example.com <mark>debug://</mark></code></pre>
     text-align: center;
   }
 
-  .closing-section img { border-radius: 8px; }
-  .closing-section > p { margin: 1.4rem 0 .7rem; color: var(--pg-green); font: 700 .76rem/1 var(--font-mono); text-transform: uppercase; }
+  .closing-section img { margin: 0 auto; border-radius: 8px; }
+  .closing-section > p { margin: 1.4rem 0 .7rem; color: var(--pg-primary); font: 700 .76rem/1 var(--font-mono); text-transform: uppercase; }
   .closing-section h2 { max-width: 40rem; margin: 0 auto; }
   .closing-section > div { display: flex; justify-content: center; gap: .65rem; margin-top: 2rem; }
 

@@ -116,14 +116,6 @@ jobs:
             args: --target x86_64-apple-darwin
             bundles: app,dmg
             target: x86_64-apple-darwin
-          - platform: ubuntu-22.04
-            args: ""
-            bundles: appimage,deb
-            target: x86_64-unknown-linux-gnu
-          - platform: windows-latest
-            args: ""
-            bundles: nsis,msi
-            target: x86_64-pc-windows-msvc
 
     runs-on: ${{ matrix.platform }}
 
@@ -151,12 +143,6 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./apps/desktop/src-tauri -> target"
-
-      - name: Install dependencies (Ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -186,7 +172,6 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }} --bundles ${{ matrix.bundles }} --features quic
           retryAttempts: 3
-          updaterJsonPreferNsis: true
 
   publish-release:
     permissions:
@@ -228,8 +213,6 @@ jobs:
             const requiredPlatforms = [
               'darwin-aarch64',
               'darwin-x86_64',
-              'linux-x86_64',
-              'windows-x86_64',
             ];
             const missing = requiredPlatforms.filter((platform) => {
               const entry = manifest.platforms?.[platform];

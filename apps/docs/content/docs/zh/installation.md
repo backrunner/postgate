@@ -7,17 +7,16 @@ order: 2
 
 # 安装与代理设置
 
-PostGate 通过 [GitHub Releases](https://github.com/backrunner/postgate/releases) 发布签名桌面安装包。首页会检查最新稳定版，并为当前平台选择对应文件。
+PostGate 通过 [GitHub Releases](https://github.com/backrunner/postgate/releases) 发布签名 macOS 安装包。首页会检查最新稳定版，并可选择 Apple 芯片或 Intel 版本。
 
 ## 安装包
 
-| 平台 | 安装包 | 架构 |
-| --- | --- | --- |
-| macOS | `.dmg` | Apple 芯片与 Intel |
-| Windows | setup `.exe` 或 `.msi` | x64 |
-| Linux | `.AppImage` 或 `.deb` | x64 |
+| 平台 | 安装包 | 架构 | 状态 |
+| --- | --- | --- | --- |
+| macOS | `.dmg` | Apple 芯片与 Intel | 可下载 |
+| Windows | — | 计划支持 x64 | 敬请期待 |
 
-正式发布的安装包包含 HTTP/3 支持，但 QUIC 仍是实验性功能，默认关闭。
+macOS 正式安装包包含 HTTP/3 支持，但 QUIC 仍是实验性功能，默认关闭。下载页会保留 Windows 入口以明确展示支持状态，但目前不会链接到安装文件。
 
 ## 连接浏览器
 

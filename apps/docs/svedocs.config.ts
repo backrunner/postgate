@@ -18,15 +18,15 @@ export default defineConfig({
   theme: {
     defaultMode: 'system',
     palette: {
-      accent: '#16a34a',
+      accent: '#18181b',
       neutral: 'zinc'
     },
     fonts: {
-      sans: '"Avenir Next", "Segoe UI", sans-serif',
-      mono: '"SFMono-Regular", "Cascadia Code", monospace',
-      display: '"Avenir Next", "Segoe UI", sans-serif'
+      sans: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      mono: 'ui-monospace, "SFMono-Regular", "Cascadia Code", monospace',
+      display: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
     },
-    radius: '6px',
+    radius: '8px',
     codeTheme: {
       light: 'github-light',
       dark: 'github-dark'
@@ -39,7 +39,7 @@ export default defineConfig({
     brand: {
       label: 'PostGate',
       href: '/',
-      logo: '/postgate.svg',
+      logo: '/postgate.png',
       mark: false
     },
     nav: [

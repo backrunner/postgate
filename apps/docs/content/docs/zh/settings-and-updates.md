@@ -22,9 +22,9 @@ PostGate 会读取最新 GitHub Release 中经过签名的更新清单。Setting
 - 可选的后台下载
 - 下载、安装与重启进度
 
-发布流程会构建 macOS、Windows 和 Linux 安装包，为自动更新文件签名，并验证 `latest.json`。只有所有平台都构建成功，Release 草稿才会正式发布。安装更新前，PostGate 还会再次校验签名。
+发布流程目前会分别构建 Apple 芯片与 Intel 的 macOS 安装包，为自动更新文件签名，并验证 `latest.json` 中的两个 Darwin 条目。只有两种架构都构建成功，Release 草稿才会正式发布。安装更新前，PostGate 还会再次校验签名。
 
-网站下载区会调用 GitHub 的最新版本接口，并直接链接到各平台的安装文件。如果还没有发布版本，或 GitHub 暂时无法访问，下载按钮会转到仓库的 Releases 页面。
+网站下载区会调用 GitHub 的最新版本接口，并直接链接到选中的 macOS 安装文件。Windows 会显示“敬请期待”，且不提供下载操作。如果尚无 macOS Release，或 GitHub 暂时无法访问，macOS 按钮会转到仓库的 Releases 页面。
 
 ## 配置档案迁移
 

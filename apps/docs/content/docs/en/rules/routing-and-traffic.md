@@ -9,7 +9,7 @@ order: 15
 
 ## Route to another host
 
-`host` changes the upstream connection while preserving the original request URL and host information:
+`host` changes the upstream connection while preserving the original request URL and `Host` header:
 
 ```text
 api.example.com host://127.0.0.1:3000
@@ -54,4 +54,4 @@ api.example.com timeout://3000
 api.example.com enable://abort
 ```
 
-Timeout values are milliseconds. PostGate also supports selected `enable` and `disable` transport flags for capture visibility, abort behavior, forced body writes, and larger merges. Other Whistle flags may be retained without affecting transport; consult [Compatibility](/docs/rules/compatibility).
+Timeout values are measured in milliseconds. PostGate also supports selected `enable` and `disable` transport flags for capture visibility, abort behavior, forced body writes, and larger merge limits. Other Whistle flags may be preserved without affecting transport; see [Compatibility](/docs/rules/compatibility).

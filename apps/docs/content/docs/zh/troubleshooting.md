@@ -1,6 +1,6 @@
 ---
 title: 故障排查
-description: 排查无流量、证书失败、规则不匹配、Debug、插件和更新问题。
+description: 排查流量捕获、证书信任、规则匹配、Debug、插件和更新问题。
 navTitle: 故障排查
 order: 40
 ---
@@ -25,8 +25,8 @@ order: 40
 
 ## 规则没有生效
 
-- 启用规则所在的 Rule Group。
-- 查看编辑器解析状态中的错误或不支持协议警告。
+- 启用规则所在的规则组。
+- 查看编辑器解析状态中的错误或“不支持该协议”警告。
 - 缩小匹配范围，并在 Capture 中核对实际请求 URL。
 - 检查方法、协议、请求头、状态码，以及包含和排除条件。
 - 检查前面的宽泛规则是否已经修改同一请求。
@@ -43,7 +43,7 @@ order: 40
 - 重载页面前启用匹配的 `debug://` 规则。
 - 确认主文档是 HTML，并通过 PostGate。
 - 检查 DevTools 端口冲突。
-- 检查 CSP 或浏览器扩展是否阻止本地 WebSocket。
+- 检查内容安全策略（CSP）或浏览器扩展是否阻止了本地 WebSocket。
 
 ## 插件无法加载
 
@@ -56,8 +56,8 @@ order: 40
 ## 更新检查失败
 
 - 打开 [GitHub Releases](https://github.com/backrunner/postgate/releases)，确认网络可用且存在稳定版。
-- 确认安装包包含生产 updater 公钥。
+- 确认安装包包含用于生产环境更新校验的公钥。
 - 不要重命名或修改 GitHub Release 中的 `latest.json` 及其签名文件。
 - 测试预发布版本时请注意，GitHub 的稳定版接口通常不会返回预发布版本。
 
-提交 Issue 时请提供 PostGate 版本、操作系统、最小规则、相关 Capture 元数据和完整错误信息，并先移除凭证、Cookie、证书密钥和私有正文。
+提交 Issue 时，请提供 PostGate 版本、操作系统、能够复现问题的最小规则、相关 Capture 元数据和完整错误信息。提交前请先移除凭证、Cookie、证书密钥，以及私有的请求或响应正文。

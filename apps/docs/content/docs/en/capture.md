@@ -7,13 +7,13 @@ order: 4
 
 # Capture traffic
 
-The Capture workspace is the live view of traffic passing through PostGate.
+The **Capture** workspace shows traffic as it passes through PostGate.
 
 ## Start and pause
 
-Use **Start** to begin listening on the configured proxy port. **Pause** stops the listener; it does not delete captured rows. The address beside the button can be copied into browser or system proxy settings.
+Use **Start** to begin listening on the configured proxy port. **Pause** stops new rows from being added to the list while the proxy continues forwarding traffic; it does not delete anything already captured. Copy the address beside the button into your browser or system proxy settings.
 
-Use the trash button to clear saved capture history. Persistence is configurable, so long-running sessions do not have to keep every request in memory.
+Use the trash button to clear the capture history. Retention and persistence can be configured in **Settings** for longer sessions.
 
 ## Filter requests
 
@@ -30,7 +30,7 @@ Filters change only the visible list; they do not prevent the proxy from forward
 
 ## Inspect a request
 
-Select a row to inspect request and response details. PostGate loads large bodies on demand and shows a suitable preview for text, JSON, HTML, images, and binary data. The timing waterfall separates connection, request, upstream, and response phases.
+Select a row to inspect the request and response. PostGate loads large bodies on demand and provides dedicated previews for text, JSON, HTML, images, and binary data. The timing waterfall separates connection, request, upstream wait, and response phases.
 
 Sensitive headers such as `Authorization` and `Cookie` should be treated as credentials when sharing captures.
 
@@ -40,4 +40,4 @@ Capture data can be exported as HAR for use in browser developer tools or other 
 
 ## Streaming traffic
 
-WebSocket and Server-Sent Events connections remain visible as new messages arrive. HTTP/2 requests use the same capture and rule pipeline as HTTP/1.1. Experimental HTTP/3 ingress is available only in builds that include the QUIC feature.
+WebSocket and Server-Sent Events (SSE) connections remain visible as new messages arrive. HTTP/2 requests use the same capture and rule pipeline as HTTP/1.1. The experimental HTTP/3 listener is available only in builds that include the QUIC feature.

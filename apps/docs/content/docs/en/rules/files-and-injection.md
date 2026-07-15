@@ -18,7 +18,7 @@ cdn.example.com/assets/app.js file:///Users/me/project/dist/app.js
 api.example.com/v1/user file:///Users/me/fixtures/user.json
 ```
 
-On Windows, use a valid file URL with the drive component. The PostGate process must be able to read the target.
+On Windows, use a valid file URL that includes the drive letter. The PostGate process must have permission to read the target file.
 
 `mock` provides another file-oriented mock action:
 
@@ -47,4 +47,4 @@ example.com cssAppend://#local-badge{position:fixed;top:8px;right:8px}
 
 Use `htmlPrepend`, `jsPrepend`, and `cssPrepend` to insert before existing content. `htmlReplace`, `jsReplace`, and `cssReplace` perform targeted replacement. Typed `htmlBody`, `jsBody`, and `cssBody` actions replace the corresponding body completely.
 
-Injection is applied only to compatible response content. Check the response `content-type` and Capture body preview if an injection does not appear.
+Injection is applied only to compatible response types. If an injection does not appear, check the response `content-type` and inspect the body preview in **Capture**.

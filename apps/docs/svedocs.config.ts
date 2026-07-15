@@ -53,7 +53,7 @@ export default defineConfig({
       { label: 'GitHub', href: 'https://github.com/backrunner/postgate', external: true }
     ],
     footer: {
-      text: 'PostGate is local-first developer infrastructure.',
+      text: 'PostGate is local-first tooling for frontend development.',
       links: [
         { label: 'GitHub', href: 'https://github.com/backrunner/postgate', external: true },
         { label: 'MIT License', href: 'https://github.com/backrunner/postgate/blob/main/LICENSE', external: true }
@@ -90,15 +90,15 @@ export default defineConfig({
         'search.query': '搜索关键词',
         'search.placeholder': '搜索文档',
         'search.results': '搜索结果',
-        'search.loading': '正在搜索...',
-        'search.loadingIndex': '正在加载搜索索引...',
+        'search.loading': '正在搜索…',
+        'search.loadingIndex': '正在加载搜索索引…',
         'search.indexError': '无法加载搜索索引。',
         'search.empty': '没有匹配的文档。',
         'toc.label': '本页内容',
-        'heading.anchor': '链接到此章节',
+        'heading.anchor': '链接到本节',
         'article.kind.doc': '文档',
         'article.kind.page': '页面',
-        'article.breadcrumb': '面包屑',
+        'article.breadcrumb': '路径导航',
         'article.updated': '更新于 {date}',
         'article.edit': '编辑此页',
         'article.previous': '上一页',
@@ -110,14 +110,14 @@ export default defineConfig({
         'theme.dark': '深色',
         'tools.label': '页面工具',
         'tools.backToTop': '回到顶部',
-        'footer.text': '本地优先的开发基础设施。',
+        'footer.text': '面向前端开发的本地流量工具。',
         'postgate.nav.start': '快速开始',
         'postgate.nav.rules': '规则',
         'postgate.nav.debug': '调试',
         'postgate.nav.plugins': '插件',
         'postgate.nav.download': '下载',
         'error.notFound.title': '页面未找到',
-        'error.notFound.description': '这个地址没有对应的页面。',
+        'error.notFound.description': '找不到与当前地址对应的页面。',
         'error.backToDocs': '返回文档'
       }
     }

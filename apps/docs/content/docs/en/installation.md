@@ -7,7 +7,7 @@ order: 2
 
 # Installation and proxy setup
 
-PostGate publishes signed macOS packages through [GitHub Releases](https://github.com/backrunner/postgate/releases). The landing page checks GitHub for the newest stable release and lets you choose the Apple silicon or Intel build.
+PostGate publishes signed macOS packages through [GitHub Releases](https://github.com/backrunner/postgate/releases). The download page checks for the latest stable release and lets you choose the build for Apple silicon or Intel Macs.
 
 ## Supported packages
 
@@ -16,7 +16,7 @@ PostGate publishes signed macOS packages through [GitHub Releases](https://githu
 | macOS | `.dmg` | Apple silicon and Intel | Available |
 | Windows | — | x64 planned | Coming soon |
 
-The macOS release builds include HTTP/3 support, although QUIC remains experimental and disabled by default. Windows remains visible on the download page so its availability is explicit, but it does not link to an installer yet.
+The macOS builds include HTTP/3 support, but QUIC remains experimental and is disabled by default. The Windows option stays visible to make its status clear, but it does not link to an installer yet.
 
 ## Connect a browser
 
@@ -26,16 +26,16 @@ Start the proxy from **Capture**. The toolbar shows the active address and port;
 127.0.0.1:8899
 ```
 
-Set both the HTTP and HTTPS proxy fields in your browser or operating-system network settings to that address. Leave any SOCKS field empty unless another tool needs it.
+Set both the HTTP and HTTPS proxy fields in your browser or operating system's network settings to that address. Leave the SOCKS field empty unless another tool requires it.
 
-PostGate binds to `127.0.0.1`, so other devices on the network cannot use the proxy. This keeps captured traffic and rule actions on the computer running PostGate.
+PostGate binds to `127.0.0.1`, so the proxy is not reachable from other devices on the network. Captured traffic and rule processing stay on the computer running PostGate.
 
 ## Verify the connection
 
-Browse to an HTTP site and check that a row appears in **Capture**. If it does not:
+Visit an HTTP site and check that a request appears in **Capture**. If no request appears:
 
-1. Confirm that the Capture toolbar says the proxy is running.
-2. Confirm that the configured port matches PostGate's proxy port.
+1. Confirm that the **Capture** toolbar shows the proxy as running.
+2. Confirm that the browser or system proxy port matches PostGate's proxy port.
 3. Disable proxy bypass rules for the hostname you are testing.
 4. Check that another process is not already using the port.
 

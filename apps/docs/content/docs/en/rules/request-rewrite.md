@@ -29,7 +29,7 @@ api.example.com forwardedFor://127.0.0.1
 api.example.com auth://user:password
 ```
 
-`reqHeaders` accepts query-style pairs or a JSON map. Additional actions cover user agent, referrer, forwarded IP, Basic authentication, request cookies, request CORS, content type, and character set.
+`reqHeaders` accepts query-style pairs or a JSON map. Dedicated actions are also available for the user agent, referrer, forwarded IP, Basic authentication, request cookies, CORS metadata, content type, and character set.
 
 ## Bodies
 
@@ -41,6 +41,6 @@ api.example.com reqAppend://-suffix
 api.example.com reqReplace://old=new
 ```
 
-Use `reqBody` to replace the entire body and `reqMerge`/`params` to merge structured data. Prepend, append, and replace actions are useful for text payloads. `reqWrite` and `reqWriteRaw` save observed request bodies to a local path.
+Use `reqBody` to replace the entire body, and use `reqMerge` or `params` to merge structured data. Prepend, append, and replace actions are useful for text payloads. `reqWrite` and `reqWriteRaw` save observed request bodies to a local path.
 
 Body changes update relevant length metadata before forwarding. Use a matching `reqType` when changing the representation, for example `reqType://application/json`.

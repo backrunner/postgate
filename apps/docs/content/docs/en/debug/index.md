@@ -8,7 +8,7 @@ collapsed: false
 
 # Debug
 
-PostGate Debug connects pages matched by a rule to the desktop app through a local Chobitsu/CDP bridge. It captures console output, runtime errors, Fetch, and XHR activity without relying on a remote service.
+PostGate Debug connects pages matched by a rule to the desktop app through a local Chobitsu/CDP bridge. It captures console output, runtime errors, Fetch, and XHR activity without sending data to a remote service.
 
 ## Start a session
 
@@ -26,7 +26,7 @@ The debug server starts automatically when an enabled debug rule exists. Its loc
 
 ## What gets injected
 
-For matching HTML responses, PostGate inserts a small client that opens a WebSocket back to the local debug server and exposes Chrome DevTools Protocol commands through Chobitsu. Non-HTML assets are not injected.
+For matching HTML responses, PostGate injects a lightweight client that opens a WebSocket to the local debug server and exposes Chrome DevTools Protocol commands through Chobitsu. Non-HTML resources are left unchanged.
 
 ## Discovery endpoints
 

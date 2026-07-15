@@ -29,7 +29,7 @@ api.example.com forwardedFor://127.0.0.1
 api.example.com auth://user:password
 ```
 
-`reqHeaders` 接受查询字符串风格的键值对或 JSON 对象。其他操作可以设置 User Agent、Referer、转发 IP、Basic Auth、请求 Cookie、CORS、内容类型和字符集。
+`reqHeaders` 接受查询字符串格式的键值对或 JSON 对象。其他专用操作还可以设置 User Agent、Referer、转发 IP、Basic Auth、请求 Cookie、CORS 信息、内容类型和字符集。
 
 ## 请求正文
 
@@ -41,6 +41,6 @@ api.example.com reqAppend://-suffix
 api.example.com reqReplace://old=new
 ```
 
-`reqBody` 会替换完整正文，`reqMerge`/`params` 用于合并结构化数据。前置、追加和替换操作适合处理文本正文。`reqWrite` 与 `reqWriteRaw` 可以把收到的请求正文写入本地文件。
+`reqBody` 会替换完整正文，`reqMerge` 或 `params` 用于合并结构化数据。前置、追加和替换操作适合处理文本正文。`reqWrite` 与 `reqWriteRaw` 可以把收到的请求正文写入本地文件。
 
 修改正文后，PostGate 会在转发前更新相关长度信息。改变数据格式时，还应同时设置 `reqType`，例如 `reqType://application/json`。

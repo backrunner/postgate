@@ -1,19 +1,19 @@
 ---
 title: Replay requests
-description: Save captured traffic into collections, edit requests, and execute them repeatedly.
+description: Save captured requests in collections, edit them, and run them repeatedly.
 navTitle: Replay
 order: 30
 ---
 
 # Replay requests
 
-Replay turns a captured request into a repeatable local test. Requests are stored in collections and retain execution history.
+Replay turns a captured request into a repeatable test. Saved requests are organized into collections and retain their execution history.
 
 ## Import from Capture
 
 Select a Capture row and import it into Replay. PostGate copies the method, URL, query parameters, headers, and body into an editable request.
 
-Review credentials and session cookies before saving or sharing a request. Replay sends the values currently shown in the editor.
+Review credentials and session cookies before saving or sharing a request. Replay sends exactly the values currently shown in the editor.
 
 ## Build a request
 
@@ -33,4 +33,4 @@ Collections can be created, renamed, and removed. Saved requests can be duplicat
 
 ## Replay and rules
 
-Replay uses the same HTTP environment as the desktop app but represents a direct saved request workflow. When validating a proxy rule, confirm the executed request is routed through the active PostGate proxy path and compare it with the corresponding Capture row.
+Replay sends requests directly from the desktop app. It does not automatically route them through the PostGate proxy, so proxy rules are not applied to Replay requests. To validate a proxy rule, use a browser or another client configured to use PostGate, then inspect the corresponding row in **Capture**.

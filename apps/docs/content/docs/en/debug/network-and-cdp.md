@@ -7,7 +7,7 @@ order: 22
 
 # Fetch, XHR, and CDP
 
-The debug client observes Fetch and XMLHttpRequest activity inside the page. This complements Capture: Capture shows the traffic moving through the proxy, while Debug ties that activity to a connected browser page and its runtime context.
+The debug client observes Fetch and XMLHttpRequest activity inside the page. This complements **Capture**: Capture shows traffic moving through the proxy, while Debug connects that activity to a specific browser page and runtime context.
 
 ## Network events
 
@@ -31,4 +31,4 @@ Use a client that supports the Chrome DevTools Protocol messages needed by Chobi
 
 ## Session lifecycle
 
-A session closes when the page disconnects, reloads without matching the rule, or PostGate stops the debug service. Reloading a page that still matches creates or refreshes its session. Remove stale sessions from the DevTools workspace when diagnosing reconnection issues.
+A session closes when the page disconnects, reloads without matching the rule, or PostGate stops the debug service. Reloading a page that still matches the rule creates or refreshes its session. Remove stale sessions from the **DevTools** workspace when diagnosing reconnection problems.

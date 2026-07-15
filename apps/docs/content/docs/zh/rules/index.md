@@ -8,7 +8,7 @@ collapsed: false
 
 # 规则
 
-规则用于匹配流量，并在请求发往上游前或响应返回客户端前执行一个或多个操作。PostGate 使用与 Whistle 相似的格式：
+规则用于匹配流量，并在 PostGate 转发请求或返回响应之前执行一个或多个操作。语法沿用 Whistle 常见的规则格式：
 
 ```text
 pattern action [action ...] [filter ...]
@@ -24,7 +24,7 @@ api.example.com host://127.0.0.1:3000 reqHeaders://x-postgate=local
 
 规则保存在命名规则组中。只有启用的规则组才会进入代理处理链路。规则组支持创建、重命名、排序和停用，无需删除其中的内容。
 
-编辑器会在输入时实时解析规则。错误会阻止无效规则运行；警告则会标出 PostGate 能够识别、但尚不会执行的协议。
+编辑器会在输入时实时解析规则。错误会阻止无效规则运行；警告则会标出 PostGate 能够识别但无法执行的协议。
 
 ## 注释与多个动作
 
@@ -37,8 +37,8 @@ api.example.com host://localhost:3000 reqHeaders://x-env=local resDelay://250
 
 ## Values
 
-较大的 JSON、HTML、JavaScript 或请求头映射不必直接写在规则中。可以先把可复用内容保存到 **Values**，再从支持该功能的操作中引用。规则也可以读取本地文件、外部规则文件和远端 HTTP(S) 正文资源。
+较大的 JSON、HTML、JavaScript 或请求头映射不必塞进单行规则。可以先将可复用内容保存到 **Values**，再通过兼容的操作引用。规则也可以读取本地文件、外部规则文件和远端 HTTP(S) 正文资源。
 
 ## 兼容性
 
-PostGate 以 Whistle v2.10.6 语法为兼容基线，但两者的运行时并不完全相同。迁移大型规则集前，请先查看[兼容性说明](/docs/rules/compatibility)。
+PostGate 以 Whistle v2.10.6 语法为兼容基线，但并未复现 Whistle 的所有运行时行为。迁移大型规则集前，请先阅读[兼容性说明](/docs/rules/compatibility)。

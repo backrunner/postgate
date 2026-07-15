@@ -7,7 +7,7 @@ order: 13
 
 # Rewrite responses
 
-Response actions run after the upstream server answers and before the response is sent to the client.
+Response actions run after the upstream server responds and before PostGate sends the response to the client.
 
 ## Status and redirects
 
@@ -42,6 +42,6 @@ api.example.com resAppend://-after
 api.example.com resReplace://production=local
 ```
 
-`resBody` replaces the entire body. `resMerge` merges structured content. Prepend, append, and replace operate on response content, while `resWrite` and `resWriteRaw` save the observed body to disk.
+`resBody` replaces the entire body, while `resMerge` merges structured content. Prepend, append, and replace actions modify response content; `resWrite` and `resWriteRaw` save the observed body to disk.
 
 Changing a compressed response may require PostGate to decode and re-encode the body. Verify the resulting content type and body in Capture after adding a rewrite.

@@ -11,7 +11,7 @@ order: 16
 
 Open **Values** to create named text, JSON, HTML, JavaScript, CSS, or rule fragments. Names may contain `/` to create visual groups.
 
-Values are useful for bodies and header maps that are too large for one rule line. PostGate can also resolve fenced inline values, local files, external rule includes, and bodies from remote HTTP(S) resources.
+Values are useful for bodies and header maps that are too large for a single rule line. PostGate can also resolve fenced inline values, local files, external rule includes, and bodies loaded from remote HTTP(S) resources.
 
 When a value is renamed, update every rule that references the old name.
 
@@ -24,7 +24,7 @@ example.com debug://
 example.com/app debug://checkout
 ```
 
-Enabling a debug rule starts the local DevTools service. Matching pages receive the PostGate Chobitsu/CDP client and appear in **DevTools** after they load. Continue with the [Debug guide](/docs/debug).
+Enabling a debug rule starts the local DevTools service. PostGate injects its Chobitsu/CDP client into matching pages, which appear in **DevTools** after they load. Continue with the [Debug guide](/docs/debug).
 
 ## Plugin rules
 

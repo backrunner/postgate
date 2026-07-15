@@ -1,6 +1,6 @@
 ---
 title: Settings, profiles, and updates
-description: Configure listeners, transfer profiles, sync settings, and receive signed GitHub Release updates.
+description: Configure listeners, transfer profiles, sync settings, and install signed updates from GitHub Releases.
 navTitle: Settings and updates
 order: 32
 ---
@@ -9,7 +9,7 @@ order: 32
 
 ## Proxy configuration
 
-Settings controls the localhost proxy port, HTTP/2, experimental QUIC/HTTP/3, and the DevTools service port. If the installed build does not include QUIC support, the QUIC toggle is disabled and explains why.
+In **Settings**, you can configure the localhost proxy port, HTTP/2, experimental QUIC/HTTP/3, and the DevTools service port. If the installed build does not include QUIC support, the QUIC toggle is disabled and shows the reason.
 
 Changing a listener port requires the affected service to restart. Avoid ports already used by a development server or another proxy.
 
@@ -22,7 +22,7 @@ PostGate checks the signed update manifest published with the latest GitHub Rele
 - optional background download
 - download, install, and restart progress
 
-The release workflow currently builds Apple silicon and Intel macOS packages, signs their updater artifacts, validates both Darwin entries in `latest.json`, and publishes the draft only after both builds succeed. PostGate verifies updater signatures before installation.
+The release workflow builds macOS packages for Apple silicon and Intel, signs the update artifacts, validates both macOS entries in `latest.json`, and publishes the draft only after both builds succeed. PostGate verifies each update signature before installation.
 
 The website download area checks GitHub separately and links directly to the selected macOS installer. Windows is marked **Coming soon** and has no download action. If no macOS release exists or GitHub is unavailable, the macOS action opens the repository's Releases page instead.
 
@@ -30,16 +30,16 @@ The website download area checks GitHub separately and links directly to the sel
 
 A profile can include rules, values, Replay collections, certificate material, app preferences, and sync configuration. The import flow previews the profile before restoring its data. You can also import compatible Whistle rules into a new rule group without restoring a complete profile.
 
-Profiles that include the CA private key, WebDAV password, headers, or request bodies are sensitive. Store and transfer them accordingly.
+Profiles that include the CA private key, WebDAV password, headers, or request bodies are sensitive. Protect them like credentials when storing or transferring them.
 
 ## Settings sync
 
 Sync uses the same profile snapshot format as manual transfer:
 
-- iCloud writes a local Cloud Drive file on supported macOS builds.
+- iCloud writes the profile snapshot to iCloud Drive on supported macOS builds.
 - WebDAV uploads the JSON snapshot to the configured endpoint and remote path.
 
-Save the sync provider settings before using Push or Pull. Push replaces the remote snapshot with local state. Pull imports the remote snapshot into PostGate, so export a backup before the first pull if the current setup already contains data.
+Save the sync provider settings before using **Push** or **Pull**. Push replaces the remote snapshot with the current local state. Pull imports the remote snapshot into PostGate; if the current setup already contains data, export a backup before the first pull.
 
 ## Appearance
 

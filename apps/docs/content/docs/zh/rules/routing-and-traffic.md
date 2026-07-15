@@ -9,7 +9,7 @@ order: 15
 
 ## 路由到其他主机
 
-`host` 会改变上游连接地址，同时保留原始请求的 URL 和主机信息：
+`host` 会改变上游连接地址，同时保留原始请求 URL 和 `Host` 请求头：
 
 ```text
 api.example.com host://127.0.0.1:3000
@@ -54,4 +54,4 @@ api.example.com timeout://3000
 api.example.com enable://abort
 ```
 
-超时值以毫秒为单位。PostGate 还支持部分 `enable`/`disable` 传输选项，包括控制捕获记录的显示与隐藏、中止请求、强制写入正文和放宽合并大小。其他 Whistle 选项可能会被保留，但不会影响实际传输，详见[兼容性](/docs/rules/compatibility)。
+超时值以毫秒为单位。PostGate 还支持部分 `enable`/`disable` 传输选项，用于控制捕获记录的显示与隐藏、中止请求、强制写入正文，以及放宽合并大小限制。其他 Whistle 选项可能会被保留，但不会影响实际传输，详见[兼容性](/docs/rules/compatibility)。

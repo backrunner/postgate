@@ -7,7 +7,7 @@ order: 13
 
 # 改写响应
 
-响应操作会在上游服务器返回结果之后、内容发送给客户端之前执行。
+响应操作会在上游服务器返回响应之后、PostGate 将响应发送给客户端之前执行。
 
 ## 状态码与重定向
 
@@ -42,6 +42,6 @@ api.example.com resAppend://-after
 api.example.com resReplace://production=local
 ```
 
-`resBody` 会替换完整正文，`resMerge` 用于合并结构化内容。前置、追加和替换操作可以修改响应内容；`resWrite` 和 `resWriteRaw` 则把收到的正文保存到磁盘。
+`resBody` 会替换完整正文，`resMerge` 用于合并结构化内容。前置、追加和替换操作用于修改响应内容；`resWrite` 和 `resWriteRaw` 则会把收到的正文保存到磁盘。
 
 修改压缩响应时，PostGate 可能需要先解码，再重新编码。添加改写后，请在 Capture 中核对最终的内容类型和正文。

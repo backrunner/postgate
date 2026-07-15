@@ -1,13 +1,13 @@
 ---
 title: Whistle compatibility
-description: Supported, partial, and unsupported Whistle protocols in PostGate.
+description: Understand which Whistle protocols PostGate supports and where behavior differs.
 navTitle: Compatibility
 order: 17
 ---
 
 # Whistle compatibility
 
-PostGate's compatibility baseline is Whistle v2.10.6 at commit `5e9ac58c979d3713a59fdc3471df296cd0f66071` (July 11, 2026). “Supported” means a rule is parsed and applied through HTTP/1.1, HTTPS MITM, and HTTP/2 paths.
+PostGate's compatibility baseline is Whistle v2.10.6 at commit `5e9ac58c979d3713a59fdc3471df296cd0f66071` (July 11, 2026). Here, “supported” means that PostGate both parses the rule and applies it across HTTP/1.1, HTTPS MITM, and HTTP/2 traffic.
 
 ## Supported families
 
@@ -20,7 +20,7 @@ PostGate's compatibility baseline is Whistle v2.10.6 at commit `5e9ac58c979d3713
 
 ## Partial or PostGate-specific
 
-- `xhost` currently behaves as `host`; Whistle's failure fallback distinction is not implemented.
+- `xhost` currently behaves like `host`; Whistle's fallback behavior after a failed connection is not implemented.
 - `delete` removes request or response headers, but not every Whistle body-property, cookie, or trailer form.
 - `headerReplace` is response-header modification rather than Whistle's complete regex replacement model.
 - `enable` and `disable` implement capture/hide, abort, forced body writes, and larger merge limits. Other flags may have no transport effect.
@@ -41,4 +41,4 @@ The parser preserves these actions as unsupported warnings rather than silently 
 
 ## HTTP/3 boundary
 
-Release builds enable the optional QUIC feature and expose a localhost HTTP/3 ingress that shares the existing rule pipeline. It is not a MASQUE proxy: HTTP/3 `CONNECT`, `CONNECT-UDP`, and arbitrary end-to-end QUIC datagrams cannot be decrypted or rewritten and return `501 Not Implemented`.
+macOS release builds enable the optional QUIC feature and expose a localhost HTTP/3 listener that shares the existing rule pipeline. This listener is not a MASQUE proxy: PostGate cannot decrypt or rewrite HTTP/3 `CONNECT`, `CONNECT-UDP`, or arbitrary end-to-end QUIC datagrams, so those requests return `501 Not Implemented`.

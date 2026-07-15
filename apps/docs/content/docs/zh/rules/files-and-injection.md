@@ -18,7 +18,7 @@ cdn.example.com/assets/app.js file:///Users/me/project/dist/app.js
 api.example.com/v1/user file:///Users/me/fixtures/user.json
 ```
 
-Windows 需要包含盘符的合法 File URL，PostGate 进程也必须有读取权限。
+在 Windows 上，请使用包含盘符的合法文件 URL，并确保 PostGate 进程有权限读取目标文件。
 
 `mock` 是另一种基于文件的模拟操作：
 
@@ -45,6 +45,6 @@ example.com jsAppend://console.info('PostGate active')
 example.com cssAppend://#local-badge{position:fixed;top:8px;right:8px}
 ```
 
-`htmlPrepend`、`jsPrepend` 和 `cssPrepend` 会插到已有内容前。`htmlReplace`、`jsReplace` 和 `cssReplace` 用于定向替换。`htmlBody`、`jsBody` 和 `cssBody` 会完整替换对应正文。
+`htmlPrepend`、`jsPrepend` 和 `cssPrepend` 会插入到现有内容之前。`htmlReplace`、`jsReplace` 和 `cssReplace` 用于定向替换。`htmlBody`、`jsBody` 和 `cssBody` 会完整替换对应正文。
 
-注入只会应用到内容类型兼容的响应。如果页面没有变化，请检查响应的 `content-type`，并在 Capture 中查看正文预览。
+注入只会应用到内容类型兼容的响应。如果页面没有变化，请检查响应的 `content-type`，并在 **Capture** 中查看正文预览。

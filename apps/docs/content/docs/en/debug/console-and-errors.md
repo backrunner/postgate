@@ -7,11 +7,11 @@ order: 21
 
 # Console and page errors
 
-Select a connected page in **DevTools** to focus its events, or choose **All Sessions** to combine active pages.
+Select a connected page in **DevTools** to view only its events, or choose **All Sessions** to combine events from every active page.
 
 ## Console capture
 
-The injected client captures standard console methods and forwards their level, arguments, timestamp, and source context to PostGate. Use this for pages running in a browser profile where opening the built-in developer tools would disrupt the test.
+The injected client captures standard console methods and forwards their level, arguments, timestamp, and source context to PostGate. This is useful when opening the browser's built-in developer tools would interfere with the scenario being tested.
 
 Console events remain scoped to their debug session. Clear the panel when repeating a scenario so old output is not mistaken for the new run.
 

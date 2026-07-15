@@ -26,7 +26,7 @@ order: 40
 ## A rule does not run
 
 - Enable its rule group.
-- Read the editor parse status for errors or unsupported-protocol warnings.
+- Check the editor's parse status for errors or unsupported-protocol warnings.
 - Narrow the pattern and inspect the requested URL in Capture.
 - Check method, protocol, header, status, and include/exclude filters.
 - Look for an earlier broad route, file, or mock action that changes the same request.
@@ -43,7 +43,7 @@ order: 40
 - Enable a matching `debug://` rule before reloading the document.
 - Confirm the main document is HTML and passes through PostGate.
 - Check the DevTools port for conflicts.
-- Inspect Content Security Policy and browser extensions that may block the local WebSocket.
+- Check whether Content Security Policy or a browser extension is blocking the local WebSocket.
 
 ## A plugin will not load
 
@@ -56,8 +56,8 @@ order: 40
 ## Update checks fail
 
 - Open [GitHub Releases](https://github.com/backrunner/postgate/releases) to verify network access and that a stable release exists.
-- Confirm the installed build contains the production updater public key.
+- Confirm that the installed build contains the public key used to verify production updates.
 - Do not rename or edit `latest.json` or its signed assets in a release.
 - When testing a prerelease, remember that GitHub's stable-release endpoint normally excludes prereleases.
 
-When reporting an issue, include the PostGate version, operating system, minimal rule, relevant Capture metadata, and exact error text. Remove credentials, cookies, certificate keys, and private bodies first.
+When reporting an issue, include the PostGate version, operating system, smallest rule that reproduces the problem, relevant Capture metadata, and the exact error message. Remove credentials, cookies, certificate keys, and private request or response bodies first.

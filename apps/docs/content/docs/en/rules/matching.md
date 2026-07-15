@@ -7,12 +7,12 @@ order: 11
 
 # Matching and filters
 
-The first token of a rule selects traffic. Prefer the narrowest pattern that expresses the intent.
+The first token in a rule selects the traffic to match. Use the narrowest pattern that still expresses your intent.
 
 ## Common patterns
 
 ```text
-# domain and its requests
+# all requests to a domain
 api.example.com host://localhost:3000
 
 # URL or path prefix
@@ -28,7 +28,7 @@ https://api.example.com/v1/ host://localhost:3000
 :8080 reqDelay://100
 ```
 
-PostGate supports domain, full URL, path-prefix, exact, wildcard, regular-expression, no-schema, and port patterns. Prefix a pattern with `!` to negate it where a rule form accepts negation.
+PostGate supports domain, full-URL, path-prefix, exact, wildcard, regular-expression, scheme-free, and port patterns. Where negation is supported, prefix the pattern with `!` to exclude matching traffic.
 
 ## Inline filters
 
@@ -46,4 +46,4 @@ Supported filters include method, protocol, port, content type, header, host, cl
 
 ## Rule ordering
 
-When several enabled rules match, PostGate collects their applicable actions in rule order. Avoid broad rules that accidentally overlap narrow mocks or routes. Put environment-wide headers and traffic controls in their own group so they can be toggled independently.
+When several enabled rules match, PostGate collects the applicable actions in rule order. Avoid broad rules that unintentionally overlap more specific mocks or routes. Keep environment-wide headers and traffic controls in separate groups so they can be enabled or disabled independently.

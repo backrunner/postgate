@@ -1,6 +1,6 @@
 ---
 title: Plugins
-description: Build, install, enable, and invoke sandboxed JavaScript plugins in PostGate.
+description: Build, install, enable, and use sandboxed JavaScript plugins in PostGate.
 navTitle: Plugins
 order: 31
 ---
@@ -30,7 +30,7 @@ Declare a compiled JavaScript entry with `main` or `module`:
 }
 ```
 
-The entry must stay inside the package directory. CommonJS and a default ESM export are supported; bundled CommonJS is the most predictable distribution format.
+The entry file must remain inside the package directory. PostGate supports CommonJS and default ESM exports; bundled CommonJS is the most predictable format for distribution.
 
 ## Minimal plugin
 
@@ -66,7 +66,7 @@ Install the package from npm or choose a local package directory on the **Plugin
 api.example.com plugin://example?mode=fixture&tenant=local
 ```
 
-Query parameters become `context.ruleConfig`, and `context.matchedPattern` contains the matched request URL. Returning a response from `handleRequest` skips upstream; returning `null` continues. `handleResponse` receives and may change the upstream response.
+Query parameters become `context.ruleConfig`, and `context.matchedPattern` contains the matched request URL. Returning a response from `handleRequest` skips the upstream request, while returning `null` continues normally. `handleResponse` receives the upstream response and may modify it.
 
 ## Bodies and helpers
 

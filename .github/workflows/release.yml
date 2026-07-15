@@ -7,9 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (for example, 0.2.0)"
+        description: "Version to release (for example, 0.2.0 or 0.2.0-beta.1)"
         required: true
         type: string
+      channel:
+        description: "Release channel"
+        required: true
+        default: stable
+        type: choice
+        options:
+          - stable
+          - beta
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
@@ -28,6 +36,7 @@ jobs:
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
       version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
 
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +46,7 @@ jobs:
         shell: bash
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
@@ -44,8 +54,14 @@ jobs:
               exit 1
             fi
             version="${INPUT_VERSION#v}"
+            channel="${INPUT_CHANNEL}"
           else
             version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" == *-* ]]; then
+              channel="beta"
+            else
+              channel="stable"
+            fi
           fi
 
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
@@ -53,7 +69,18 @@ jobs:
             exit 1
           fi
 
+          if [[ "$channel" == "stable" && "$version" == *-* ]]; then
+            echo "Stable releases cannot use a prerelease version: $version" >&2
+            exit 1
+          fi
+
+          if [[ "$channel" == "beta" && ! "$version" =~ -beta([.]|$) ]]; then
+            echo "Beta releases must use a -beta prerelease version: $version" >&2
+            exit 1
+          fi
+
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
       - name: Validate updater signing key
         env:
@@ -69,6 +96,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         with:
           script: |
             const tag = `v${process.env.VERSION}`;
@@ -91,7 +119,7 @@ jobs:
               target_commitish: context.sha,
               name: `PostGate ${tag}`,
               draft: true,
-              prerelease: process.env.VERSION.includes('-'),
+              prerelease: process.env.CHANNEL === 'beta',
               generate_release_notes: true,
             })).data;
 
@@ -182,6 +210,7 @@ jobs:
         env:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           VERSION: ${{ needs.create-release.outputs.version }}
+          CHANNEL: ${{ needs.create-release.outputs.channel }}
         with:
           script: |
             const releaseId = Number(process.env.RELEASE_ID);
@@ -228,6 +257,119 @@ jobs:
               repo: context.repo.repo,
               release_id: releaseId,
               draft: false,
-              prerelease: process.env.VERSION.includes('-'),
-              make_latest: process.env.VERSION.includes('-') ? 'false' : 'true',
+              prerelease: process.env.CHANNEL === 'beta',
+              make_latest: process.env.CHANNEL === 'beta' ? 'false' : 'true',
+            });
+
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            let betaFeed = releases.find((release) => release.tag_name === 'beta');
+            if (!betaFeed) {
+              betaFeed = (await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: 'beta',
+                target_commitish: context.sha,
+                name: 'PostGate Beta Channel',
+                body: 'Rolling update manifest for PostGate Beta clients.',
+                draft: false,
+                prerelease: true,
+                make_latest: 'false',
+              })).data;
+            } else {
+              betaFeed = (await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: betaFeed.id,
+                name: 'PostGate Beta Channel',
+                body: 'Rolling update manifest for PostGate Beta clients.',
+                draft: false,
+                prerelease: true,
+                make_latest: 'false',
+              })).data;
+            }
+
+            const betaAssets = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: betaFeed.id,
+              per_page: 100,
+            });
+            const currentManifestAsset = betaAssets.find((asset) => asset.name === 'latest.json');
+
+            const parseSemver = (value) => {
+              const [withoutBuild] = value.split('+');
+              const separator = withoutBuild.indexOf('-');
+              const core = (separator === -1 ? withoutBuild : withoutBuild.slice(0, separator))
+                .split('.')
+                .map(Number);
+              const prerelease = separator === -1
+                ? null
+                : withoutBuild.slice(separator + 1).split('.');
+              return { core, prerelease };
+            };
+            const compareSemver = (left, right) => {
+              const a = parseSemver(left);
+              const b = parseSemver(right);
+              for (let index = 0; index < 3; index += 1) {
+                if (a.core[index] !== b.core[index]) return a.core[index] - b.core[index];
+              }
+              if (a.prerelease === null) return b.prerelease === null ? 0 : 1;
+              if (b.prerelease === null) return -1;
+              const length = Math.max(a.prerelease.length, b.prerelease.length);
+              for (let index = 0; index < length; index += 1) {
+                const aPart = a.prerelease[index];
+                const bPart = b.prerelease[index];
+                if (aPart === undefined) return -1;
+                if (bPart === undefined) return 1;
+                if (aPart === bPart) continue;
+                const aNumeric = /^[0-9]+$/.test(aPart);
+                const bNumeric = /^[0-9]+$/.test(bPart);
+                if (aNumeric && bNumeric) return Number(aPart) - Number(bPart);
+                if (aNumeric !== bNumeric) return aNumeric ? -1 : 1;
+                return aPart.localeCompare(bPart);
+              }
+              return 0;
+            };
+
+            if (currentManifestAsset) {
+              const currentResponse = await github.request(
+                'GET /repos/{owner}/{repo}/releases/assets/{asset_id}',
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  asset_id: currentManifestAsset.id,
+                  headers: { accept: 'application/octet-stream' },
+                },
+              );
+              const currentManifest = JSON.parse(
+                Buffer.from(currentResponse.data).toString('utf8'),
+              );
+              if (compareSemver(manifest.version, currentManifest.version) < 0) {
+                core.info(
+                  `Keeping newer beta feed ${currentManifest.version}; published ${manifest.version}`,
+                );
+                return;
+              }
+              await github.rest.repos.deleteReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                asset_id: currentManifestAsset.id,
+              });
+            }
+
+            const manifestData = Buffer.from(JSON.stringify(manifest, null, 2) + '\n');
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: betaFeed.id,
+              name: 'latest.json',
+              data: manifestData,
+              headers: {
+                'content-type': 'application/json',
+                'content-length': manifestData.length,
+              },
             });

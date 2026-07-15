@@ -1,7 +1,6 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "postgate-docs",
-  "account_id": "b6754402d59fc29ee8b62119014fec89",
   "pages_build_output_dir": "./build",
   "compatibility_date": "2026-07-15"
 }

@@ -17,12 +17,15 @@ Changing a listener port requires the affected service to restart. Avoid ports a
 
 PostGate checks the signed update manifest published with the latest GitHub Release. Settings provides:
 
+- Stable and Beta update channels
 - manual **Check for Updates**
 - automatic checks at startup
 - optional background download
 - download, install, and restart progress
 
-The release workflow builds macOS packages for Apple silicon and Intel, signs the update artifacts, validates both macOS entries in `latest.json`, and publishes the draft only after both builds succeed. PostGate verifies each update signature before installation.
+Stable receives production releases only. Beta receives preview builds and then follows the final stable build when it is newer. Beta builds default to the Beta channel, and profile exports preserve the selected channel.
+
+The release workflow builds macOS packages for Apple silicon and Intel, signs the update artifacts, validates both macOS entries in `latest.json`, and publishes the draft only after both builds succeed. Stable and Beta use separate manifests, so Stable clients never receive prereleases. PostGate verifies each update signature before installation.
 
 The website download area checks GitHub separately and links directly to the selected macOS installer. Windows is marked **Coming soon** and has no download action. If no macOS release exists or GitHub is unavailable, the macOS action opens the repository's Releases page instead.
 

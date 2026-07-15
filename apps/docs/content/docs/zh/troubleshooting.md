@@ -58,6 +58,6 @@ order: 40
 - 打开 [GitHub Releases](https://github.com/backrunner/postgate/releases)，确认网络可用且存在稳定版。
 - 确认安装包包含用于生产环境更新校验的公钥。
 - 不要重命名或修改 GitHub Release 中的 `latest.json` 及其签名文件。
-- 测试预发布版本时请注意，GitHub 的稳定版接口通常不会返回预发布版本。
+- 测试预览版时，请在 Settings 中选择 Beta 更新渠道；Stable 会按设计忽略预览版。
 
 提交 Issue 时，请提供 PostGate 版本、操作系统、能够复现问题的最小规则、相关 Capture 元数据和完整错误信息。提交前请先移除凭证、Cookie、证书密钥，以及私有的请求或响应正文。

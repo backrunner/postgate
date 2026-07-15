@@ -1,10 +1,13 @@
 # GitHub Releases And Automatic Updates
 
-PostGate publishes signed Tauri updater artifacts from `.github/workflows/release.yml`. Stable releases are available to the desktop updater at:
+PostGate publishes signed Tauri updater artifacts from `.github/workflows/release.yml`. The desktop app supports two update channels:
 
 ```text
-https://github.com/backrunner/postgate/releases/latest/download/latest.json
+Stable: https://github.com/backrunner/postgate/releases/latest/download/latest.json
+Beta:   https://github.com/backrunner/postgate/releases/download/beta/latest.json
 ```
+
+Stable only receives production releases. Beta receives prereleases and then follows the final stable build when its version is newer. Both channels use the same updater signing key and signature verification path.
 
 ## Required Repository Secrets
 
@@ -25,11 +28,13 @@ Production macOS signing and notarization additionally use these optional secret
 ## Release Procedure
 
 1. Ensure CI is green on `main`.
-2. Create and push a semantic-version tag such as `v0.2.0`, or run the Release workflow manually with `0.2.0`.
-3. The workflow creates or reuses a draft release, builds macOS ARM64/x64, Linux x64, and Windows x64 bundles, signs updater artifacts, and merges their entries into `latest.json`.
-4. The final job verifies all four updater platforms and only then publishes the release. A failed build or incomplete manifest remains a draft and is never offered to clients.
+2. Create and push a semantic-version tag, or run the Release workflow manually with an explicit channel.
+3. Use `v0.2.0` with the `stable` channel for a production release, or `v0.3.0-beta.1` with the `beta` channel for a preview release. Tag-triggered runs derive the channel from the version.
+4. The workflow creates or reuses a draft release, builds macOS ARM64 and x64 bundles, signs updater artifacts, and merges both entries into `latest.json`.
+5. The final job verifies both macOS updater platforms before publishing. Stable releases become GitHub's latest release. Beta releases are marked as prereleases.
+6. After publication, the workflow refreshes the rolling `beta` release manifest when the new version is newer than the current Beta feed.
 
-The workflow is safe to rerun while a release remains a draft. It refuses to overwrite an already published tag.
+The workflow rejects prerelease versions on the Stable channel and requires `-beta` versions on the Beta channel. It is safe to rerun while a release remains a draft and refuses to overwrite an already published version tag.
 
 ## Signing Key Setup
 

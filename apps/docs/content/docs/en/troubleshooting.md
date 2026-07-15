@@ -58,6 +58,6 @@ order: 40
 - Open [GitHub Releases](https://github.com/backrunner/postgate/releases) to verify network access and that a stable release exists.
 - Confirm that the installed build contains the public key used to verify production updates.
 - Do not rename or edit `latest.json` or its signed assets in a release.
-- When testing a prerelease, remember that GitHub's stable-release endpoint normally excludes prereleases.
+- When testing a prerelease, select the Beta update channel in Settings. Stable intentionally excludes prereleases.
 
 When reporting an issue, include the PostGate version, operating system, smallest rule that reproduces the problem, relevant Capture metadata, and the exact error message. Remove credentials, cookies, certificate keys, and private request or response bodies first.

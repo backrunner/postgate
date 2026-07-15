@@ -17,12 +17,15 @@ order: 32
 
 PostGate 会读取最新 GitHub Release 中经过签名的更新清单。Settings 页面提供以下选项：
 
+- Stable 与 Beta 更新渠道
 - 手动 **Check for Updates**
 - 启动时自动检查
 - 可选的后台下载
 - 下载、安装与重启进度
 
-发布流程目前会分别构建适用于 Apple 芯片和 Intel Mac 的安装包，为自动更新文件签名，并验证 `latest.json` 中的两个 macOS 架构条目。只有两种架构都构建成功，Release 草稿才会正式发布。安装更新前，PostGate 还会再次校验签名。
+Stable 仅接收正式版；Beta 可以提前接收预览版，并在更高版本的正式版发布后自然升级。Beta 构建默认使用 Beta 渠道，导出 Profile 时也会保留渠道选择。
+
+发布流程目前会分别构建适用于 Apple 芯片和 Intel Mac 的安装包，为自动更新文件签名，并验证 `latest.json` 中的两个 macOS 架构条目。Stable 与 Beta 使用独立清单，因此 Stable 客户端不会收到预览版。只有两种架构都构建成功，Release 草稿才会正式发布；安装更新前，PostGate 还会再次校验签名。
 
 网站下载区会调用 GitHub 的最新版本接口，并直接链接到选中的 macOS 安装文件。Windows 会显示“敬请期待”，且不提供下载操作。如果尚无 macOS Release，或 GitHub 暂时无法访问，macOS 按钮会转到仓库的 Releases 页面。
 

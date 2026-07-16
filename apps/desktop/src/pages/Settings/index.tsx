@@ -209,6 +209,7 @@ export function SettingsPage() {
   const [syncStatusText, setSyncStatusText] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
+  const [syncReady, setSyncReady] = useState(false);
   const [runtimeCapabilities, setRuntimeCapabilities] = useState<RuntimeCapabilities | null>(null);
 
   useEffect(() => {
@@ -279,8 +280,11 @@ export function SettingsPage() {
       if (!isCurrent()) return;
       const normalized = normalizeSyncSettings(status.config);
       setSyncSettings(normalized);
+      setSyncError(null);
+      setSyncReady(true);
     } catch (e) {
       if (!isCurrent()) return;
+      setSyncReady(false);
       setSyncError(String(e));
     }
   }, [normalizeSyncSettings]);
@@ -532,9 +536,11 @@ export function SettingsPage() {
       ? "Syncing"
       : syncError
         ? "Failed"
-        : syncSettings.lastSyncedAt
-          ? "Synced"
-          : "Not synced";
+        : !syncReady
+          ? "Loading"
+          : syncSettings.lastSyncedAt
+            ? "Synced"
+            : "Not synced";
 
   return (
     <div className="flex h-full flex-col">
@@ -934,7 +940,7 @@ export function SettingsPage() {
                   size="sm"
                   className="h-8 shrink-0 gap-1.5 text-xs"
                   onClick={handleICloudSync}
-                  disabled={syncBusy || runtimeCapabilities?.cloudkitSync === false}
+                  disabled={!syncReady || syncBusy || runtimeCapabilities?.cloudkitSync === false}
                 >
                   {syncBusy ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />

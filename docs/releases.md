@@ -26,7 +26,7 @@ Production macOS signing and notarization additionally use these optional secret
 - `APPLE_TEAM_ID`: Apple Developer team ID.
 - `APPLE_PROVISIONING_PROFILE`: base64-encoded Developer ID provisioning profile for `com.alkinum.postgate`, with the `iCloud.com.alkinum.postgate` CloudKit container enabled.
 
-Signed macOS releases require the provisioning profile so the CloudKit entitlements survive code signing. Local builds use the Development environment from `apps/desktop/src-tauri/Entitlements.plist` with `tauri.cloudkit.conf.json`; releases use `tauri.cloudkit.production.conf.json` and `Entitlements.production.plist`. The workflow validates the profile App ID, container, CloudKit service, and Production environment before embedding it as `Contents/embedded.provisionprofile`. Unsigned builds omit it and cannot access CloudKit.
+Signed macOS releases require the provisioning profile so the CloudKit entitlements survive code signing. Local builds use the Development environment from `apps/desktop/src-tauri/Entitlements.plist` with `tauri.cloudkit.conf.json`; releases use `tauri.cloudkit.production.conf.json` and `Entitlements.production.plist`. The workflow validates the profile team, exact App ID, expiration, debug policy, container, CloudKit service, and Production environment before embedding it as `Contents/embedded.provisionprofile`. It then verifies the embedded profile and final signed entitlements before publishing. Unsigned builds omit the profile and cannot access CloudKit.
 
 ## CloudKit Setup
 
@@ -35,9 +35,6 @@ Signed macOS releases require the provisioning profile so the CloudKit entitleme
 3. Create development and Developer ID provisioning profiles that include that container.
 4. For a local signed bundle, place the development profile at `apps/desktop/src-tauri/embedded.provisionprofile` and build with `--config src-tauri/tauri.cloudkit.conf.json`.
 5. Push one profile in the CloudKit development environment, then deploy the `PostGateProfile` schema to production in CloudKit Console before publishing.
-
-The first desktop launch after the bundle ID change migrates the `com.postgate.app` application data directory to `com.alkinum.postgate` when the new directory is empty, preserving the database, CA key, captured bodies, plugins, and sync configuration.
-
 ## Release Procedure
 
 1. Ensure CI is green on `main`.

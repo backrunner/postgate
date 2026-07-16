@@ -88,8 +88,8 @@ reqwest = { version = "0.13.4", default-features = false, features = ["rustls", 
 block2 = "0.6.2"
 core-foundation-sys = "0.8.7"
 objc2 = { version = "0.6.4", features = ["exception"] }
-objc2-cloud-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "CKAsset", "CKContainer", "CKDatabase", "CKError", "CKRecord", "CKRecordID"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSObject", "NSString", "NSURL"] }
+objc2-cloud-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "CKAsset", "CKContainer", "CKDatabase", "CKDatabaseOperation", "CKError", "CKFetchRecordsOperation", "CKOperation", "CKRecord", "CKRecordID"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSOperation", "NSString", "NSURL", "NSValue"] }
 
 # JavaScript Runtime (embedded V8 via Deno Core)
 deno_core = "0.406"

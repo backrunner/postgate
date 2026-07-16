@@ -50,7 +50,6 @@ let updaterInitialized = false;
 const AUTO_CHECK_KEY = "postgate:autoCheckUpdates";
 const AUTO_DOWNLOAD_KEY = "postgate:autoDownloadUpdates";
 const UPDATE_CHANNEL_KEY = "postgate:updateChannel";
-const LEGACY_LAST_CHECKED_KEY = "postgate:lastUpdateCheck";
 
 function isUpdateChannel(value: string | null): value is UpdateChannel {
   return value === "stable" || value === "beta";
@@ -61,8 +60,7 @@ function lastCheckedKey(channel: UpdateChannel) {
 }
 
 function readLastChecked(channel: UpdateChannel): number | null {
-  const stored = localStorage.getItem(lastCheckedKey(channel))
-    ?? (channel === "stable" ? localStorage.getItem(LEGACY_LAST_CHECKED_KEY) : null);
+  const stored = localStorage.getItem(lastCheckedKey(channel));
   const timestamp = Number(stored);
   return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
 }

@@ -298,9 +298,11 @@ pub async fn import_profile(
 pub async fn get_sync_status(state: State<'_, Arc<AppState>>) -> Result<SyncStatus> {
     let config = read_sync_config(&state).await?.unwrap_or_default();
     let local_path = sync_location(&state, &config)?;
-    let remote_available = sync_snapshot_exists(&config, &local_path)
-        .await
-        .unwrap_or(false);
+    let remote_available = if config.enabled {
+        sync_snapshot_exists(&config, &local_path).await?
+    } else {
+        false
+    };
 
     Ok(SyncStatus {
         config,
@@ -318,15 +320,13 @@ pub async fn save_sync_settings(
         validate_sync_provider_available(&settings)?;
     }
     validate_sync_settings(&settings)?;
-    write_sync_config(&state, &settings).await?;
     let local_path = sync_location(&state, &settings)?;
     let remote_available = if settings.enabled {
-        sync_snapshot_exists(&settings, &local_path)
-            .await
-            .unwrap_or(false)
+        sync_snapshot_exists(&settings, &local_path).await?
     } else {
         false
     };
+    write_sync_config(&state, &settings).await?;
 
     Ok(SyncStatus {
         config: settings,
@@ -454,53 +454,56 @@ async fn apply_snapshot(
     let db = state.get_database().await?;
     let profile_options = &options.profile_options;
 
-    if profile_options.include_rules {
-        let restored_groups = snapshot
-            .rules
-            .iter()
-            .map(RuleGroupBackup::to_rule_group)
-            .collect::<Result<Vec<_>>>()?;
+    let restored_groups = if profile_options.include_rules {
+        Some(
+            snapshot
+                .rules
+                .iter()
+                .map(RuleGroupBackup::to_rule_group)
+                .collect::<Result<Vec<_>>>()?,
+        )
+    } else {
+        None
+    };
+    if profile_options.include_values && !options.replace_existing {
+        state.ensure_values_loaded().await?;
+    }
+    let replay = profile_options
+        .include_replay
+        .then_some(snapshot.replay.as_ref())
+        .flatten();
 
+    db.restore_profile_data(
+        restored_groups.as_deref(),
+        profile_options
+            .include_values
+            .then_some(snapshot.values.as_slice()),
+        replay.map(|value| value.collections.as_slice()),
+        replay.map(|value| value.saved_requests.as_slice()),
+        options.replace_existing,
+    )
+    .await?;
+
+    if let Some(restored_groups) = restored_groups {
         if options.replace_existing {
-            db.clear_rule_groups().await?;
             for group in state.rule_engine.get_all_groups() {
                 state.rule_engine.remove_group(&group.id);
             }
         }
-
         for group in restored_groups {
-            db.save_rule_group(&group).await?;
             state.rule_engine.upsert_group(group);
         }
-
         crate::rule_events::notify_rule_groups_changed(state).await;
     }
 
     if profile_options.include_values {
         if options.replace_existing {
-            db.clear_values().await?;
             state.values_store.clear();
-        } else {
-            state.ensure_values_loaded().await?;
         }
-
         for value in &snapshot.values {
-            let saved = db.upsert_value(&value.name, &value.content).await?;
-            state.values_store.insert(saved.name, saved.content);
-        }
-    }
-
-    if profile_options.include_replay {
-        if let Some(replay) = &snapshot.replay {
-            if options.replace_existing {
-                db.clear_replay_data().await?;
-            }
-            for collection in &replay.collections {
-                db.save_collection(collection).await?;
-            }
-            for request in &replay.saved_requests {
-                db.save_request(request).await?;
-            }
+            state
+                .values_store
+                .insert(value.name.clone(), value.content.clone());
         }
     }
 
@@ -579,14 +582,8 @@ async fn read_snapshot(path: &Path) -> Result<ProfileSnapshot> {
 }
 
 async fn write_snapshot(path: &Path, snapshot: &ProfileSnapshot) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
     let content = serde_json::to_string_pretty(snapshot)?;
-    tokio::fs::write(path, content).await?;
-    restrict_file_permissions(path).await?;
-    Ok(())
+    write_restricted_file_atomically(path, content.as_bytes()).await
 }
 
 fn snapshot_summary(snapshot: &ProfileSnapshot) -> ProfileSummary {
@@ -621,11 +618,33 @@ async fn read_sync_config(state: &Arc<AppState>) -> Result<Option<SyncSettings>>
 async fn write_sync_config(state: &Arc<AppState>, settings: &SyncSettings) -> Result<()> {
     validate_sync_settings(settings)?;
     let path = sync_config_path(state)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(&path, serde_json::to_string_pretty(settings)?).await?;
-    restrict_file_permissions(&path).await?;
+    let content = serde_json::to_vec_pretty(settings)?;
+    write_restricted_file_atomically(&path, &content).await
+}
+
+async fn write_restricted_file_atomically(path: &Path, content: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    tokio::fs::create_dir_all(parent).await?;
+    let temporary = tempfile::Builder::new()
+        .prefix(".postgate-write-")
+        .tempfile_in(parent)?
+        .into_temp_path();
+    tokio::fs::write(&temporary, content).await?;
+    restrict_file_permissions(&temporary).await?;
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .await?
+        .sync_all()
+        .await?;
+    temporary.persist(path).map_err(|error| error.error)?;
+
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
+
     Ok(())
 }
 
@@ -1080,22 +1099,6 @@ mod tests {
     }
 
     #[test]
-    fn existing_sync_settings_deserialize_without_a_cloudkit_change_tag() {
-        let settings: SyncSettings = serde_json::from_value(serde_json::json!({
-            "enabled": true,
-            "provider": "icloud",
-            "remotePath": null,
-            "webdav": null,
-            "lastSyncedAt": 123
-        }))
-        .expect("legacy sync settings");
-
-        assert_eq!(settings.provider, SyncProvider::Icloud);
-        assert_eq!(settings.cloudkit_change_tag, None);
-        assert_eq!(settings.last_synced_at, Some(123));
-    }
-
-    #[test]
     fn cloudkit_is_the_default_sync_provider() {
         let value = serde_json::to_value(SyncSettings::default()).expect("sync settings");
         assert_eq!(value["provider"], "cloudkit");
@@ -1116,6 +1119,41 @@ mod tests {
         });
 
         assert!(validate_snapshot(&snapshot).is_err());
+    }
+
+    #[tokio::test]
+    async fn restricted_writes_atomically_replace_existing_files() {
+        let root = tempfile::tempdir().expect("temp directory");
+        let path = root.path().join("sync-config.json");
+        std::fs::write(&path, b"old").expect("existing file");
+
+        write_restricted_file_atomically(&path, b"new")
+            .await
+            .expect("atomic write");
+
+        assert_eq!(std::fs::read(&path).expect("written file"), b"new");
+        assert!(root
+            .path()
+            .read_dir()
+            .expect("directory")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".postgate-write-")));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
     #[cfg(not(target_os = "macos"))]

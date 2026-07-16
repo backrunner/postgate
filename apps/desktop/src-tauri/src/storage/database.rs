@@ -337,6 +337,157 @@ impl Database {
         Ok(())
     }
 
+    /// Restore profile-owned data as one atomic SQLite transaction.
+    pub async fn restore_profile_data(
+        &self,
+        rule_groups: Option<&[RuleGroup]>,
+        values: Option<&[crate::values::ValueEntry]>,
+        collections: Option<&[Collection]>,
+        saved_requests: Option<&[SavedRequest]>,
+        replace_existing: bool,
+    ) -> Result<()> {
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            PostGateError::Storage(format!("Failed to start profile restore: {error}"))
+        })?;
+
+        if let Some(rule_groups) = rule_groups {
+            if replace_existing {
+                sqlx::query("DELETE FROM rule_groups")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| {
+                        PostGateError::Storage(format!("Failed to clear rule groups: {error}"))
+                    })?;
+            }
+            for group in rule_groups {
+                sqlx::query(
+                    r#"
+                    INSERT OR REPLACE INTO rule_groups
+                        (id, name, folder, enabled, priority, raw_content, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(&group.id)
+                .bind(&group.name)
+                .bind(&group.folder)
+                .bind(group.enabled as i32)
+                .bind(group.priority)
+                .bind(&group.raw_content)
+                .bind(group.created_at)
+                .bind(group.updated_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    PostGateError::Storage(format!("Failed to restore rule group: {error}"))
+                })?;
+            }
+        }
+
+        if let Some(values) = values {
+            if replace_existing {
+                sqlx::query("DELETE FROM values_store")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| {
+                        PostGateError::Storage(format!("Failed to clear values: {error}"))
+                    })?;
+            }
+            for value in values {
+                sqlx::query(
+                    r#"
+                    INSERT OR REPLACE INTO values_store
+                        (name, content, created_at, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    "#,
+                )
+                .bind(&value.name)
+                .bind(&value.content)
+                .bind(value.created_at)
+                .bind(value.updated_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    PostGateError::Storage(format!("Failed to restore value: {error}"))
+                })?;
+            }
+        }
+
+        if let (Some(collections), Some(saved_requests)) = (collections, saved_requests) {
+            if replace_existing {
+                sqlx::query("DELETE FROM request_history")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| {
+                        PostGateError::Storage(format!("Failed to clear request history: {error}"))
+                    })?;
+                sqlx::query("DELETE FROM saved_requests")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| {
+                        PostGateError::Storage(format!("Failed to clear saved requests: {error}"))
+                    })?;
+                sqlx::query("DELETE FROM collections")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| {
+                        PostGateError::Storage(format!("Failed to clear collections: {error}"))
+                    })?;
+            }
+            for collection in collections {
+                sqlx::query(
+                    "INSERT OR REPLACE INTO collections (id, name, parent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&collection.id)
+                .bind(&collection.name)
+                .bind(&collection.parent_id)
+                .bind(collection.created_at)
+                .bind(collection.updated_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    PostGateError::Storage(format!("Failed to restore collection: {error}"))
+                })?;
+            }
+            for request in saved_requests {
+                let headers = serde_json::to_string(&request.headers).map_err(|error| {
+                    PostGateError::Storage(format!("Failed to serialize request headers: {error}"))
+                })?;
+                let query_params =
+                    serde_json::to_string(&request.query_params).map_err(|error| {
+                        PostGateError::Storage(format!(
+                            "Failed to serialize query parameters: {error}"
+                        ))
+                    })?;
+                let body = serde_json::to_string(&request.body).map_err(|error| {
+                    PostGateError::Storage(format!("Failed to serialize request body: {error}"))
+                })?;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO saved_requests (id, name, collection_id, method, url, headers, query_params, body_type, body_content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'json', ?, ?, ?)",
+                )
+                .bind(&request.id)
+                .bind(&request.name)
+                .bind(&request.collection_id)
+                .bind(&request.method)
+                .bind(&request.url)
+                .bind(headers)
+                .bind(query_params)
+                .bind(body)
+                .bind(request.created_at)
+                .bind(request.updated_at)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    PostGateError::Storage(format!("Failed to restore saved request: {error}"))
+                })?;
+            }
+        }
+
+        transaction.commit().await.map_err(|error| {
+            PostGateError::Storage(format!("Failed to commit profile restore: {error}"))
+        })?;
+        Ok(())
+    }
+
     /// Delete collection and all children recursively
     pub fn delete_collection_recursive<'a>(
         &'a self,
@@ -648,5 +799,60 @@ impl From<ValueRow> for crate::values::ValueEntry {
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn rule_group(id: &str) -> RuleGroup {
+        RuleGroup {
+            id: id.into(),
+            name: id.into(),
+            folder: None,
+            enabled: true,
+            priority: 0,
+            rules: Vec::new(),
+            raw_content: String::new(),
+            created_at: 1,
+            updated_at: 1,
+            inline_values: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_restore_rolls_back_when_an_insert_fails() {
+        let root = tempfile::tempdir().expect("temp directory");
+        let database = Database::new(&root.path().join("postgate.db"))
+            .await
+            .expect("database");
+        database
+            .save_rule_group(&rule_group("existing"))
+            .await
+            .expect("seed rule group");
+        sqlx::query(
+            r#"
+            CREATE TRIGGER reject_profile_rule
+            BEFORE INSERT ON rule_groups
+            WHEN NEW.id = 'rejected'
+            BEGIN
+                SELECT RAISE(FAIL, 'injected restore failure');
+            END
+            "#,
+        )
+        .execute(database.pool())
+        .await
+        .expect("failure trigger");
+
+        let result = database
+            .restore_profile_data(Some(&[rule_group("rejected")]), None, None, None, true)
+            .await;
+
+        assert!(result.is_err());
+        let groups = database.get_rule_groups().await.expect("rule groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, "existing");
     }
 }

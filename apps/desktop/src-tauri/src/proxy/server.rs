@@ -280,16 +280,22 @@ mod tests {
     fn validates_listener_ports() {
         assert!(ProxyConfig::default().validate().is_ok());
 
-        let mut config = ProxyConfig::default();
-        config.port = 0;
+        let config = ProxyConfig {
+            port: 0,
+            ..ProxyConfig::default()
+        };
         assert!(config.validate().is_err());
 
-        let mut config = ProxyConfig::default();
-        config.debug_port = 0;
+        let config = ProxyConfig {
+            debug_port: 0,
+            ..ProxyConfig::default()
+        };
         assert!(config.validate().is_err());
 
-        let mut config = ProxyConfig::default();
-        config.quic_port = Some(0);
+        let config = ProxyConfig {
+            quic_port: Some(0),
+            ..ProxyConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 }

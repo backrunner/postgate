@@ -125,6 +125,7 @@ interface SyncStatus {
   localPath: string;
   remoteAvailable: boolean;
   remoteChangeTag?: string | null;
+  localDataAvailable: boolean;
 }
 
 interface SyncPullResult {
@@ -444,9 +445,11 @@ export function SettingsPage() {
       });
       setSyncSettings(normalizeSyncSettings(status.config));
 
+      const firstSync = !status.config.cloudkitChangeTag;
       const remoteChanged =
         (status.remoteChangeTag ?? null) !== (status.config.cloudkitChangeTag ?? null);
-      if (status.remoteAvailable && remoteChanged) {
+      const preserveLocalData = firstSync && status.localDataAvailable;
+      if (status.remoteAvailable && remoteChanged && !preserveLocalData) {
         const result = await invoke<SyncPullResult>("pull_sync_profile");
         await applyImportedSettings(result.importResult.appSettings);
         if (result.importResult.syncSettings) {
@@ -455,6 +458,16 @@ export function SettingsPage() {
         await refreshDataStores();
         setSyncStatusText("Synced from iCloud.");
       } else {
+        if (status.remoteAvailable && preserveLocalData) {
+          const adoptedSettings = {
+            ...status.config,
+            cloudkitChangeTag: status.remoteChangeTag,
+          };
+          await invoke<SyncStatus>("save_sync_settings", {
+            settings: adoptedSettings,
+          });
+          setSyncSettings(normalizeSyncSettings(adoptedSettings));
+        }
         await invoke<ProfileSummary>("push_sync_profile", {
           appSettings: currentAppSettings(),
         });

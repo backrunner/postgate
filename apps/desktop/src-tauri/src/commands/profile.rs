@@ -210,6 +210,7 @@ pub struct SyncStatus {
     pub local_path: String,
     pub remote_available: bool,
     pub remote_change_tag: Option<String>,
+    pub local_data_available: bool,
 }
 
 struct RemoteSyncState {
@@ -318,6 +319,7 @@ pub async fn get_sync_status(state: State<'_, Arc<AppState>>) -> Result<SyncStat
         local_path,
         remote_available: remote.available,
         remote_change_tag: remote.change_tag,
+        local_data_available: local_sync_data_available(&state).await?,
     })
 }
 
@@ -346,6 +348,7 @@ pub async fn save_sync_settings(
         local_path,
         remote_available: remote.available,
         remote_change_tag: remote.change_tag,
+        local_data_available: local_sync_data_available(&state).await?,
     })
 }
 
@@ -457,6 +460,19 @@ async fn build_snapshot(
         replay,
         certificate,
     })
+}
+
+async fn local_sync_data_available(state: &Arc<AppState>) -> Result<bool> {
+    let snapshot = build_snapshot(state, ProfileOptions::for_sync(), None, None).await?;
+    Ok(snapshot_has_sync_data(&snapshot))
+}
+
+fn snapshot_has_sync_data(snapshot: &ProfileSnapshot) -> bool {
+    !snapshot.rules.is_empty()
+        || !snapshot.values.is_empty()
+        || snapshot.replay.as_ref().is_some_and(|replay| {
+            !replay.collections.is_empty() || !replay.saved_requests.is_empty()
+        })
 }
 
 async fn apply_snapshot(
@@ -1125,6 +1141,20 @@ mod tests {
         assert!(options.include_app_settings);
         assert!(!options.include_certificate);
         assert!(!options.include_sync_settings);
+    }
+
+    #[test]
+    fn local_sync_data_ignores_empty_profiles_and_detects_values() {
+        let mut snapshot = empty_snapshot();
+        assert!(!snapshot_has_sync_data(&snapshot));
+
+        snapshot.values.push(ValueEntry {
+            name: "smoke".into(),
+            content: "ok".into(),
+            created_at: 0,
+            updated_at: 0,
+        });
+        assert!(snapshot_has_sync_data(&snapshot));
     }
 
     #[test]

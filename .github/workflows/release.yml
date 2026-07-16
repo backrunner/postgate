@@ -91,6 +91,26 @@ jobs:
             exit 1
           fi
 
+      - name: Validate macOS signing and notarization configuration
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        shell: bash
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_PROVISIONING_PROFILE; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required release secrets: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
       - name: Create or reuse draft release
         id: release
         uses: actions/github-script@v7
@@ -112,16 +132,39 @@ jobs:
               return;
             }
 
-            const release = existing ?? (await github.rest.repos.createRelease({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              tag_name: tag,
-              target_commitish: context.sha,
-              name: `PostGate ${tag}`,
-              draft: true,
-              prerelease: process.env.CHANNEL === 'beta',
-              generate_release_notes: true,
-            })).data;
+            let release;
+            if (existing) {
+              try {
+                await github.rest.git.updateRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${tag}`,
+                  sha: context.sha,
+                  force: true,
+                });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+              release = (await github.rest.repos.updateRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: existing.id,
+                target_commitish: context.sha,
+                name: `PostGate ${tag}`,
+                prerelease: process.env.CHANNEL === 'beta',
+              })).data;
+            } else {
+              release = (await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                target_commitish: context.sha,
+                name: `PostGate ${tag}`,
+                draft: true,
+                prerelease: process.env.CHANNEL === 'beta',
+                generate_release_notes: true,
+              })).data;
+            }
 
             core.setOutput('release_id', String(release.id));
 
@@ -177,14 +220,12 @@ jobs:
         run: node scripts/set-release-version.mjs "${{ needs.create-release.outputs.version }}"
 
       - name: Import Apple signing certificate
-        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
         uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ env.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Prepare CloudKit provisioning profile
-        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
         shell: bash
         run: |
           if [[ -z "$APPLE_PROVISIONING_PROFILE" ]]; then
@@ -200,24 +241,10 @@ jobs:
           environment="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.icloud-container-environment' "$profile_plist")"
           [[ "$application_id" == *.com.alkinum.postgate ]] || { echo "Provisioning profile App ID must end with .com.alkinum.postgate" >&2; exit 1; }
           [[ "$containers" == *iCloud.com.alkinum.postgate* ]] || { echo "Provisioning profile is missing iCloud.com.alkinum.postgate" >&2; exit 1; }
-          [[ "$services" == *CloudKit* ]] || { echo "Provisioning profile does not enable CloudKit" >&2; exit 1; }
+          [[ "$services" == *CloudKit* || "$services" == *\** ]] || { echo "Provisioning profile does not enable CloudKit" >&2; exit 1; }
           [[ "$environment" == Production ]] || { echo "Provisioning profile must use the Production CloudKit environment" >&2; exit 1; }
 
-      - name: Build and upload release assets (unsigned app)
-        if: env.APPLE_CERTIFICATE == ''
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: apps/desktop
-          releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: ${{ matrix.args }} --bundles ${{ matrix.bundles }} --features quic
-          retryAttempts: 3
-
       - name: Build and upload release assets (signed app)
-        if: env.APPLE_CERTIFICATE != ''
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -232,6 +259,31 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }} --config src-tauri/tauri.cloudkit.production.conf.json --bundles ${{ matrix.bundles }} --features quic
           retryAttempts: 3
+
+      - name: Validate signed and notarized app bundle
+        shell: bash
+        run: |
+          app="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/PostGate.app"
+          test -d "$app"
+          codesign --verify --deep --strict --verbose=4 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+          xcrun stapler validate "$app"
+
+      - name: Smoke test Apple Silicon app startup
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          app="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/PostGate.app"
+          log="$RUNNER_TEMP/postgate-startup.log"
+          HOME="$RUNNER_TEMP/postgate-home" RUST_BACKTRACE=1 "$app/Contents/MacOS/postgate" >"$log" 2>&1 &
+          pid=$!
+          sleep 8
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat "$log"
+            wait "$pid"
+          fi
+          kill "$pid"
+          wait "$pid" || true
 
   publish-release:
     permissions:

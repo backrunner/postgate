@@ -32,6 +32,6 @@ Run `pnpm --filter @postgate/docs deploy:check` to validate a deployment locally
 
 ## GitHub release downloads
 
-The landing page reads `https://api.github.com/repos/backrunner/postgate/releases/latest` in the browser and links directly to each asset's `browser_download_url`. This works for anonymous visitors only when the repository and release are public. The repository is currently private, so the download area will show its empty-release fallback until public releases are accessible.
+The landing page reads `https://api.github.com/repos/backrunner/postgate/releases?per_page=20` in the browser, selects the newest published release that contains a supported installer, and links the download button directly to the asset's `browser_download_url`. This intentionally includes prereleases because the public beta channel may be the newest downloadable build even when no stable release exists.
 
-Do not add a GitHub token to the frontend or to a public Pages variable. If releases must remain private, downloads require an authenticated server-side design and are outside the current public documentation-site flow.
+Do not add a GitHub token to the frontend or to a public Worker variable. The repository and downloadable release assets must remain publicly readable for anonymous website downloads.

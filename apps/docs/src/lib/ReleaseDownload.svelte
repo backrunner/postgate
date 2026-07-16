@@ -2,9 +2,8 @@
   import { onMount } from 'svelte';
   import { FontAwesomeIcon } from '@fortawesome/svelte-fontawesome';
   import { faApple } from '@fortawesome/free-brands-svg-icons/faApple';
-  import { faGithub } from '@fortawesome/free-brands-svg-icons/faGithub';
   import { faWindows } from '@fortawesome/free-brands-svg-icons/faWindows';
-  import { Clock3, Download, LoaderCircle } from 'lucide-svelte';
+  import { Clock3, Download, ExternalLink, LoaderCircle } from 'lucide-svelte';
 
   interface ReleaseAsset {
     name: string;
@@ -17,6 +16,7 @@
     name: string;
     html_url: string;
     published_at: string;
+    prerelease: boolean;
     assets: ReleaseAsset[];
   }
 
@@ -28,42 +28,44 @@
   const messages = {
     en: {
       stable: 'Stable channel',
+      beta: 'Beta channel',
       latest: 'Latest release',
       checkingAria: 'Checking latest release',
       available: 'Available',
-      ready: 'Signed macOS builds are delivered directly through GitHub Releases.',
-      empty: 'The first signed macOS release is being prepared.',
-      error: 'We could not check GitHub right now. Open Releases to check manually.',
-      loading: 'Checking GitHub for the newest signed macOS build.',
-      notes: 'Release notes',
+      ready: 'Choose your Mac architecture to download the release package directly.',
+      empty: 'No compatible macOS release package is available yet.',
+      error: 'We could not check release packages right now.',
+      loading: 'Checking GitHub for the newest macOS release package.',
+      notes: 'View changelog',
       platform: 'Platform',
       architecture: 'Architecture',
       availability: 'Availability',
       platformAria: 'Choose a download platform',
       macBuildsAria: 'Choose a macOS architecture',
       download: 'Download',
-      viewReleases: 'View releases',
+      unavailable: 'Package unavailable',
       appleSilicon: 'Apple silicon',
       comingSoon: 'Coming soon',
       windowsPreview: 'Windows builds are in preparation.'
     },
     zh: {
       stable: '稳定版',
+      beta: '测试版',
       latest: '最新版本',
       checkingAria: '正在检查最新版本',
       available: '可下载',
-      ready: '已签名的 macOS 安装包会直接通过 GitHub Releases 发布。',
-      empty: '首个已签名的 macOS 版本正在准备中。',
-      error: '暂时无法访问 GitHub，请前往 Releases 页面重试。',
-      loading: '正在从 GitHub 获取最新 macOS 版本。',
-      notes: '版本说明',
+      ready: '选择 Mac 架构后可直接下载对应的 Release 安装包。',
+      empty: '暂时没有可用的 macOS Release 安装包。',
+      error: '暂时无法检查 Release 安装包。',
+      loading: '正在检查最新的 macOS Release 安装包。',
+      notes: '查看更新记录',
       platform: '平台',
       architecture: '架构',
       availability: '可用状态',
       platformAria: '选择下载平台',
       macBuildsAria: '选择 macOS 架构',
       download: '下载',
-      viewReleases: '查看 Releases',
+      unavailable: '暂无安装包',
       appleSilicon: 'Apple 芯片',
       comingSoon: '敬请期待',
       windowsPreview: 'Windows 版本正在准备中。'
@@ -77,29 +79,28 @@
   let selectedPlatform: Platform = 'macos';
   let selectedMac: MacChannel = 'mac-arm';
 
+  $: channelLabel = release?.prerelease ? copy.beta : copy.stable;
   $: asset = release ? selectAsset(release.assets, selectedMac) : undefined;
-  $: releaseHref = release?.html_url ?? 'https://github.com/backrunner/postgate/releases';
-  $: downloadHref = asset?.browser_download_url ?? releaseHref;
+  $: downloadHref = asset?.browser_download_url;
 
   onMount(() => {
     const platform = navigator.platform.toLowerCase();
     if (platform.includes('win')) selectedPlatform = 'windows';
-    void loadLatestRelease();
+    void loadAvailableRelease();
   });
 
-  async function loadLatestRelease() {
+  async function loadAvailableRelease() {
     state = 'loading';
     try {
-      const response = await fetch('https://api.github.com/repos/backrunner/postgate/releases/latest', {
+      const response = await fetch('https://api.github.com/repos/backrunner/postgate/releases?per_page=20', {
         headers: { Accept: 'application/vnd.github+json' }
       });
-      if (response.status === 404) {
-        state = 'empty';
-        return;
-      }
       if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
-      release = await response.json() as GithubRelease;
-      state = 'ready';
+      const releases = await response.json() as GithubRelease[];
+      release = releases.find((candidate) =>
+        selectAsset(candidate.assets, 'mac-arm') || selectAsset(candidate.assets, 'mac-intel')
+      ) ?? null;
+      state = release ? 'ready' : 'empty';
     } catch {
       state = 'error';
     }
@@ -129,7 +130,7 @@
 <div class="release-tool" data-state={state}>
   <div class="release-heading">
     <div>
-      <p class="eyebrow">{copy.stable}</p>
+      <p class="eyebrow">{channelLabel}</p>
       <div class="version-line">
         <h2>{release?.tag_name ?? copy.latest}</h2>
         {#if state === 'loading'}
@@ -150,10 +151,12 @@
         {/if}
       </p>
     </div>
-    <a class="github-link" href={releaseHref} target="_blank" rel="noreferrer">
-      <FontAwesomeIcon icon={faGithub} fixedWidth style="width: 17px; height: 17px;" />
-      {copy.notes}
-    </a>
+    {#if release}
+      <a class="changelog-link" href={release.html_url} target="_blank" rel="noreferrer">
+        {copy.notes}
+        <ExternalLink size={13} />
+      </a>
+    {/if}
   </div>
 
   <div class="release-actions">
@@ -211,8 +214,8 @@
         <Clock3 size={18} />
         <strong>{copy.comingSoon}</strong>
       </div>
-    {:else if asset}
-      <a class="download-button asset-download" href={downloadHref} target="_blank" rel="noreferrer">
+    {:else if asset && downloadHref}
+      <a class="download-button asset-download" href={downloadHref} download={asset.name}>
         <Download size={18} />
         <span>
           <strong>{copy.download}</strong>
@@ -220,10 +223,10 @@
         </span>
       </a>
     {:else}
-      <a class="download-button releases-only" href={releaseHref} target="_blank" rel="noreferrer" aria-label={copy.viewReleases}>
-        <FontAwesomeIcon icon={faGithub} fixedWidth style="width: 18px; height: 18px;" />
-        <strong>{copy.viewReleases}</strong>
-      </a>
+      <div class="download-button unavailable" role="status">
+        <Clock3 size={18} />
+        <strong>{copy.unavailable}</strong>
+      </div>
     {/if}
   </div>
 </div>
@@ -243,7 +246,7 @@
   .release-heading,
   .release-actions,
   .version-line,
-  .github-link,
+  .changelog-link,
   .download-button,
   .platform-switch button,
   .architecture-switch button,
@@ -298,11 +301,17 @@
     font-size: .88rem;
   }
 
-  .github-link {
-    gap: .45rem;
-    color: var(--pg-link);
-    font-size: .84rem;
+  .changelog-link {
+    align-self: flex-start;
+    gap: .3rem;
+    color: var(--pg-faint);
+    font-size: .74rem;
     text-decoration: none;
+    transition: color 160ms ease, transform 100ms ease-out;
+  }
+
+  .changelog-link:hover {
+    color: var(--pg-muted);
   }
 
   .release-actions {
@@ -362,7 +371,7 @@
   .platform-switch button:active,
   .architecture-switch button:active,
   .download-button:not(.unavailable):active,
-  .github-link:active {
+  .changelog-link:active {
     transform: scale(.98);
   }
 
@@ -427,16 +436,6 @@
     cursor: default;
   }
 
-  .download-button.releases-only {
-    border: 1px solid var(--pg-line);
-    background: transparent;
-    color: var(--pg-ink);
-  }
-
-  .download-button.releases-only:hover {
-    background: var(--pg-surface);
-  }
-
   .download-button small {
     max-width: 11rem;
     color: color-mix(in srgb, var(--pg-bg) 68%, transparent);
@@ -465,7 +464,7 @@
       width: auto;
     }
 
-    .github-link {
+    .changelog-link {
       align-self: flex-start;
     }
   }
@@ -487,7 +486,7 @@
     .platform-switch button,
     .architecture-switch button,
     .download-button,
-    .github-link { transition: none; }
+    .changelog-link { transition: none; }
   }
 
   @media (prefers-reduced-transparency: reduce) {

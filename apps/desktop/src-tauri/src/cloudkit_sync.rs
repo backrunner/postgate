@@ -749,6 +749,12 @@ impl NativeError {
                 "The current iCloud account cannot access the PostGate CloudKit container".into(),
             );
         }
+        if self.has_cloudkit_code(CKErrorCode::ServerRejectedRequest) {
+            return PostGateError::InvalidState(
+                "CloudKit rejected the profile request; verify that the Production schema contains PostGateProfile.payload as an Asset field"
+                    .into(),
+            );
+        }
 
         match self {
             Self::Conflict(message) | Self::UnknownWriteOutcome(message) => {
@@ -835,6 +841,15 @@ mod tests {
     fn cloudkit_account_errors_have_actionable_messages() {
         let error = cloudkit_error("CKErrorDomain", CKErrorCode::NotAuthenticated).into_postgate();
         assert!(error.to_string().contains("No iCloud account"));
+    }
+
+    #[test]
+    fn rejected_requests_point_to_the_required_production_schema() {
+        let error =
+            cloudkit_error("CKErrorDomain", CKErrorCode::ServerRejectedRequest).into_postgate();
+        let message = error.to_string();
+        assert!(message.contains("Production schema"));
+        assert!(message.contains("PostGateProfile.payload"));
     }
 
     #[test]

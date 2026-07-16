@@ -34,7 +34,9 @@ Signed macOS releases require the provisioning profile so the CloudKit entitleme
 2. Register the iCloud container `iCloud.com.alkinum.postgate`, enable CloudKit, and assign it to the App ID.
 3. Create development and Developer ID provisioning profiles that include that container.
 4. For a local signed bundle, place the development profile at `apps/desktop/src-tauri/embedded.provisionprofile` and build with `--config src-tauri/tauri.cloudkit.conf.json`.
-5. Push one profile in the CloudKit development environment, then deploy the `PostGateProfile` schema to production in CloudKit Console before publishing.
+5. Validate and import `apps/desktop/src-tauri/CloudKit.schema.ckdb` into the Development environment with `cktool`, then deploy its schema changes to Production before publishing.
+6. Export both environments with `cktool` and verify that `PostGateProfile` contains an Asset field named `payload`.
+
 ## Release Procedure
 
 1. Ensure CI is green on `main`.

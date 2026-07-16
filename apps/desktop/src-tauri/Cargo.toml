@@ -1,6 +1,6 @@
 [package]
 name = "postgate"
-version = "0.2.0-beta.2"
+version = "0.2.0-beta.3"
 description = "A Tauri 2.0 based MITM proxy tool for local frontend development"
 authors = ["PostGate Team"]
 edition = "2021"

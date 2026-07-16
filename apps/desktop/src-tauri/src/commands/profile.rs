@@ -209,6 +209,12 @@ pub struct SyncStatus {
     pub config: SyncSettings,
     pub local_path: String,
     pub remote_available: bool,
+    pub remote_change_tag: Option<String>,
+}
+
+struct RemoteSyncState {
+    available: bool,
+    change_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,16 +304,20 @@ pub async fn import_profile(
 pub async fn get_sync_status(state: State<'_, Arc<AppState>>) -> Result<SyncStatus> {
     let config = read_sync_config(&state).await?.unwrap_or_default();
     let local_path = sync_location(&state, &config)?;
-    let remote_available = if config.enabled {
-        sync_snapshot_exists(&config, &local_path).await?
+    let remote = if config.enabled {
+        sync_remote_state(&config, &local_path).await?
     } else {
-        false
+        RemoteSyncState {
+            available: false,
+            change_tag: None,
+        }
     };
 
     Ok(SyncStatus {
         config,
         local_path,
-        remote_available,
+        remote_available: remote.available,
+        remote_change_tag: remote.change_tag,
     })
 }
 
@@ -321,17 +331,21 @@ pub async fn save_sync_settings(
     }
     validate_sync_settings(&settings)?;
     let local_path = sync_location(&state, &settings)?;
-    let remote_available = if settings.enabled {
-        sync_snapshot_exists(&settings, &local_path).await?
+    let remote = if settings.enabled {
+        sync_remote_state(&settings, &local_path).await?
     } else {
-        false
+        RemoteSyncState {
+            available: false,
+            change_tag: None,
+        }
     };
     write_sync_config(&state, &settings).await?;
 
     Ok(SyncStatus {
         config: settings,
         local_path,
-        remote_available,
+        remote_available: remote.available,
+        remote_change_tag: remote.change_tag,
     })
 }
 
@@ -733,10 +747,19 @@ async fn restrict_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn sync_snapshot_exists(settings: &SyncSettings, location: &str) -> Result<bool> {
+async fn sync_remote_state(settings: &SyncSettings, location: &str) -> Result<RemoteSyncState> {
     match settings.provider {
-        SyncProvider::Cloudkit => cloudkit_snapshot_exists().await,
-        SyncProvider::Icloud => Ok(Path::new(location).exists()),
+        SyncProvider::Cloudkit => {
+            let change_tag = cloudkit_snapshot_change_tag().await?;
+            Ok(RemoteSyncState {
+                available: change_tag.is_some(),
+                change_tag,
+            })
+        }
+        SyncProvider::Icloud => Ok(RemoteSyncState {
+            available: Path::new(location).exists(),
+            change_tag: None,
+        }),
         SyncProvider::Webdav => {
             let response = webdav_request(settings, Method::HEAD, location)?
                 .send()
@@ -744,9 +767,15 @@ async fn sync_snapshot_exists(settings: &SyncSettings, location: &str) -> Result
                 .map_err(|e| PostGateError::Storage(format!("WebDAV check failed: {}", e)))?;
 
             if response.status().is_success() {
-                Ok(true)
+                Ok(RemoteSyncState {
+                    available: true,
+                    change_tag: None,
+                })
             } else if response.status().as_u16() == 404 {
-                Ok(false)
+                Ok(RemoteSyncState {
+                    available: false,
+                    change_tag: None,
+                })
             } else {
                 Err(PostGateError::Storage(format!(
                     "WebDAV check failed with status {}",
@@ -836,10 +865,10 @@ fn cloudkit_location() -> &'static str {
     }
 }
 
-async fn cloudkit_snapshot_exists() -> Result<bool> {
+async fn cloudkit_snapshot_change_tag() -> Result<Option<String>> {
     #[cfg(target_os = "macos")]
     {
-        crate::cloudkit_sync::exists().await
+        crate::cloudkit_sync::change_tag().await
     }
     #[cfg(not(target_os = "macos"))]
     {

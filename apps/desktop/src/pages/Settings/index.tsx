@@ -14,19 +14,14 @@ import {
   Bug,
   FileDown,
   FileUp,
-  FolderSync,
-  HardDriveDownload,
   HardDriveUpload,
   ChevronDown,
   Sun,
   Moon,
   Monitor,
-  UploadCloud,
-  DownloadCloud,
   Clock3
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -129,6 +124,7 @@ interface SyncStatus {
   config: SyncSettings;
   localPath: string;
   remoteAvailable: boolean;
+  remoteChangeTag?: string | null;
 }
 
 interface SyncPullResult {
@@ -167,12 +163,6 @@ const defaultSyncSettings: SyncSettings = {
   },
   cloudkitChangeTag: null,
   lastSyncedAt: null,
-};
-
-const syncProviderLabels: Record<SyncProvider, string> = {
-  cloudkit: "CloudKit",
-  icloud: "iCloud Drive",
-  webdav: "WebDAV",
 };
 
 export function SettingsPage() {
@@ -215,11 +205,9 @@ export function SettingsPage() {
   const [profileSummary, setProfileSummary] = useState<ProfileSummary | null>(null);
   const [profileBusy, setProfileBusy] = useState<"export" | "import" | "whistle" | null>(null);
   const [syncSettings, setSyncSettings] = useState<SyncSettings>(defaultSyncSettings);
-  const [syncPath, setSyncPath] = useState<string | null>(null);
-  const [syncRemoteAvailable, setSyncRemoteAvailable] = useState(false);
   const [syncStatusText, setSyncStatusText] = useState<string | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const [syncBusy, setSyncBusy] = useState<"save" | "push" | "pull" | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
   const [runtimeCapabilities, setRuntimeCapabilities] = useState<RuntimeCapabilities | null>(null);
 
   useEffect(() => {
@@ -290,8 +278,6 @@ export function SettingsPage() {
       if (!isCurrent()) return;
       const normalized = normalizeSyncSettings(status.config);
       setSyncSettings(normalized);
-      setSyncPath(normalized.provider === status.config.provider ? status.localPath : null);
-      setSyncRemoteAvailable(status.remoteAvailable);
     } catch (e) {
       if (!isCurrent()) return;
       setSyncError(String(e));
@@ -442,61 +428,44 @@ export function SettingsPage() {
     }
   };
 
-  const handleSaveSyncSettings = async () => {
-    setSyncBusy("save");
+  const handleICloudSync = async () => {
+    setSyncBusy(true);
     setSyncError(null);
     setSyncStatusText(null);
     try {
+      const nextSettings: SyncSettings = {
+        ...syncSettings,
+        enabled: true,
+        provider: "cloudkit",
+        remotePath: null,
+      };
       const status = await invoke<SyncStatus>("save_sync_settings", {
-        settings: syncSettings,
+        settings: nextSettings,
       });
       setSyncSettings(normalizeSyncSettings(status.config));
-      setSyncPath(status.localPath);
-      setSyncRemoteAvailable(status.remoteAvailable);
-      setSyncStatusText("Sync settings saved.");
-    } catch (e) {
-      setSyncError(String(e));
-    } finally {
-      setSyncBusy(null);
-    }
-  };
 
-  const handlePushSync = async () => {
-    setSyncBusy("push");
-    setSyncError(null);
-    setSyncStatusText(null);
-    try {
-      await invoke<SyncStatus>("save_sync_settings", { settings: syncSettings });
-      const summary = await invoke<ProfileSummary>("push_sync_profile", {
-        appSettings: currentAppSettings(),
-      });
-      await loadSyncStatus();
-      setSyncStatusText(`Pushed ${summary.ruleGroups} rule groups and ${summary.values} values.`);
-    } catch (e) {
-      setSyncError(String(e));
-    } finally {
-      setSyncBusy(null);
-    }
-  };
-
-  const handlePullSync = async () => {
-    setSyncBusy("pull");
-    setSyncError(null);
-    setSyncStatusText(null);
-    try {
-      await invoke<SyncStatus>("save_sync_settings", { settings: syncSettings });
-      const result = await invoke<SyncPullResult>("pull_sync_profile");
-      await applyImportedSettings(result.importResult.appSettings);
-      if (result.importResult.syncSettings) {
-        setSyncSettings(normalizeSyncSettings(result.importResult.syncSettings));
+      const remoteChanged =
+        (status.remoteChangeTag ?? null) !== (status.config.cloudkitChangeTag ?? null);
+      if (status.remoteAvailable && remoteChanged) {
+        const result = await invoke<SyncPullResult>("pull_sync_profile");
+        await applyImportedSettings(result.importResult.appSettings);
+        if (result.importResult.syncSettings) {
+          setSyncSettings(normalizeSyncSettings(result.importResult.syncSettings));
+        }
+        await refreshDataStores();
+        setSyncStatusText("Synced from iCloud.");
+      } else {
+        await invoke<ProfileSummary>("push_sync_profile", {
+          appSettings: currentAppSettings(),
+        });
+        setSyncStatusText("Synced to iCloud.");
       }
-      await refreshDataStores();
+
       await loadSyncStatus();
-      setSyncStatusText(`Pulled ${result.importResult.summary.ruleGroups} rule groups from sync.`);
     } catch (e) {
       setSyncError(String(e));
     } finally {
-      setSyncBusy(null);
+      setSyncBusy(false);
     }
   };
 
@@ -544,6 +513,15 @@ export function SettingsPage() {
   };
 
   const proxyConfigLocked = ["starting", "running", "stopping"].includes(proxyStatus);
+  const iCloudSyncStatus = runtimeCapabilities?.cloudkitSync === false
+    ? "Unavailable"
+    : syncBusy
+      ? "Syncing"
+      : syncError
+        ? "Failed"
+        : syncSettings.lastSyncedAt
+          ? "Synced"
+          : "Not synced";
 
   return (
     <div className="flex h-full flex-col">
@@ -913,176 +891,45 @@ export function SettingsPage() {
           </Section>
 
           {/* Sync */}
-          <Section title="Settings Sync">
-            <div className="space-y-4">
-              <SettingRow
-                icon={<FolderSync className="h-4 w-4" />}
-                label="Enable Sync"
-                description="Sync rules, values, replay, and app settings without certificates or provider credentials"
-              >
-                <Switch
-                  checked={syncSettings.enabled}
-                  onCheckedChange={(enabled) => setSyncSettings((prev) => ({ ...prev, enabled }))}
-                />
-              </SettingRow>
-
-              <SettingRow
-                icon={<Globe className="h-4 w-4" />}
-                label="Provider"
-                description="CloudKit uses the signed app container; iCloud Drive and WebDAV use profile files"
-              >
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm" className="h-8 w-36 justify-between text-xs">
-                      {syncProviderLabels[syncSettings.provider]}
-                      <ChevronDown className="h-3.5 w-3.5 opacity-50" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-36">
-                    <DropdownMenuItem
-                      className="text-xs"
-                      onClick={() => setSyncSettings((prev) => ({ ...prev, provider: "cloudkit" }))}
-                      disabled={runtimeCapabilities?.cloudkitSync === false}
-                    >
-                      CloudKit
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="text-xs"
-                      onClick={() => setSyncSettings((prev) => ({ ...prev, provider: "icloud" }))}
-                      disabled={runtimeCapabilities?.icloudSync === false}
-                    >
-                      iCloud Drive
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="text-xs"
-                      onClick={() => setSyncSettings((prev) => ({ ...prev, provider: "webdav" }))}
-                    >
-                      WebDAV
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </SettingRow>
-
-              {syncSettings.provider === "cloudkit" ? (
-                <SettingRow
-                  icon={<Cloud className="h-4 w-4" />}
-                  label="CloudKit Container"
-                  description="Private database for the current macOS iCloud account"
-                >
-                  <span className="font-mono text-[11px] text-muted-foreground">
-                    iCloud.com.alkinum.postgate
-                  </span>
-                </SettingRow>
-              ) : syncSettings.provider === "icloud" ? (
-                <SettingRow
-                  icon={<HardDriveDownload className="h-4 w-4" />}
-                  label="iCloud Drive Folder"
-                  description="Leave empty to use Cloud Drive / Documents / PostGate"
-                >
-                  <Input
-                    value={syncSettings.remotePath ?? ""}
-                    onChange={(e) => setSyncSettings((prev) => ({ ...prev, remotePath: e.target.value || null }))}
-                    placeholder="Default iCloud path"
-                    className="h-8 w-72 text-xs"
-                  />
-                </SettingRow>
-              ) : (
-                <div className="space-y-3 rounded-md border bg-muted/20 p-3">
-                  <Input
-                    value={syncSettings.webdav?.endpoint ?? ""}
-                    onChange={(e) =>
-                      setSyncSettings((prev) => ({
-                        ...prev,
-                        webdav: { ...defaultSyncSettings.webdav!, ...prev.webdav, endpoint: e.target.value },
-                      }))
-                    }
-                    placeholder="https://dav.example.com/remote.php/dav/files/me"
-                    className="h-8 text-xs"
-                  />
-                  <div className="grid grid-cols-2 gap-2">
-                    <Input
-                      value={syncSettings.webdav?.username ?? ""}
-                      onChange={(e) =>
-                        setSyncSettings((prev) => ({
-                          ...prev,
-                          webdav: { ...defaultSyncSettings.webdav!, ...prev.webdav, username: e.target.value },
-                        }))
-                      }
-                      placeholder="Username"
-                      className="h-8 text-xs"
-                    />
-                    <Input
-                      type="password"
-                      value={syncSettings.webdav?.password ?? ""}
-                      onChange={(e) =>
-                        setSyncSettings((prev) => ({
-                          ...prev,
-                          webdav: { ...defaultSyncSettings.webdav!, ...prev.webdav, password: e.target.value },
-                        }))
-                      }
-                      placeholder="Password or app token"
-                      className="h-8 text-xs"
-                    />
+          <Section title="iCloud Sync">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted">
+                    <Cloud className="h-4 w-4 text-muted-foreground" />
                   </div>
-                  <Input
-                    value={syncSettings.remotePath ?? ""}
-                    onChange={(e) => setSyncSettings((prev) => ({ ...prev, remotePath: e.target.value || null }))}
-                    placeholder="Optional folder or file path, e.g. PostGate/postgate-profile.json"
-                    className="h-8 text-xs"
-                  />
+                  <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                    <Clock3 className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">
+                      {syncSettings.lastSyncedAt
+                        ? `Last sync ${formatTimestamp(syncSettings.lastSyncedAt)}`
+                        : "Not synced yet"}
+                    </span>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "h-5 shrink-0 text-[10px]",
+                        iCloudSyncStatus === "Synced" && "border-emerald-500/30 text-emerald-600 dark:text-emerald-400",
+                        iCloudSyncStatus === "Failed" && "border-red-500/30 text-red-600 dark:text-red-400",
+                      )}
+                    >
+                      {iCloudSyncStatus}
+                    </Badge>
+                  </div>
                 </div>
-              )}
-
-              <div className="flex items-center justify-between gap-4 rounded-md border bg-muted/20 p-3">
-                <div className="min-w-0 space-y-1">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <Clock3 className="h-3.5 w-3.5" />
-                    <span>{syncSettings.lastSyncedAt ? `Last sync ${formatTimestamp(syncSettings.lastSyncedAt)}` : "Not synced yet"}</span>
-                    {syncRemoteAvailable && <Badge variant="secondary" className="h-5 text-[10px]">Remote ready</Badge>}
-                  </div>
-                  {syncPath && (
-                    <p className="truncate font-mono text-[11px] text-muted-foreground">{syncPath}</p>
+                <Button
+                  size="sm"
+                  className="h-8 shrink-0 gap-1.5 text-xs"
+                  onClick={handleICloudSync}
+                  disabled={syncBusy || runtimeCapabilities?.cloudkitSync === false}
+                >
+                  {syncBusy ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
                   )}
-                </div>
-                <div className="flex shrink-0 gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-1.5 text-xs"
-                    onClick={handleSaveSyncSettings}
-                    disabled={syncBusy !== null}
-                  >
-                    {syncBusy === "save" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                    Save
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-1.5 text-xs"
-                    onClick={handlePullSync}
-                    disabled={syncBusy !== null || !syncSettings.enabled}
-                  >
-                    {syncBusy === "pull" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <DownloadCloud className="h-3.5 w-3.5" />
-                    )}
-                    Pull
-                  </Button>
-                  <Button
-                    size="sm"
-                    className="h-8 gap-1.5 text-xs"
-                    onClick={handlePushSync}
-                    disabled={syncBusy !== null || !syncSettings.enabled}
-                  >
-                    {syncBusy === "push" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <UploadCloud className="h-3.5 w-3.5" />
-                    )}
-                    Push
-                  </Button>
-                </div>
+                  Sync
+                </Button>
               </div>
 
               <StatusLine status={syncStatusText} error={syncError} />

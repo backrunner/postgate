@@ -65,9 +65,9 @@ pub fn is_available() -> bool {
         && current_executable_has_embedded_profile()
 }
 
-pub async fn exists() -> Result<bool> {
+pub async fn change_tag() -> Result<Option<String>> {
     ensure_available()?;
-    run_blocking(|| with_fetch_retries(fetch_exists_once)).await
+    run_blocking(|| with_fetch_retries(fetch_change_tag_once)).await
 }
 
 pub async fn pull() -> Result<RemoteProfile> {
@@ -206,7 +206,7 @@ where
 }
 
 #[allow(deprecated)]
-fn fetch_exists_once() -> std::result::Result<bool, NativeError> {
+fn fetch_change_tag_once() -> std::result::Result<Option<String>, NativeError> {
     autoreleasepool(|_| {
         let database = private_database()?;
         let record_id = record_id();
@@ -226,12 +226,19 @@ fn fetch_exists_once() -> std::result::Result<bool, NativeError> {
             move |record: *mut CKRecord, _record_id: *mut CKRecordID, error: *mut NSError| {
                 per_record_callback_seen.store(true, Ordering::Release);
                 let result = match native_error(error) {
-                    Some(error) if error.is_unknown_item() => Ok(false),
+                    Some(error) if error.is_unknown_item() => Ok(None),
                     Some(error) => Err(error),
                     None if record.is_null() => Err(NativeError::Bridge(
                         "CloudKit returned an empty record".into(),
                     )),
-                    None => Ok(true),
+                    None => unsafe { record.as_ref() }
+                        .and_then(|record| unsafe { record.recordChangeTag() })
+                        .map(|value| Some(value.to_string()))
+                        .ok_or_else(|| {
+                            NativeError::Bridge(
+                                "CloudKit profile metadata has no change tag".into(),
+                            )
+                        }),
                 };
                 let _ = per_record_sender.send(result);
             },

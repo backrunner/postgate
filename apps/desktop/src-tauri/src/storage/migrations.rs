@@ -9,6 +9,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS rule_groups (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                folder TEXT,
                 enabled INTEGER DEFAULT 1,
                 priority INTEGER DEFAULT 0,
                 raw_content TEXT NOT NULL,
@@ -20,6 +21,24 @@ impl Database {
         .execute(self.pool())
         .await
         .map_err(|e| PostGateError::Storage(format!("Migration failed: {}", e)))?;
+
+        let columns = sqlx::query("PRAGMA table_info(rule_groups)")
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| PostGateError::Storage(format!("Migration failed: {}", e)))?;
+        let has_folder = columns.iter().any(|column| {
+            use sqlx::Row;
+            matches!(
+                column.try_get::<String, _>("name"),
+                Ok(name) if name == "folder"
+            )
+        });
+        if !has_folder {
+            sqlx::query("ALTER TABLE rule_groups ADD COLUMN folder TEXT")
+                .execute(self.pool())
+                .await
+                .map_err(|e| PostGateError::Storage(format!("Migration failed: {}", e)))?;
+        }
 
         sqlx::query(
             r#"

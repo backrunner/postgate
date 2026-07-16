@@ -14,6 +14,11 @@ use std::path::PathBuf;
 pub struct RuleGroup {
     pub id: String,
     pub name: String,
+    /// Optional Whistle folder name. Whistle encodes folder markers as keys
+    /// prefixed with `\r`; keeping the folder separate preserves file names and
+    /// rule text exactly during import.
+    #[serde(default)]
+    pub folder: Option<String>,
     pub enabled: bool,
     pub priority: i32,
     pub rules: Vec<Rule>,

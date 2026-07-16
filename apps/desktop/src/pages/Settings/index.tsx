@@ -45,7 +45,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { cn } from "@/lib/utils";
-import { useRulesStore, type RuleGroup } from "@/stores/rules";
+import { useRulesStore } from "@/stores/rules";
 import { useValuesStore } from "@/stores/values";
 import { useReplayStore } from "@/stores/replay";
 import { useColumnsStore, type ColumnConfig } from "@/stores/columns";
@@ -118,6 +118,11 @@ interface ImportResult {
   summary: ProfileSummary;
   appSettings?: AppSettingsBackup | null;
   syncSettings?: SyncSettings | null;
+}
+
+interface WhistleImportResult {
+  groups: Array<{ name: string }>;
+  ruleCount: number;
 }
 
 interface SyncStatus {
@@ -421,14 +426,14 @@ export function SettingsPage() {
       });
       if (!selected || typeof selected !== "string") return;
 
-      const importedGroup = await invoke<RuleGroup>("import_whistle_rules", {
+      const result = await invoke<WhistleImportResult>("import_whistle_rules", {
         input: {
           path: selected,
         },
       });
       await loadRuleGroups();
       setProfileStatus(
-        `Imported ${importedGroup.rules.length} rules into "${importedGroup.name}".`,
+        `Imported ${result.ruleCount} rules across ${result.groups.length} rule ${result.groups.length === 1 ? "group" : "groups"}.`,
       );
     } catch (e) {
       setProfileError(String(e));

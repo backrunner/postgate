@@ -6,6 +6,7 @@ import { useDebugStore } from './debug';
 export interface RuleGroup {
   id: string;
   name: string;
+  folder?: string | null;
   enabled: boolean;
   priority: number;
   rules: Rule[];
@@ -117,6 +118,7 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     const group: RuleGroup = {
       id: crypto.randomUUID(),
       name,
+      folder: null,
       enabled: true,
       priority: 0,
       rules: [],

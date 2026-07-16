@@ -71,7 +71,14 @@ impl RuleEngine {
 
     /// Get all rule groups
     pub fn get_all_groups(&self) -> Vec<RuleGroup> {
-        self.groups.iter().map(|r| r.value().clone()).collect()
+        let mut groups: Vec<_> = self.groups.iter().map(|r| r.value().clone()).collect();
+        groups.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        groups
     }
 
     /// Toggle a rule group's enabled state
@@ -352,6 +359,7 @@ mod tests {
         RuleGroup {
             id: id.to_string(),
             name: "Test".to_string(),
+            folder: None,
             rules,
             enabled: true,
             priority: 0,

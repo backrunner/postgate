@@ -40,12 +40,13 @@ impl Database {
     pub async fn save_rule_group(&self, group: &RuleGroup) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT OR REPLACE INTO rule_groups (id, name, enabled, priority, raw_content, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO rule_groups (id, name, folder, enabled, priority, raw_content, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&group.id)
         .bind(&group.name)
+        .bind(&group.folder)
         .bind(group.enabled as i32)
         .bind(group.priority)
         .bind(&group.raw_content)
@@ -62,9 +63,9 @@ impl Database {
     pub async fn get_rule_groups(&self) -> Result<Vec<RuleGroup>> {
         let rows = sqlx::query_as::<_, RuleGroupRow>(
             r#"
-            SELECT id, name, enabled, priority, raw_content, created_at, updated_at
+            SELECT id, name, folder, enabled, priority, raw_content, created_at, updated_at
             FROM rule_groups
-            ORDER BY priority DESC, name ASC
+            ORDER BY priority ASC, name ASC
             "#,
         )
         .fetch_all(&self.pool)
@@ -80,6 +81,7 @@ impl Database {
                 RuleGroup {
                     id: row.id,
                     name: row.name,
+                    folder: row.folder,
                     enabled: row.enabled != 0,
                     priority: row.priority,
                     rules,
@@ -564,6 +566,7 @@ impl Database {
 struct RuleGroupRow {
     id: String,
     name: String,
+    folder: Option<String>,
     enabled: i32,
     priority: i32,
     raw_content: String,

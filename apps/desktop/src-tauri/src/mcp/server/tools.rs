@@ -127,6 +127,7 @@ impl PostGateMcpServer {
         let group = RuleGroup {
             id: input.id.unwrap_or_default(),
             name: input.name,
+            folder: existing.as_ref().and_then(|group| group.folder.clone()),
             enabled: input.enabled,
             priority: input.priority,
             rules: vec![],

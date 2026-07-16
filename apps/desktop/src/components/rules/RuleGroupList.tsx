@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { MoreVertical, Trash2, Edit, Power, PowerOff, Pencil, FileCode } from 'lucide-react';
+import { MoreVertical, Trash2, Edit, Power, PowerOff, Pencil, FileCode, FolderOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
@@ -51,8 +51,24 @@ export function RuleGroupList({ className, filter }: RuleGroupListProps) {
   // Filter groups
   const filteredGroups = useMemo(() => {
     if (!filter) return groups;
-    return groups.filter(g => g.name.toLowerCase().includes(filter.toLowerCase()));
+    const query = filter.toLowerCase();
+    return groups.filter((group) =>
+      group.name.toLowerCase().includes(query) || group.folder?.toLowerCase().includes(query)
+    );
   }, [groups, filter]);
+
+  const sections = useMemo(() => {
+    return filteredGroups.reduce<Array<{ folder: string | null; groups: RuleGroup[] }>>((result, group) => {
+      const folder = group.folder?.trim() || null;
+      const last = result[result.length - 1];
+      if (!last || last.folder !== folder) {
+        result.push({ folder, groups: [group] });
+      } else {
+        last.groups.push(group);
+      }
+      return result;
+    }, []);
+  }, [filteredGroups]);
   
   // Dialog states
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -185,43 +201,55 @@ export function RuleGroupList({ className, filter }: RuleGroupListProps) {
     <>
       <ScrollArea className={className}>
         <div className="space-y-0.5 p-2">
-          {filteredGroups.map((group) => (
-            <ContextMenu key={group.id}>
-              <ContextMenuTrigger asChild>
-                {renderGroupItem(group)}
-              </ContextMenuTrigger>
-              <ContextMenuContent>
-                <ContextMenuItem onClick={() => selectGroup(group.id)}>
-                  <Edit className="h-4 w-4 mr-2" />
-                  Edit
-                </ContextMenuItem>
-                <ContextMenuItem onClick={() => openRenameDialog(group)}>
-                  <Pencil className="h-4 w-4 mr-2" />
-                  Rename
-                </ContextMenuItem>
-                <ContextMenuItem onClick={() => toggleGroup(group.id, !group.enabled)}>
-                  {group.enabled ? (
-                    <>
-                      <PowerOff className="h-4 w-4 mr-2" />
-                      Disable
-                    </>
-                  ) : (
-                    <>
-                      <Power className="h-4 w-4 mr-2" />
-                      Enable
-                    </>
-                  )}
-                </ContextMenuItem>
-                <ContextMenuSeparator />
-                <ContextMenuItem
-                  className="text-destructive focus:text-destructive"
-                  onClick={() => openDeleteDialog(group)}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
-                </ContextMenuItem>
-              </ContextMenuContent>
-            </ContextMenu>
+          {sections.map((section, sectionIndex) => (
+            <div key={`${section.folder ?? 'ungrouped'}-${sectionIndex}`} className="space-y-0.5">
+              {section.folder && (
+                <div className="flex items-center gap-1.5 px-2 pb-1 pt-2 text-[10px] font-semibold uppercase text-muted-foreground first:pt-1">
+                  <FolderOpen className="h-3 w-3 shrink-0" />
+                  <span className="truncate" title={section.folder}>{section.folder}</span>
+                </div>
+              )}
+              <div className={cn('space-y-0.5', section.folder && 'pl-3')}>
+                {section.groups.map((group) => (
+                  <ContextMenu key={group.id}>
+                    <ContextMenuTrigger asChild>
+                      {renderGroupItem(group)}
+                    </ContextMenuTrigger>
+                    <ContextMenuContent>
+                      <ContextMenuItem onClick={() => selectGroup(group.id)}>
+                        <Edit className="h-4 w-4 mr-2" />
+                        Edit
+                      </ContextMenuItem>
+                      <ContextMenuItem onClick={() => openRenameDialog(group)}>
+                        <Pencil className="h-4 w-4 mr-2" />
+                        Rename
+                      </ContextMenuItem>
+                      <ContextMenuItem onClick={() => toggleGroup(group.id, !group.enabled)}>
+                        {group.enabled ? (
+                          <>
+                            <PowerOff className="h-4 w-4 mr-2" />
+                            Disable
+                          </>
+                        ) : (
+                          <>
+                            <Power className="h-4 w-4 mr-2" />
+                            Enable
+                          </>
+                        )}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        className="text-destructive focus:text-destructive"
+                        onClick={() => openDeleteDialog(group)}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Delete
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       </ScrollArea>

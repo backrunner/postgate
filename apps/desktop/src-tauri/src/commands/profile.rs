@@ -87,6 +87,8 @@ pub struct ProfileSnapshot {
 pub struct RuleGroupBackup {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub folder: Option<String>,
     pub enabled: bool,
     pub priority: i32,
     pub raw_content: String,
@@ -988,6 +990,7 @@ impl From<RuleGroup> for RuleGroupBackup {
         Self {
             id: group.id,
             name: group.name,
+            folder: group.folder,
             enabled: group.enabled,
             priority: group.priority,
             raw_content: group.raw_content,
@@ -1003,6 +1006,7 @@ impl RuleGroupBackup {
         Ok(RuleGroup {
             id: self.id.clone(),
             name: self.name.clone(),
+            folder: self.folder.clone(),
             enabled: self.enabled,
             priority: self.priority,
             rules,

@@ -72,6 +72,7 @@ export interface CapturedRequestEvent {
 export interface RuleGroup {
   id: string;
   name: string;
+  folder?: string | null;
   enabled: boolean;
   priority: number;
   rules: Rule[];

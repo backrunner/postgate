@@ -41,6 +41,7 @@ coverage/
 # OS
 Thumbs.db
 *.pem
+*.provisionprofile
 
 # Tauri
 *.app

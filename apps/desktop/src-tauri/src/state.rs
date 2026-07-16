@@ -12,7 +12,7 @@ use crate::storage::{CapturedRequestStorage, Database};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
@@ -70,20 +70,41 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(app_handle: AppHandle) -> Self {
+    pub fn new(app_handle: AppHandle) -> crate::error::Result<Self> {
         let (request_tx, _) = broadcast::channel(10000);
 
         // Get app data directory
         let data_dir = app_handle
             .path()
             .app_data_dir()
-            .unwrap_or_else(|_| PathBuf::from("."));
+            .map_err(|error| crate::error::PostGateError::Storage(error.to_string()))?;
+
+        if let Some(parent) = data_dir.parent() {
+            let legacy_data_dir = parent.join("com.postgate.app");
+            match migrate_legacy_data_dir(&legacy_data_dir, &data_dir)? {
+                DataMigration::Migrated => {
+                    tracing::info!(
+                        from = ?legacy_data_dir,
+                        to = ?data_dir,
+                        "Migrated PostGate data after bundle identifier change"
+                    );
+                }
+                DataMigration::DestinationNotEmpty => {
+                    tracing::warn!(
+                        legacy = ?legacy_data_dir,
+                        current = ?data_dir,
+                        "Skipped legacy PostGate data migration because the new data directory is not empty"
+                    );
+                }
+                DataMigration::NotNeeded => {}
+            }
+        }
 
         let plugins_dir = data_dir.join("plugins");
         let plugin_manager = PluginManager::new(plugins_dir.clone());
         let debug_session_manager = SessionManager::new();
 
-        Self {
+        Ok(Self {
             app_handle,
             ca: Arc::new(RwLock::new(None)),
             proxy: Arc::new(RwLock::new(None)),
@@ -108,7 +129,7 @@ impl AppState {
             stream_tx: OnceLock::new(),
             dropped_events: AtomicU64::new(0),
             last_drop_warn_ms: AtomicI64::new(0),
-        }
+        })
     }
 
     /// Get or initialize the database
@@ -541,6 +562,29 @@ impl AppState {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DataMigration {
+    NotNeeded,
+    Migrated,
+    DestinationNotEmpty,
+}
+
+fn migrate_legacy_data_dir(legacy: &Path, current: &Path) -> std::io::Result<DataMigration> {
+    if !legacy.is_dir() {
+        return Ok(DataMigration::NotNeeded);
+    }
+
+    if current.exists() {
+        if current.read_dir()?.next().transpose()?.is_some() {
+            return Ok(DataMigration::DestinationNotEmpty);
+        }
+        std::fs::remove_dir(current)?;
+    }
+
+    std::fs::rename(legacy, current)?;
+    Ok(DataMigration::Migrated)
+}
+
 struct BodyPersistJob {
     request_id: String,
     body: bytes::Bytes,
@@ -637,6 +681,69 @@ fn is_sensitive_header(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrates_legacy_bundle_data_directory() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let legacy = root.path().join("com.postgate.app");
+        let current = root.path().join("com.alkinum.postgate");
+        std::fs::create_dir_all(legacy.join("plugins")).expect("legacy directory");
+        std::fs::write(legacy.join("postgate.db"), b"database").expect("legacy database");
+
+        assert_eq!(
+            migrate_legacy_data_dir(&legacy, &current).expect("migration"),
+            DataMigration::Migrated
+        );
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read(current.join("postgate.db")).expect("migrated database"),
+            b"database"
+        );
+        assert!(current.join("plugins").is_dir());
+    }
+
+    #[test]
+    fn migration_replaces_an_empty_destination_directory() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let legacy = root.path().join("com.postgate.app");
+        let current = root.path().join("com.alkinum.postgate");
+        std::fs::create_dir_all(&legacy).expect("legacy directory");
+        std::fs::create_dir_all(&current).expect("current directory");
+        std::fs::write(legacy.join("ca.key"), b"key").expect("legacy key");
+
+        assert_eq!(
+            migrate_legacy_data_dir(&legacy, &current).expect("migration"),
+            DataMigration::Migrated
+        );
+        assert_eq!(
+            std::fs::read(current.join("ca.key")).expect("migrated key"),
+            b"key"
+        );
+    }
+
+    #[test]
+    fn migration_preserves_a_nonempty_destination_directory() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let legacy = root.path().join("com.postgate.app");
+        let current = root.path().join("com.alkinum.postgate");
+        std::fs::create_dir_all(&legacy).expect("legacy directory");
+        std::fs::create_dir_all(&current).expect("current directory");
+        std::fs::write(legacy.join("postgate.db"), b"legacy").expect("legacy database");
+        std::fs::write(current.join("postgate.db"), b"current").expect("current database");
+
+        assert_eq!(
+            migrate_legacy_data_dir(&legacy, &current).expect("migration"),
+            DataMigration::DestinationNotEmpty
+        );
+        assert_eq!(
+            std::fs::read(legacy.join("postgate.db")).expect("legacy database"),
+            b"legacy"
+        );
+        assert_eq!(
+            std::fs::read(current.join("postgate.db")).expect("current database"),
+            b"current"
+        );
+    }
 
     #[test]
     fn redacts_sensitive_headers_case_insensitively() {

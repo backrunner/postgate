@@ -5,6 +5,8 @@ mod api;
 mod app_tray;
 mod capture_index;
 mod cert;
+#[cfg(target_os = "macos")]
+mod cloudkit_sync;
 mod commands;
 mod debug;
 mod error;
@@ -52,7 +54,7 @@ pub fn run() {
             let app_handle = app.handle().clone();
 
             // Initialize app state
-            let state = Arc::new(AppState::new(app_handle.clone()));
+            let state = Arc::new(AppState::new(app_handle.clone())?);
 
             commands::rules::start_external_rule_file_watcher(state.clone());
 

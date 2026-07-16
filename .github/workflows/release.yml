@@ -131,6 +131,7 @@ jobs:
       contents: write
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
     strategy:
       fail-fast: false
       matrix:
@@ -182,6 +183,26 @@ jobs:
           p12-file-base64: ${{ env.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
+      - name: Prepare CloudKit provisioning profile
+        if: matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != ''
+        shell: bash
+        run: |
+          if [[ -z "$APPLE_PROVISIONING_PROFILE" ]]; then
+            echo "APPLE_PROVISIONING_PROFILE is required for signed CloudKit builds" >&2
+            exit 1
+          fi
+          node -e 'require("node:fs").writeFileSync("apps/desktop/src-tauri/embedded.provisionprofile", Buffer.from(process.env.APPLE_PROVISIONING_PROFILE, "base64"))'
+          profile_plist="$RUNNER_TEMP/postgate-provisioning-profile.plist"
+          security cms -D -i apps/desktop/src-tauri/embedded.provisionprofile > "$profile_plist"
+          application_id="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$profile_plist" 2>/dev/null || /usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$profile_plist")"
+          containers="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.icloud-container-identifiers' "$profile_plist")"
+          services="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.icloud-services' "$profile_plist")"
+          environment="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.icloud-container-environment' "$profile_plist")"
+          [[ "$application_id" == *.com.alkinum.postgate ]] || { echo "Provisioning profile App ID must end with .com.alkinum.postgate" >&2; exit 1; }
+          [[ "$containers" == *iCloud.com.alkinum.postgate* ]] || { echo "Provisioning profile is missing iCloud.com.alkinum.postgate" >&2; exit 1; }
+          [[ "$services" == *CloudKit* ]] || { echo "Provisioning profile does not enable CloudKit" >&2; exit 1; }
+          [[ "$environment" == Production ]] || { echo "Provisioning profile must use the Production CloudKit environment" >&2; exit 1; }
+
       - name: Build and upload release assets (unsigned app)
         if: env.APPLE_CERTIFICATE == ''
         uses: tauri-apps/tauri-action@v1
@@ -209,7 +230,7 @@ jobs:
         with:
           projectPath: apps/desktop
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: ${{ matrix.args }} --bundles ${{ matrix.bundles }} --features quic
+          args: ${{ matrix.args }} --config src-tauri/tauri.cloudkit.production.conf.json --bundles ${{ matrix.bundles }} --features quic
           retryAttempts: 3
 
   publish-release:

@@ -10,6 +10,7 @@ import {
   Server,
   Lock,
   Globe,
+  Cloud,
   Bug,
   FileDown,
   FileUp,
@@ -59,7 +60,7 @@ import {
   StatusLine,
 } from "./components";
 
-type SyncProvider = "icloud" | "webdav";
+type SyncProvider = "cloudkit" | "icloud" | "webdav";
 
 interface ProfileOptions {
   includeRules: boolean;
@@ -109,6 +110,7 @@ interface SyncSettings {
     username: string;
     password: string;
   } | null;
+  cloudkitChangeTag?: string | null;
   lastSyncedAt?: number | null;
 }
 
@@ -136,6 +138,7 @@ interface CertificateInfo {
 
 interface RuntimeCapabilities {
   quic: boolean;
+  cloudkitSync: boolean;
   icloudSync: boolean;
 }
 
@@ -150,14 +153,21 @@ const profileOptions: ProfileOptions = {
 
 const defaultSyncSettings: SyncSettings = {
   enabled: false,
-  provider: "icloud",
+  provider: "cloudkit",
   remotePath: null,
   webdav: {
     endpoint: "",
     username: "",
     password: "",
   },
+  cloudkitChangeTag: null,
   lastSyncedAt: null,
+};
+
+const syncProviderLabels: Record<SyncProvider, string> = {
+  cloudkit: "CloudKit",
+  icloud: "iCloud Drive",
+  webdav: "WebDAV",
 };
 
 export function SettingsPage() {
@@ -226,7 +236,7 @@ export function SettingsPage() {
       if (capabilitiesResult.status === "fulfilled") {
         setRuntimeCapabilities(capabilitiesResult.value);
       } else {
-        setRuntimeCapabilities({ quic: false, icloudSync: false });
+        setRuntimeCapabilities({ quic: false, cloudkitSync: false, icloudSync: false });
       }
     })();
 
@@ -263,8 +273,11 @@ export function SettingsPage() {
     if (runtimeCapabilities?.icloudSync === false && normalized.provider === "icloud") {
       normalized.provider = "webdav";
     }
+    if (runtimeCapabilities?.cloudkitSync === false && normalized.provider === "cloudkit") {
+      normalized.provider = "webdav";
+    }
     return normalized;
-  }, [runtimeCapabilities?.icloudSync]);
+  }, [runtimeCapabilities?.cloudkitSync, runtimeCapabilities?.icloudSync]);
 
   const loadSyncStatus = useCallback(async (isCurrent: () => boolean = () => true) => {
     try {
@@ -900,7 +913,7 @@ export function SettingsPage() {
               <SettingRow
                 icon={<FolderSync className="h-4 w-4" />}
                 label="Enable Sync"
-                description="Use the same profile snapshot format for manual transfer and cloud sync"
+                description="Sync rules, values, replay, and app settings without certificates or provider credentials"
               >
                 <Switch
                   checked={syncSettings.enabled}
@@ -911,22 +924,29 @@ export function SettingsPage() {
               <SettingRow
                 icon={<Globe className="h-4 w-4" />}
                 label="Provider"
-                description="iCloud writes a local Cloud Drive file; WebDAV uploads the same JSON profile"
+                description="CloudKit uses the signed app container; iCloud Drive and WebDAV use profile files"
               >
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm" className="h-8 w-32 justify-between text-xs">
-                      {syncSettings.provider === "icloud" ? "iCloud" : "WebDAV"}
+                    <Button variant="outline" size="sm" className="h-8 w-36 justify-between text-xs">
+                      {syncProviderLabels[syncSettings.provider]}
                       <ChevronDown className="h-3.5 w-3.5 opacity-50" />
                     </Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-32">
+                  <DropdownMenuContent align="end" className="w-36">
+                    <DropdownMenuItem
+                      className="text-xs"
+                      onClick={() => setSyncSettings((prev) => ({ ...prev, provider: "cloudkit" }))}
+                      disabled={runtimeCapabilities?.cloudkitSync === false}
+                    >
+                      CloudKit
+                    </DropdownMenuItem>
                     <DropdownMenuItem
                       className="text-xs"
                       onClick={() => setSyncSettings((prev) => ({ ...prev, provider: "icloud" }))}
                       disabled={runtimeCapabilities?.icloudSync === false}
                     >
-                      iCloud
+                      iCloud Drive
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       className="text-xs"
@@ -938,10 +958,20 @@ export function SettingsPage() {
                 </DropdownMenu>
               </SettingRow>
 
-              {syncSettings.provider === "icloud" ? (
+              {syncSettings.provider === "cloudkit" ? (
+                <SettingRow
+                  icon={<Cloud className="h-4 w-4" />}
+                  label="CloudKit Container"
+                  description="Private database for the current macOS iCloud account"
+                >
+                  <span className="font-mono text-[11px] text-muted-foreground">
+                    iCloud.com.alkinum.postgate
+                  </span>
+                </SettingRow>
+              ) : syncSettings.provider === "icloud" ? (
                 <SettingRow
                   icon={<HardDriveDownload className="h-4 w-4" />}
-                  label="iCloud Folder"
+                  label="iCloud Drive Folder"
                   description="Leave empty to use Cloud Drive / Documents / PostGate"
                 >
                   <Input

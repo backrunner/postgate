@@ -156,6 +156,8 @@ pub struct SyncSettings {
     #[serde(default)]
     pub webdav: Option<WebDavSettings>,
     #[serde(default)]
+    pub cloudkit_change_tag: Option<String>,
+    #[serde(default)]
     pub last_synced_at: Option<i64>,
 }
 
@@ -163,6 +165,7 @@ pub struct SyncSettings {
 #[serde(rename_all = "camelCase")]
 pub enum SyncProvider {
     #[default]
+    Cloudkit,
     Icloud,
     Webdav,
 }
@@ -213,6 +216,11 @@ pub struct SyncPullResult {
     pub path: String,
 }
 
+struct RemoteSnapshot {
+    snapshot: ProfileSnapshot,
+    change_tag: Option<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -230,6 +238,16 @@ impl Default for ProfileOptions {
             include_certificate: true,
             include_app_settings: true,
             include_sync_settings: true,
+        }
+    }
+}
+
+impl ProfileOptions {
+    fn for_sync() -> Self {
+        Self {
+            include_certificate: false,
+            include_sync_settings: false,
+            ..Self::default()
         }
     }
 }
@@ -324,18 +342,15 @@ pub async fn push_sync_profile(
     validate_sync_enabled(&sync_settings)?;
     validate_sync_provider_available(&sync_settings)?;
     validate_sync_settings(&sync_settings)?;
+
+    let snapshot = build_snapshot(&state, ProfileOptions::for_sync(), app_settings, None).await?;
+    let path = sync_location(&state, &sync_settings)?;
+    let change_tag = write_sync_snapshot(&sync_settings, &path, &snapshot).await?;
+    if change_tag.is_some() {
+        sync_settings.cloudkit_change_tag = change_tag;
+    }
     sync_settings.last_synced_at = Some(chrono::Utc::now().timestamp_millis());
     write_sync_config(&state, &sync_settings).await?;
-
-    let snapshot = build_snapshot(
-        &state,
-        ProfileOptions::default(),
-        app_settings,
-        Some(sync_settings.clone()),
-    )
-    .await?;
-    let path = sync_location(&state, &sync_settings)?;
-    write_sync_snapshot(&sync_settings, &path, &snapshot).await?;
     Ok(snapshot_summary(&snapshot))
 }
 
@@ -346,13 +361,17 @@ pub async fn pull_sync_profile(state: State<'_, Arc<AppState>>) -> Result<SyncPu
     validate_sync_provider_available(&sync_settings)?;
     validate_sync_settings(&sync_settings)?;
     let path = sync_location(&state, &sync_settings)?;
-    let snapshot = read_sync_snapshot(&sync_settings, &path).await?;
+    let remote = read_sync_snapshot(&sync_settings, &path).await?;
 
+    let options = ImportOptions {
+        profile_options: ProfileOptions::for_sync(),
+        replace_existing: true,
+    };
+    let import_result = apply_snapshot(&state, &remote.snapshot, &options).await?;
+    if remote.change_tag.is_some() {
+        sync_settings.cloudkit_change_tag = remote.change_tag;
+    }
     sync_settings.last_synced_at = Some(chrono::Utc::now().timestamp_millis());
-    write_sync_config(&state, &sync_settings).await?;
-
-    let options = ImportOptions::default();
-    let import_result = apply_snapshot(&state, &snapshot, &options).await?;
     write_sync_config(&state, &sync_settings).await?;
 
     Ok(SyncPullResult {
@@ -614,6 +633,7 @@ fn sync_config_path(state: &Arc<AppState>) -> Result<PathBuf> {
 
 fn sync_location(state: &Arc<AppState>, settings: &SyncSettings) -> Result<String> {
     match settings.provider {
+        SyncProvider::Cloudkit => Ok(cloudkit_location().to_string()),
         SyncProvider::Icloud => {
             let base = settings
                 .remote_path
@@ -667,9 +687,13 @@ fn validate_sync_enabled(settings: &SyncSettings) -> Result<()> {
 }
 
 fn validate_sync_provider_available(settings: &SyncSettings) -> Result<()> {
-    if settings.provider == SyncProvider::Icloud && !cfg!(target_os = "macos") {
+    if matches!(
+        settings.provider,
+        SyncProvider::Cloudkit | SyncProvider::Icloud
+    ) && !cfg!(target_os = "macos")
+    {
         return Err(PostGateError::InvalidState(
-            "iCloud sync is only available on macOS".into(),
+            "CloudKit and iCloud Drive sync are only available on macOS".into(),
         ));
     }
     Ok(())
@@ -690,6 +714,7 @@ async fn restrict_file_permissions(_path: &Path) -> Result<()> {
 
 async fn sync_snapshot_exists(settings: &SyncSettings, location: &str) -> Result<bool> {
     match settings.provider {
+        SyncProvider::Cloudkit => cloudkit_snapshot_exists().await,
         SyncProvider::Icloud => Ok(Path::new(location).exists()),
         SyncProvider::Webdav => {
             let response = webdav_request(settings, Method::HEAD, location)?
@@ -711,9 +736,13 @@ async fn sync_snapshot_exists(settings: &SyncSettings, location: &str) -> Result
     }
 }
 
-async fn read_sync_snapshot(settings: &SyncSettings, location: &str) -> Result<ProfileSnapshot> {
+async fn read_sync_snapshot(settings: &SyncSettings, location: &str) -> Result<RemoteSnapshot> {
     match settings.provider {
-        SyncProvider::Icloud => read_snapshot(Path::new(location)).await,
+        SyncProvider::Cloudkit => read_cloudkit_snapshot().await,
+        SyncProvider::Icloud => Ok(RemoteSnapshot {
+            snapshot: read_snapshot(Path::new(location)).await?,
+            change_tag: None,
+        }),
         SyncProvider::Webdav => {
             let response = webdav_request(settings, Method::GET, location)?
                 .send()
@@ -730,7 +759,10 @@ async fn read_sync_snapshot(settings: &SyncSettings, location: &str) -> Result<P
             })?;
             let snapshot: ProfileSnapshot = serde_json::from_str(&content)?;
             validate_snapshot(&snapshot)?;
-            Ok(snapshot)
+            Ok(RemoteSnapshot {
+                snapshot,
+                change_tag: None,
+            })
         }
     }
 }
@@ -739,9 +771,17 @@ async fn write_sync_snapshot(
     settings: &SyncSettings,
     location: &str,
     snapshot: &ProfileSnapshot,
-) -> Result<()> {
+) -> Result<Option<String>> {
     match settings.provider {
-        SyncProvider::Icloud => write_snapshot(Path::new(location), snapshot).await,
+        SyncProvider::Cloudkit => {
+            write_cloudkit_snapshot(snapshot, settings.cloudkit_change_tag.clone())
+                .await
+                .map(Some)
+        }
+        SyncProvider::Icloud => {
+            write_snapshot(Path::new(location), snapshot).await?;
+            Ok(None)
+        }
         SyncProvider::Webdav => {
             let content = serde_json::to_string_pretty(snapshot)?;
             ensure_webdav_collections(settings).await?;
@@ -759,8 +799,69 @@ async fn write_sync_snapshot(
                 )));
             }
 
-            Ok(())
+            Ok(None)
         }
+    }
+}
+
+fn cloudkit_location() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        crate::cloudkit_sync::LOCATION
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "cloudkit://unavailable"
+    }
+}
+
+async fn cloudkit_snapshot_exists() -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::cloudkit_sync::exists().await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(PostGateError::InvalidState(
+            "CloudKit sync is only available on macOS".into(),
+        ))
+    }
+}
+
+async fn read_cloudkit_snapshot() -> Result<RemoteSnapshot> {
+    #[cfg(target_os = "macos")]
+    {
+        let remote = crate::cloudkit_sync::pull().await?;
+        let snapshot: ProfileSnapshot = serde_json::from_slice(&remote.payload)?;
+        validate_snapshot(&snapshot)?;
+        Ok(RemoteSnapshot {
+            snapshot,
+            change_tag: Some(remote.change_tag),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(PostGateError::InvalidState(
+            "CloudKit sync is only available on macOS".into(),
+        ))
+    }
+}
+
+async fn write_cloudkit_snapshot(
+    snapshot: &ProfileSnapshot,
+    expected_change_tag: Option<String>,
+) -> Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let payload = serde_json::to_vec_pretty(snapshot)?;
+        crate::cloudkit_sync::push(payload, expected_change_tag).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (snapshot, expected_change_tag);
+        Err(PostGateError::InvalidState(
+            "CloudKit sync is only available on macOS".into(),
+        ))
     }
 }
 
@@ -927,6 +1028,7 @@ mod tests {
                 username: String::new(),
                 password: String::new(),
             }),
+            cloudkit_change_tag: None,
             last_synced_at: None,
         }
     }
@@ -960,6 +1062,39 @@ mod tests {
     #[test]
     fn disabled_sync_cannot_push_or_pull() {
         assert!(validate_sync_enabled(&SyncSettings::default()).is_err());
+    }
+
+    #[test]
+    fn sync_profiles_exclude_credentials_and_certificate_keys() {
+        let options = ProfileOptions::for_sync();
+        assert!(options.include_rules);
+        assert!(options.include_values);
+        assert!(options.include_replay);
+        assert!(options.include_app_settings);
+        assert!(!options.include_certificate);
+        assert!(!options.include_sync_settings);
+    }
+
+    #[test]
+    fn existing_sync_settings_deserialize_without_a_cloudkit_change_tag() {
+        let settings: SyncSettings = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "provider": "icloud",
+            "remotePath": null,
+            "webdav": null,
+            "lastSyncedAt": 123
+        }))
+        .expect("legacy sync settings");
+
+        assert_eq!(settings.provider, SyncProvider::Icloud);
+        assert_eq!(settings.cloudkit_change_tag, None);
+        assert_eq!(settings.last_synced_at, Some(123));
+    }
+
+    #[test]
+    fn cloudkit_is_the_default_sync_provider() {
+        let value = serde_json::to_value(SyncSettings::default()).expect("sync settings");
+        assert_eq!(value["provider"], "cloudkit");
     }
 
     #[test]

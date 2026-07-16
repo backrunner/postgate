@@ -5,6 +5,7 @@ use tauri::Manager;
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeCapabilities {
     pub quic: bool,
+    pub cloudkit_sync: bool,
     pub icloud_sync: bool,
 }
 
@@ -12,7 +13,19 @@ pub struct RuntimeCapabilities {
 pub fn get_runtime_capabilities() -> RuntimeCapabilities {
     RuntimeCapabilities {
         quic: cfg!(feature = "quic"),
+        cloudkit_sync: cloudkit_sync_available(),
         icloud_sync: cfg!(target_os = "macos"),
+    }
+}
+
+fn cloudkit_sync_available() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::cloudkit_sync::is_available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 

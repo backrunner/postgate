@@ -127,6 +127,18 @@ jobs:
             });
             const existing = releases.find((release) => release.tag_name === tag);
 
+            try {
+              await github.rest.git.updateRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+                sha: context.sha,
+                force: true,
+              });
+            } catch (error) {
+              if (error.status !== 422) throw error;
+            }
+
             if (existing && !existing.draft) {
               core.setFailed(`${tag} is already published`);
               return;
@@ -134,17 +146,6 @@ jobs:
 
             let release;
             if (existing) {
-              try {
-                await github.rest.git.updateRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: `tags/${tag}`,
-                  sha: context.sha,
-                  force: true,
-                });
-              } catch (error) {
-                if (error.status !== 422) throw error;
-              }
               release = (await github.rest.repos.updateRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -179,19 +180,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - platform: macos-15
             args: --target aarch64-apple-darwin
             bundles: app,dmg
             target: aarch64-apple-darwin
-          - platform: macos-latest
+            architecture: arm64
+            dmg_architecture: aarch64
+          - platform: macos-15-intel
             args: --target x86_64-apple-darwin
             bundles: app,dmg
             target: x86_64-apple-darwin
+            architecture: x86_64
+            dmg_architecture: x64
 
     runs-on: ${{ matrix.platform }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate native runner architecture
+        shell: bash
+        run: |
+          actual="$(uname -m)"
+          expected="${{ matrix.architecture }}"
+          [[ "$actual" == "$expected" ]] || {
+            echo "Expected a native $expected runner, got $actual" >&2
+            exit 1
+          }
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -284,6 +299,17 @@ jobs:
           signed_team="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
           [[ "$signed_team" == "$APPLE_TEAM_ID" ]] || { echo "Final app signature TeamIdentifier does not match APPLE_TEAM_ID" >&2; exit 1; }
 
+          expected_arch="${{ matrix.architecture }}"
+          for binary in postgate postgate-mcp-stdio; do
+            executable="$app/Contents/MacOS/$binary"
+            test -x "$executable" || { echo "Final app is missing executable: $binary" >&2; exit 1; }
+            actual_arch="$(lipo -archs "$executable")"
+            [[ "$actual_arch" == "$expected_arch" ]] || {
+              echo "$binary must contain only $expected_arch, got: $actual_arch" >&2
+              exit 1
+            }
+          done
+
           entitlements="$RUNNER_TEMP/postgate-final-entitlements.plist"
           rm -f "$entitlements"
           codesign -d --entitlements "$entitlements" --xml "$app" >/dev/null
@@ -323,6 +349,60 @@ jobs:
           kill "$pid"
           wait "$pid" || true
 
+      - name: Notarize and validate downloadable DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          dmg_dir="apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg"
+          shopt -s nullglob
+          dmgs=("$dmg_dir"/*_"${{ matrix.dmg_architecture }}".dmg)
+          [[ "${#dmgs[@]}" -eq 1 ]] || {
+            echo "Expected exactly one ${{ matrix.dmg_architecture }} DMG, found ${#dmgs[@]}" >&2
+            exit 1
+          }
+          dmg="${dmgs[0]}"
+
+          xcrun notarytool submit "$dmg" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 30m
+          xcrun stapler staple "$dmg"
+
+          codesign --verify --verbose=4 "$dmg"
+          hdiutil verify "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          xcrun stapler validate "$dmg"
+
+          mount_point="$RUNNER_TEMP/postgate-dmg-${{ matrix.architecture }}"
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg"
+          trap 'hdiutil detach "$mount_point"' EXIT
+
+          bundled_app="$mount_point/PostGate.app"
+          test -d "$bundled_app" || { echo "DMG is missing PostGate.app" >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=4 "$bundled_app"
+          spctl --assess --type execute --verbose=4 "$bundled_app"
+
+          expected_arch="${{ matrix.architecture }}"
+          for binary in postgate postgate-mcp-stdio; do
+            actual_arch="$(lipo -archs "$bundled_app/Contents/MacOS/$binary")"
+            [[ "$actual_arch" == "$expected_arch" ]] || {
+              echo "DMG $binary must contain only $expected_arch, got: $actual_arch" >&2
+              exit 1
+            }
+          done
+
+          hdiutil detach "$mount_point"
+          trap - EXIT
+
+          gh release upload "v${{ needs.create-release.outputs.version }}" "$dmg" --clobber
+
   publish-release:
     permissions:
       contents: write
@@ -345,6 +425,18 @@ jobs:
               release_id: releaseId,
               per_page: 100,
             });
+            const requiredDmgs = [
+              ['Apple Silicon', /(?:aarch64|arm64).*\.dmg$/i],
+              ['Intel', /(?:x64|x86_64).*\.dmg$/i],
+            ];
+            const missingDmgs = requiredDmgs
+              .filter(([, pattern]) => !assets.some((asset) => pattern.test(asset.name)))
+              .map(([architecture]) => architecture);
+            if (missingDmgs.length > 0) {
+              core.setFailed(`Missing downloadable DMG assets: ${missingDmgs.join(', ')}`);
+              return;
+            }
+
             const updaterAsset = assets.find((asset) => asset.name === 'latest.json');
             if (!updaterAsset) {
               core.setFailed('latest.json was not uploaded');

@@ -16,15 +16,24 @@ Stable only receives production releases. Beta receives prereleases and then fol
 
 The matching public key must remain in `apps/desktop/src-tauri/tauri.conf.json`. Replacing either side without updating the other makes every client reject new updates.
 
-Production macOS signing and notarization additionally use these optional secrets:
+Production macOS signing and notarization additionally require these secrets:
 
 - `APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12` certificate.
 - `APPLE_CERTIFICATE_PASSWORD`: password for the `.p12` file.
 - `APPLE_SIGNING_IDENTITY`: Developer ID Application identity.
-- `APPLE_ID`: Apple account used for notarization.
-- `APPLE_PASSWORD`: app-specific password for that account.
 - `APPLE_TEAM_ID`: Apple Developer team ID.
 - `APPLE_PROVISIONING_PROFILE`: base64-encoded Developer ID provisioning profile for `com.alkinum.postgate`, with the `iCloud.com.alkinum.postgate` CloudKit container enabled.
+
+Notarization accepts either an App Store Connect API key (preferred):
+
+- `APPLE_API_KEY`: App Store Connect key ID.
+- `APPLE_API_ISSUER`: App Store Connect issuer ID.
+- `APPLE_API_KEY_BASE64`: base64-encoded contents of the `AuthKey_<KEY_ID>.p8` private key.
+
+Or Apple ID credentials:
+
+- `APPLE_ID`: Apple account used for notarization.
+- `APPLE_PASSWORD`: app-specific password for that account.
 
 Signed macOS releases require the provisioning profile so the CloudKit entitlements survive code signing. Local builds use the Development environment from `apps/desktop/src-tauri/Entitlements.plist` with `tauri.cloudkit.conf.json`; releases use `tauri.cloudkit.production.conf.json` and `Entitlements.production.plist`. The workflow validates the profile team, exact App ID, expiration, debug policy, container, CloudKit service, and Production environment before embedding it as `Contents/embedded.provisionprofile`. It then verifies the embedded profile and final signed entitlements before publishing. Unsigned builds omit the profile and cannot access CloudKit.
 

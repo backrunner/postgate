@@ -26,7 +26,7 @@ Production macOS signing and notarization additionally require these secrets:
 
 Notarization accepts either an App Store Connect API key (preferred):
 
-- `APPLE_API_KEY`: App Store Connect key ID.
+- `APPLE_API_KEY_ID`: App Store Connect key ID.
 - `APPLE_API_ISSUER`: App Store Connect issuer ID.
 - `APPLE_API_KEY_BASE64`: base64-encoded contents of the `AuthKey_<KEY_ID>.p8` private key.
 
